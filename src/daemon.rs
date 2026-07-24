@@ -1534,9 +1534,17 @@ async fn execute_task(
         recovery_session,
     )
     .await;
-    let outcome = execution.as_deref().unwrap_or("failed");
+    let (outcome, detail) = match &execution {
+        Ok((outcome, detail)) => (*outcome, detail.as_str()),
+        Err(_) => ("failed", ""),
+    };
+    let detail_suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" {detail}")
+    };
     eprintln!(
-        "Factory run finished: run={run_id} outcome={outcome} duration={}",
+        "Factory run finished: run={run_id} outcome={outcome} duration={}{detail_suffix}",
         humantime::format_duration(started.elapsed())
     );
     execution.map(|_| ())
@@ -1670,13 +1678,14 @@ async fn execute_sandbox_task(
                 true,
             )?;
             eprintln!(
-                "Factory run finished: run={run_id} outcome={} duration={}",
+                "Factory run finished: run={run_id} outcome={} duration={} {}",
                 if result.succeeded() {
                     "succeeded"
                 } else {
                     "failed"
                 },
-                humantime::format_duration(started.elapsed())
+                humantime::format_duration(started.elapsed()),
+                format_execution_detail(&result)
             );
             Ok(())
         }
@@ -1763,7 +1772,7 @@ async fn execute_task_inner(
     prompt: String,
     cancellation: CancellationToken,
     recovery_session: Option<String>,
-) -> Result<&'static str> {
+) -> Result<(&'static str, String)> {
     let run_cancellation = cancellation.child_token();
     let execution_deadline = Instant::now() + workflow.timeout;
     let monitor_token = run_cancellation.clone();
@@ -1879,8 +1888,9 @@ async fn execute_task_inner(
                 Termination::Exited if result.status.success() => "succeeded",
                 Termination::Exited => "failed",
             };
+            let detail = format_execution_detail(&result);
             record_execution(&mut ledger, run_id, &result)?;
-            Ok(outcome)
+            Ok((outcome, detail))
         }
         Err(error) => {
             ledger.finish_run_and_task(
@@ -1893,6 +1903,18 @@ async fn execute_task_inner(
             Err(error)
         }
     }
+}
+
+fn format_execution_detail(result: &ExecutionResult) -> String {
+    format!(
+        "status={} termination={:?} thread={} activity_lines={} activity_error={} response_truncated={}",
+        result.status,
+        result.termination,
+        result.thread_id.as_deref().unwrap_or("-"),
+        result.activity_lines,
+        result.activity_error.as_deref().unwrap_or("-"),
+        result.final_response_truncated
+    )
 }
 
 fn report_poll_activity(report: &PollReport, cancellation: &CancellationToken) {
