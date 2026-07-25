@@ -166,6 +166,10 @@ if [ "$1" = "--version" ]; then
   echo "claude-code 1.2.3"
   exit 0
 fi
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"loggedIn":true}'
+  exit 0
+fi
 cat >/dev/null
 echo "authentication required: run claude login" >&2
 exit 17

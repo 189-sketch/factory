@@ -1391,6 +1391,10 @@ pub struct GenericPreset {
     pub executable: &'static str,
     pub run_args: Vec<&'static str>,
     pub health_check_args: Vec<&'static str>,
+    pub authentication_check_args: Vec<&'static str>,
+    pub authentication_help: &'static str,
+    pub authentication_summary: &'static str,
+    pub validate_authentication: fn(&str) -> Result<()>,
 }
 
 fn codex_minimal_preset() -> GenericPreset {
@@ -1405,6 +1409,10 @@ fn codex_minimal_preset() -> GenericPreset {
             "-",
         ],
         health_check_args: vec!["--version"],
+        authentication_check_args: vec!["login", "status"],
+        authentication_help: "run codex login and verify codex login status",
+        authentication_summary: "Logged in using ChatGPT",
+        validate_authentication: validate_codex_authentication,
     }
 }
 
@@ -1413,7 +1421,27 @@ fn claude_code_preset() -> GenericPreset {
         executable: "claude",
         run_args: vec!["--print", "--permission-mode", "bypassPermissions"],
         health_check_args: vec!["--version"],
+        authentication_check_args: vec!["auth", "status", "--json"],
+        authentication_help: "run claude auth login and verify claude auth status",
+        authentication_summary: "Authenticated with Claude Code",
+        validate_authentication: validate_claude_authentication,
     }
+}
+
+fn validate_codex_authentication(output: &str) -> Result<()> {
+    if !output.to_ascii_lowercase().contains("chatgpt") {
+        bail!("Codex must use ChatGPT subscription authentication, not an API key");
+    }
+    Ok(())
+}
+
+fn validate_claude_authentication(output: &str) -> Result<()> {
+    let status: Value = serde_json::from_str(output)
+        .context("Claude Code returned invalid authentication status")?;
+    if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+        bail!("Claude Code is not logged in");
+    }
+    Ok(())
 }
 
 /// A generic subprocess runtime: spawn the configured executable, pipe the
@@ -1431,17 +1459,16 @@ impl GenericRuntime {
     pub fn new(preset: GenericPreset) -> Self {
         Self { preset }
     }
-}
 
-#[async_trait]
-impl AgentRuntime for GenericRuntime {
-    async fn health_check_with_cancellation(
+    async fn check_command(
         &self,
-        cancellation: CancellationToken,
-    ) -> Result<RuntimeHealth> {
+        args: &[&str],
+        check: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String> {
         let mut command = Command::new(self.preset.executable);
         command
-            .args(&self.preset.health_check_args)
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1454,11 +1481,11 @@ impl AgentRuntime for GenericRuntime {
         let stdout = child
             .stdout
             .take()
-            .context("health check did not expose stdout")?;
+            .with_context(|| format!("{check} check did not expose stdout"))?;
         let stderr = child
             .stderr
             .take()
-            .context("health check did not expose stderr")?;
+            .with_context(|| format!("{check} check did not expose stderr"))?;
         let stdout_task = tokio::spawn(read_pipe_bounded(stdout, MAX_HEALTH_OUTPUT_BYTES));
         let stderr_task = tokio::spawn(read_pipe_bounded(stderr, MAX_HEALTH_OUTPUT_BYTES));
 
@@ -1476,13 +1503,13 @@ impl AgentRuntime for GenericRuntime {
                 join_reader(stdout_task, "health-check stdout").await?;
                 join_reader(stderr_task, "health-check stderr").await?;
                 bail!(
-                    "{} health check timed out after {}",
+                    "{} {check} check timed out after {}",
                     self.preset.executable,
                     humantime::format_duration(DEFAULT_HEALTH_TIMEOUT)
                 );
             }
             status = wait_for_clean_exit(&mut child, process_id, process_id) => {
-                status.context("failed while waiting for health check")?
+                status.with_context(|| format!("failed while waiting for {check} check"))?
             }
         };
         let stdout =
@@ -1494,23 +1521,60 @@ impl AgentRuntime for GenericRuntime {
                 .trim()
                 .to_owned();
         if !status.success() {
-            let detail = if stderr.is_empty() {
-                stdout.clone()
-            } else {
-                stderr.clone()
-            };
+            let detail = if stderr.is_empty() { &stdout } else { &stderr };
             bail!(
-                "{} health check exited with {status}: {detail}",
+                "{} {check} check exited with {status}: {detail}",
                 self.preset.executable
             );
         }
         let detail = if stdout.is_empty() { stderr } else { stdout };
         if detail.is_empty() {
-            bail!("{} health check returned no output", self.preset.executable);
+            bail!(
+                "{} {check} check returned no output",
+                self.preset.executable
+            );
         }
+        Ok(detail)
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for GenericRuntime {
+    async fn health_check_with_cancellation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<RuntimeHealth> {
+        let version = self
+            .check_command(&self.preset.health_check_args, "version", &cancellation)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} version check failed; install it or make it executable",
+                    self.preset.executable
+                )
+            })?;
+        let authentication = self
+            .check_command(
+                &self.preset.authentication_check_args,
+                "authentication",
+                &cancellation,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "{} authentication check failed; {}",
+                    self.preset.executable, self.preset.authentication_help
+                )
+            })?;
+        (self.preset.validate_authentication)(&authentication).with_context(|| {
+            format!(
+                "{} authentication check failed; {}",
+                self.preset.executable, self.preset.authentication_help
+            )
+        })?;
         Ok(RuntimeHealth {
-            version: detail,
-            authentication: "n/a".to_owned(),
+            version,
+            authentication: self.preset.authentication_summary.to_owned(),
         })
     }
 
@@ -1723,5 +1787,14 @@ mod observation_tests {
             safe_activity_summary(&serde_json::json!({ "type": "item.completed" })),
             None
         );
+    }
+
+    #[test]
+    fn generic_authentication_validators_reject_unusable_credentials() {
+        assert!(validate_codex_authentication("Logged in using ChatGPT").is_ok());
+        assert!(validate_codex_authentication("Logged in with an API key").is_err());
+        assert!(validate_claude_authentication(r#"{"loggedIn":true}"#).is_ok());
+        assert!(validate_claude_authentication(r#"{"loggedIn":false}"#).is_err());
+        assert!(validate_claude_authentication("not json").is_err());
     }
 }

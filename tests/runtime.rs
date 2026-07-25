@@ -42,6 +42,15 @@ done
     path
 }
 
+fn leak_path(path: PathBuf) -> &'static str {
+    Box::leak(
+        path.into_os_string()
+            .into_string()
+            .unwrap()
+            .into_boxed_str(),
+    )
+}
+
 async fn assert_process_gone(pid: i32) {
     for _ in 0..200 {
         if matches!(
@@ -552,17 +561,15 @@ async fn generic_runtime_persists_the_anchor_before_agent_spawn() {
         temp.path(),
         &format!("touch \"{}\"", started_path.display()),
     );
-    let executable = Box::leak(
-        executable
-            .into_os_string()
-            .into_string()
-            .unwrap()
-            .into_boxed_str(),
-    );
+    let executable = leak_path(executable);
     let runtime = GenericRuntime::new(GenericPreset {
         executable,
         run_args: Vec::new(),
         health_check_args: vec!["--version"],
+        authentication_check_args: vec!["login", "status"],
+        authentication_help: "log in",
+        authentication_summary: "authenticated",
+        validate_authentication: |_| Ok(()),
     });
     let captured_anchor = Arc::new(Mutex::new(None));
     let captured_for_callback = Arc::clone(&captured_anchor);
@@ -588,6 +595,95 @@ async fn generic_runtime_persists_the_anchor_before_agent_spawn() {
     assert!(!started_path.exists());
     let anchor_pid = captured_anchor.lock().unwrap().unwrap();
     assert_process_gone(i32::try_from(anchor_pid).unwrap()).await;
+}
+
+#[tokio::test]
+async fn generic_health_check_requires_authentication_and_returns_a_safe_summary() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("agent");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "agent 1.2.3"
+  exit 0
+fi
+if [ "$1" = "auth" ]; then
+  echo '{"loggedIn":true,"email":"private@example.com"}'
+  exit 0
+fi
+exit 2
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let preset = GenericPreset {
+        executable: leak_path(executable),
+        run_args: Vec::new(),
+        health_check_args: vec!["--version"],
+        authentication_check_args: vec!["auth", "status"],
+        authentication_help: "run agent auth login",
+        authentication_summary: "Authenticated",
+        validate_authentication: |output| {
+            let status: serde_json::Value = serde_json::from_str(output)?;
+            anyhow::ensure!(
+                status.get("loggedIn").and_then(serde_json::Value::as_bool) == Some(true),
+                "not logged in"
+            );
+            Ok(())
+        },
+    };
+
+    let health = GenericRuntime::new(preset)
+        .health_check_with_cancellation(CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(health.version, "agent 1.2.3");
+    assert_eq!(health.authentication, "Authenticated");
+    assert!(!health.authentication.contains("private@example.com"));
+}
+
+#[tokio::test]
+async fn generic_health_check_reports_an_actionable_authentication_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("agent");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "agent 1.2.3"
+  exit 0
+fi
+echo "not logged in" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let preset = GenericPreset {
+        executable: leak_path(executable),
+        run_args: Vec::new(),
+        health_check_args: vec!["--version"],
+        authentication_check_args: vec!["auth", "status"],
+        authentication_help: "run agent auth login",
+        authentication_summary: "Authenticated",
+        validate_authentication: |_| Ok(()),
+    };
+
+    let error = GenericRuntime::new(preset)
+        .health_check_with_cancellation(CancellationToken::new())
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+
+    assert!(message.contains("authentication check failed"));
+    assert!(message.contains("run agent auth login"));
+    assert!(message.contains("not logged in"));
 }
 
 #[tokio::test]
