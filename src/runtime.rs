@@ -1584,7 +1584,7 @@ impl AgentRuntime for GenericRuntime {
         working_directory: &Path,
         run_timeout: Duration,
         cancellation: CancellationToken,
-        _resume_session: Option<&str>,
+        resume_session: Option<&str>,
         observations: watch::Sender<RuntimeObservation>,
         before_spawn: Option<BeforeSpawn<'_>>,
     ) -> Result<ExecutionResult> {
@@ -1592,6 +1592,12 @@ impl AgentRuntime for GenericRuntime {
         let deadline = TokioInstant::now() + run_timeout;
         if let Some(termination) = preparation_termination(&cancellation, deadline) {
             return Ok(preparation_result(termination, started));
+        }
+        if resume_session.is_some() {
+            bail!(
+                "{} runtime does not support session resume",
+                self.preset.executable
+            );
         }
         let mut command = Command::new(self.preset.executable);
         command

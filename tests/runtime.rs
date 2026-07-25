@@ -598,6 +598,60 @@ async fn generic_runtime_persists_the_anchor_before_agent_spawn() {
 }
 
 #[tokio::test]
+async fn generic_runtime_preserves_cancellation_and_rejects_session_resume_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let started_path = temp.path().join("agent-started");
+    let executable = fake_codex(
+        temp.path(),
+        &format!("touch \"{}\"", started_path.display()),
+    );
+    let runtime = GenericRuntime::new(GenericPreset {
+        executable: leak_path(executable),
+        run_args: Vec::new(),
+        health_check_args: vec!["--version"],
+        authentication_check_args: vec!["login", "status"],
+        authentication_help: "log in",
+        authentication_summary: "authenticated",
+        validate_authentication: |_| Ok(()),
+    });
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let (cancelled_observations, _receiver) = observation_channel();
+    let result = runtime
+        .run(
+            "Do not run this prompt.",
+            temp.path(),
+            Duration::from_secs(5),
+            cancellation,
+            Some("unsupported-session"),
+            cancelled_observations,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.termination, Termination::Cancelled);
+    assert!(!started_path.exists());
+
+    let (observations, _receiver) = observation_channel();
+    let error = runtime
+        .run(
+            "Do not run this prompt.",
+            temp.path(),
+            Duration::from_secs(5),
+            CancellationToken::new(),
+            Some("unsupported-session"),
+            observations,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("does not support session resume"));
+    assert!(!started_path.exists());
+}
+
+#[tokio::test]
 async fn generic_health_check_requires_authentication_and_returns_a_safe_summary() {
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("agent");
