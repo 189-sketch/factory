@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use factory::runtime::{CodexRuntime, RuntimeCancelled, Termination, observation_channel};
+use factory::runtime::{
+    AgentRuntime, CodexRuntime, GenericPreset, GenericRuntime, RuntimeCancelled, Termination,
+    observation_channel,
+};
 use tokio_util::sync::CancellationToken;
 
 fn fake_codex(directory: &Path, execution: &str) -> PathBuf {
@@ -530,6 +533,53 @@ async fn failed_anchor_persistence_prevents_spawn_and_reaps_the_group() {
                 *captured_for_callback.lock().unwrap() = observation.process_id;
                 anyhow::bail!("simulated durable persistence failure")
             },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(format!("{error:#}").contains("simulated durable persistence failure"));
+    assert!(!started_path.exists());
+    let anchor_pid = captured_anchor.lock().unwrap().unwrap();
+    assert_process_gone(i32::try_from(anchor_pid).unwrap()).await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn generic_runtime_persists_the_anchor_before_agent_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let started_path = temp.path().join("agent-started");
+    let executable = fake_codex(
+        temp.path(),
+        &format!("touch \"{}\"", started_path.display()),
+    );
+    let executable = Box::leak(
+        executable
+            .into_os_string()
+            .into_string()
+            .unwrap()
+            .into_boxed_str(),
+    );
+    let runtime = GenericRuntime::new(GenericPreset {
+        executable,
+        run_args: Vec::new(),
+        health_check_args: vec!["--version"],
+    });
+    let captured_anchor = Arc::new(Mutex::new(None));
+    let captured_for_callback = Arc::clone(&captured_anchor);
+    let (observations, _receiver) = observation_channel();
+
+    let error = runtime
+        .run(
+            "Persist first.",
+            temp.path(),
+            Duration::from_secs(5),
+            CancellationToken::new(),
+            None,
+            observations,
+            Some(Box::new(move |observation| {
+                *captured_for_callback.lock().unwrap() = observation.process_id;
+                anyhow::bail!("simulated durable persistence failure")
+            })),
         )
         .await
         .unwrap_err();

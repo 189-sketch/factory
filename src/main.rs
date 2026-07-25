@@ -958,6 +958,13 @@ async fn run_workflow(
     if !result.final_response.is_empty() {
         write_final_response(&result.final_response);
     }
+    if workflow.runtime != "codex" && !result.succeeded() && !result.stderr_tail.is_empty() {
+        let mut stderr = result.stderr_tail.as_bytes().to_vec();
+        if !result.stderr_tail.ends_with('\n') {
+            stderr.push(b'\n');
+        }
+        write_stderr_best_effort(&stderr);
+    }
     write_stderr_best_effort(
         format!(
             "Run finished: status={} termination={:?} duration={} thread={} activity_lines={} activity_error={} response_truncated={}\n",

@@ -139,6 +139,62 @@ printf 'Read-only workflow complete.' > "$output"
 }
 
 #[test]
+fn failed_generic_workflow_run_prints_stderr_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let repository = temp.path().join("repository");
+    let workflows = repository.join(".factory/workflows");
+    let data_home = temp.path().join("factory-data");
+    let binaries = temp.path().join("bin");
+    fs::create_dir_all(&workflows).unwrap();
+    fs::create_dir(&binaries).unwrap();
+    initialize_repository(&repository, &data_home);
+    fs::write(
+        workflows.join("triage.md"),
+        "Inspect without changing files.\n",
+    )
+    .unwrap();
+    let config_path = repository.join(".factory/config.toml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("runtime = \"codex\"", "runtime = \"claude-code\"");
+    fs::write(&config_path, config).unwrap();
+    let executable = binaries.join("claude");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "claude-code 1.2.3"
+  exit 0
+fi
+cat >/dev/null
+echo "authentication required: run claude login" >&2
+exit 17
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).unwrap();
+    let path = format!(
+        "{}:{}",
+        binaries.display(),
+        env::var("PATH").unwrap_or_default()
+    );
+
+    Command::cargo_bin("factory")
+        .unwrap()
+        .args(["workflow", "run", "triage"])
+        .current_dir(&repository)
+        .env("FACTORY_DATA_HOME", &data_home)
+        .env("PATH", path)
+        .assert()
+        .code(17)
+        .stderr(predicate::str::contains(
+            "authentication required: run claude login",
+        ));
+}
+
+#[test]
 fn run_executes_a_schedule_triggered_workflow_once() {
     let temp = tempfile::tempdir().unwrap();
     let repository = temp.path().join("repository");

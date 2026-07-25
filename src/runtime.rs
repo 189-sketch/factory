@@ -1396,7 +1396,14 @@ pub struct GenericPreset {
 fn codex_minimal_preset() -> GenericPreset {
     GenericPreset {
         executable: "codex",
-        run_args: vec!["exec", "--sandbox", "danger-full-access", "--color", "never", "-"],
+        run_args: vec![
+            "exec",
+            "--sandbox",
+            "danger-full-access",
+            "--color",
+            "never",
+            "-",
+        ],
         health_check_args: vec!["--version"],
     }
 }
@@ -1514,8 +1521,8 @@ impl AgentRuntime for GenericRuntime {
         run_timeout: Duration,
         cancellation: CancellationToken,
         _resume_session: Option<&str>,
-        _observations: watch::Sender<RuntimeObservation>,
-        _before_spawn: Option<BeforeSpawn<'_>>,
+        observations: watch::Sender<RuntimeObservation>,
+        before_spawn: Option<BeforeSpawn<'_>>,
     ) -> Result<ExecutionResult> {
         let started = Instant::now();
         let deadline = TokioInstant::now() + run_timeout;
@@ -1530,15 +1537,52 @@ impl AgentRuntime for GenericRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        configure_process_group(&mut command);
-        let mut child = spawn_with_retry(&mut command)
-            .await
-            .with_context(|| format!("failed to start {} CLI", self.preset.executable))?;
+        let mut process_group = RunProcessGroup::start().await?;
+        process_group.configure(&mut command)?;
+        if let Some(termination) = preparation_termination(&cancellation, deadline) {
+            process_group.stop().await?;
+            return Ok(preparation_result(termination, started));
+        }
+        let anchor_observation = RuntimeObservation {
+            process_id: process_group.process_id,
+            process_identity: process_group.process_identity.clone(),
+            sequence: 1,
+            ..RuntimeObservation::default()
+        };
+        if let Some(before_spawn) = before_spawn
+            && let Err(error) = before_spawn(&anchor_observation)
+        {
+            process_group.stop().await.context(
+                "failed to stop generic runtime process group after persistence failure",
+            )?;
+            return Err(error);
+        }
+        observations.send_replace(anchor_observation);
+        if let Some(termination) = preparation_termination(&cancellation, deadline) {
+            process_group.stop().await?;
+            return Ok(preparation_result(termination, started));
+        }
+
+        let spawned = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Termination::Cancelled),
+            () = sleep_until(deadline) => Err(Termination::TimedOut),
+            result = spawn_with_retry(&mut command) => Ok(result),
+        };
+        let mut child = match spawned {
+            Err(termination) => {
+                process_group.stop().await?;
+                return Ok(preparation_result(termination, started));
+            }
+            Ok(Ok(child)) => child,
+            Ok(Err(error)) => {
+                let _ = process_group.stop().await;
+                return Err(error)
+                    .with_context(|| format!("failed to start {} CLI", self.preset.executable));
+            }
+        };
         let process_id = child.id();
-        let mut stdin = child
-            .stdin
-            .take()
-            .context("process did not expose stdin")?;
+        let mut stdin = child.stdin.take().context("process did not expose stdin")?;
         let stdout = child
             .stdout
             .take()
@@ -1568,7 +1612,13 @@ impl AgentRuntime for GenericRuntime {
                 if let Err(error) = delivery
                     && !is_broken_pipe(&error)
                 {
-                    let _ = terminate(&mut child, process_id, process_id).await;
+                    let _ = terminate(
+                        &mut child,
+                        process_id,
+                        process_group.process_id.or(process_id),
+                    )
+                    .await;
+                    let _ = process_group.stop().await;
                     let _ = join_reader(stdout_task, "stdout").await;
                     let _ = join_reader(stderr_task, "stderr").await;
                     return Err(error);
@@ -1578,21 +1628,48 @@ impl AgentRuntime for GenericRuntime {
         };
 
         let (status, termination) = if let Some(termination) = early_termination {
-            (terminate(&mut child, process_id, process_id).await?, termination)
+            (
+                terminate(
+                    &mut child,
+                    process_id,
+                    process_group.process_id.or(process_id),
+                )
+                .await?,
+                termination,
+            )
         } else {
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
-                    (terminate(&mut child, process_id, process_id).await?, Termination::Cancelled)
+                    (
+                        terminate(
+                            &mut child,
+                            process_id,
+                            process_group.process_id.or(process_id),
+                        ).await?,
+                        Termination::Cancelled,
+                    )
                 }
                 () = sleep_until(deadline) => {
-                    (terminate(&mut child, process_id, process_id).await?, Termination::TimedOut)
+                    (
+                        terminate(
+                            &mut child,
+                            process_id,
+                            process_group.process_id.or(process_id),
+                        ).await?,
+                        Termination::TimedOut,
+                    )
                 }
-                status = wait_for_clean_exit(&mut child, process_id, process_id) => {
+                status = wait_for_clean_exit(
+                    &mut child,
+                    process_id,
+                    process_group.process_id.or(process_id),
+                ) => {
                     (status.context("failed while waiting for process")?, Termination::Exited)
                 }
             }
         };
+        process_group.reap().await?;
 
         let stdout_bytes = join_reader(stdout_task, "stdout").await?;
         let stderr_bytes = join_reader(stderr_task, "stderr").await?;
