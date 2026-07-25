@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::hash::encode_lower;
+use crate::runtime::build_runtime;
 use crate::storage::DATABASE_NAME;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,8 +261,15 @@ impl Config {
         let execution_mode = raw.worker.sandbox;
         let source = resolve_source(raw.source)?;
         let default_runtime = raw.worker.runtime.trim().to_owned();
-        if default_runtime != "codex" {
-            bail!("worker.runtime must be \"codex\" in this build");
+        if build_runtime(&default_runtime, false).is_err() {
+            bail!(
+                "worker.runtime {default_runtime:?} is not a known runtime; supported: codex, codex-minimal, claude-code"
+            );
+        }
+        if execution_mode == ExecutionMode::DockerSandbox && default_runtime != "codex" {
+            bail!(
+                "worker.runtime must be \"codex\" when worker.sandbox is \"docker_sandbox\" in this build"
+            );
         }
 
         let poll_every = parse_positive_duration("poll_every", &raw.poll_every)?;

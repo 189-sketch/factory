@@ -125,7 +125,9 @@ printf 'Read-only workflow complete.' > "$output"
             r#"{"type":"thread.started","thread_id":"manual-thread"}"#,
         ))
         .stdout(predicate::str::contains("Read-only workflow complete."))
-        .stderr(predicate::str::contains("Codex ready: codex-cli 1.2.3"))
+        .stderr(predicate::str::contains(
+            "Runtime \"codex\" ready: codex-cli 1.2.3",
+        ))
         .stderr(predicate::str::contains("thread=manual-thread"));
 
     let prompt = fs::read_to_string(prompt_capture).unwrap();
