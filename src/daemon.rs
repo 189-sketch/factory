@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,8 +19,8 @@ use crate::config::{Config, SourceConfig};
 use crate::github::{GitHubClient, LabelTicketContext, ProjectTicketContext, TicketContext};
 use crate::hash::sha256_hex_prefix;
 use crate::runtime::{
-    CodexRuntime, ExecutionResult, RuntimeCancelled, RuntimeObservation, Termination,
-    observation_channel,
+    AgentRuntime, ExecutionResult, RuntimeCancelled, RuntimeObservation, Termination,
+    build_runtime, observation_channel,
 };
 use crate::sandbox::{SandboxRunFailure, SandboxWorker};
 use crate::source::{PollReport, SourceClient, SourceTicketContext};
@@ -84,7 +85,7 @@ pub struct FactoryDaemon {
     ledger_path: PathBuf,
     github: GitHubClient,
     source: SourceClient,
-    codex: CodexRuntime,
+    runtime: Arc<dyn AgentRuntime>,
     sandbox: Option<SandboxWorker>,
 }
 
@@ -95,12 +96,14 @@ pub struct OneShotReport {
 
 impl FactoryDaemon {
     pub fn new(config: Config, catalog: WorkflowCatalog, ledger_path: impl Into<PathBuf>) -> Self {
+        let runtime = build_runtime(&config.default_runtime, false)
+            .expect("config.default_runtime was already validated at config-load time");
         Self::with_clients(
             config,
             catalog,
             ledger_path,
             GitHubClient::default(),
-            CodexRuntime::default().with_activity_streaming(false),
+            Arc::from(runtime),
         )
     }
 
@@ -109,7 +112,7 @@ impl FactoryDaemon {
         catalog: WorkflowCatalog,
         ledger_path: impl Into<PathBuf>,
         github: GitHubClient,
-        codex: CodexRuntime,
+        runtime: Arc<dyn AgentRuntime>,
     ) -> Self {
         let sandbox = config.worker.clone().map(|worker| {
             SandboxWorker::new(worker, sandbox_instance_id(&config.data_directory))
@@ -121,7 +124,7 @@ impl FactoryDaemon {
             ledger_path: ledger_path.into(),
             github,
             source: SourceClient,
-            codex: codex.with_activity_streaming(false),
+            runtime,
             sandbox,
         }
     }
@@ -244,7 +247,7 @@ impl FactoryDaemon {
                     self.config.max_concurrent_runs,
                     self.config.max_concurrent_runs_per_repository,
                     &self.ledger_path,
-                    &self.codex,
+                    &self.runtime,
                     self.sandbox.as_ref(),
                     &self.github,
                     &self.source,
@@ -421,7 +424,7 @@ impl FactoryDaemon {
             return Ok(());
         }
         match self
-            .codex
+            .runtime
             .health_check_with_cancellation(cancellation.clone())
             .await
         {
@@ -840,7 +843,7 @@ fn dispatch_available(
     global_limit: usize,
     repository_limit: usize,
     ledger_path: &Path,
-    codex: &CodexRuntime,
+    runtime: &Arc<dyn AgentRuntime>,
     sandbox: Option<&SandboxWorker>,
     github: &GitHubClient,
     source_client: &SourceClient,
@@ -936,21 +939,6 @@ fn dispatch_available(
         } else {
             None
         };
-        if workflow.runtime != "codex" {
-            let error = format!(
-                "unsupported runtime {:?}; Factory v1 supports codex",
-                workflow.runtime
-            );
-            worker_ledger.finish_run_and_task(
-                run_id,
-                RunOutcome::Failed,
-                None,
-                Some(&error),
-                None,
-            )?;
-            eprintln!("Factory rejected claimed task {}: {error}", task.id);
-            continue;
-        }
         let source = match (task.kind.as_str(), task.source_item.as_deref()) {
             ("ticket", Some(issue)) => format!("issue={issue}"),
             (kind, Some(source)) => format!("{kind}={source}"),
@@ -961,7 +949,7 @@ fn dispatch_available(
             task.id, task.repository, task.workflow
         );
         *active.entry(repository.clone()).or_default() += 1;
-        let codex = codex.clone();
+        let runtime = Arc::clone(runtime);
         let sandbox = sandbox.cloned();
         let github = github.clone();
         let source_client = source_client.clone();
@@ -1132,7 +1120,7 @@ fn dispatch_available(
                     worker_ledger,
                     &execution_target,
                     &workflow,
-                    &codex,
+                    &runtime,
                     run_id,
                     prompt,
                     cancellation,
@@ -1516,7 +1504,7 @@ async fn execute_task(
     ledger: Ledger,
     repository: &RepositoryTarget,
     workflow: &WorkflowTarget,
-    codex: &CodexRuntime,
+    runtime: &Arc<dyn AgentRuntime>,
     run_id: i64,
     prompt: String,
     cancellation: CancellationToken,
@@ -1527,7 +1515,7 @@ async fn execute_task(
         ledger,
         repository,
         workflow,
-        codex,
+        runtime,
         run_id,
         prompt,
         cancellation,
@@ -1658,7 +1646,7 @@ async fn execute_sandbox_task(
                 )?;
                 return Err(error.context(detail));
             }
-            record_execution(&mut ledger, run_id, &result)?;
+            record_execution(&mut ledger, run_id, "codex", &result)?;
             ledger.finish_run_sandbox(
                 run_id,
                 "removing",
@@ -1767,7 +1755,7 @@ async fn execute_task_inner(
     mut ledger: Ledger,
     repository: &RepositoryTarget,
     workflow: &WorkflowTarget,
-    codex: &CodexRuntime,
+    runtime: &Arc<dyn AgentRuntime>,
     run_id: i64,
     prompt: String,
     cancellation: CancellationToken,
@@ -1785,15 +1773,17 @@ async fn execute_task_inner(
         observation_receiver,
     );
     let execution = if let Some(session_id) = recovery_session.as_deref() {
-        let resumed = codex
-            .run_with_session_supervised(
+        let resumed = runtime
+            .run(
                 &prompt,
                 &repository.path,
                 workflow.timeout,
                 run_cancellation.clone(),
                 Some(session_id),
                 observations.clone(),
-                |observation| persist_run_anchor(&ledger_path, run_id, observation),
+                Some(Box::new(|observation| {
+                    persist_run_anchor(&ledger_path, run_id, observation)
+                })),
             )
             .await;
         let needs_fallback = match &resumed {
@@ -1839,15 +1829,17 @@ async fn execute_task_inner(
                     fallback_receiver,
                 );
                 let remaining = execution_deadline.saturating_duration_since(Instant::now());
-                codex
-                    .run_with_session_supervised(
+                runtime
+                    .run(
                         &fallback_prompt,
                         &repository.path,
                         remaining,
                         run_cancellation.clone(),
                         None,
                         observations.clone(),
-                        |observation| persist_run_anchor(&ledger_path, run_id, observation),
+                        Some(Box::new(|observation| {
+                            persist_run_anchor(&ledger_path, run_id, observation)
+                        })),
                     )
                     .await
             }
@@ -1855,15 +1847,17 @@ async fn execute_task_inner(
             resumed
         }
     } else {
-        codex
-            .run_with_session_supervised(
+        runtime
+            .run(
                 &prompt,
                 &repository.path,
                 workflow.timeout,
                 run_cancellation.clone(),
                 None,
                 observations.clone(),
-                |observation| persist_run_anchor(&ledger_path, run_id, observation),
+                Some(Box::new(|observation| {
+                    persist_run_anchor(&ledger_path, run_id, observation)
+                })),
             )
             .await
     };
@@ -1889,7 +1883,7 @@ async fn execute_task_inner(
                 Termination::Exited => "failed",
             };
             let detail = format_execution_detail(&result);
-            record_execution(&mut ledger, run_id, &result)?;
+            record_execution(&mut ledger, run_id, &workflow.runtime, &result)?;
             Ok((outcome, detail))
         }
         Err(error) => {
@@ -2366,20 +2360,20 @@ fn next_occurrence(
     Ok(candidate)
 }
 
-fn record_execution(ledger: &mut Ledger, run_id: i64, result: &ExecutionResult) -> Result<()> {
+fn execution_outcome(runtime: &str, result: &ExecutionResult) -> (RunOutcome, Option<String>) {
     let (outcome, error) = match result.termination {
         Termination::Cancelled => (
             RunOutcome::Cancelled,
-            Some("Codex execution cancelled".to_owned()),
+            Some(format!("{runtime} execution cancelled")),
         ),
         Termination::TimedOut => (
             RunOutcome::Failed,
-            Some("Codex execution timed out".to_owned()),
+            Some(format!("{runtime} execution timed out")),
         ),
         Termination::Exited if result.status.success() && result.activity_error.is_some() => (
             RunOutcome::Failed,
             Some(format!(
-                "Codex emitted malformed JSON activity: {}",
+                "{runtime} emitted malformed JSON activity: {}",
                 result.activity_error.as_deref().unwrap_or("unknown error")
             )),
         ),
@@ -2387,11 +2381,21 @@ fn record_execution(ledger: &mut Ledger, run_id: i64, result: &ExecutionResult) 
         Termination::Exited => (
             RunOutcome::Failed,
             Some(format!(
-                "Codex exited with status {}; stderr: {}",
-                result.status, result.stderr_tail
+                "{runtime} exited with status {}; stderr: {}",
+                result.status, result.stderr_tail,
             )),
         ),
     };
+    (outcome, error)
+}
+
+fn record_execution(
+    ledger: &mut Ledger,
+    run_id: i64,
+    runtime: &str,
+    result: &ExecutionResult,
+) -> Result<()> {
+    let (outcome, error) = execution_outcome(runtime, result);
     let finish = if result.termination == Termination::TimedOut {
         Ledger::finish_run_and_task_terminal
     } else {
@@ -2419,6 +2423,9 @@ fn decrement_active(active: &mut HashMap<String, usize>, repository: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+
     use super::*;
 
     #[test]
@@ -2434,6 +2441,36 @@ mod tests {
             None
         );
         assert_eq!(latest_worker_progress(None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_execution_errors_name_the_configured_runtime() {
+        let mut result = ExecutionResult {
+            status: std::process::ExitStatus::from_raw(17 << 8),
+            termination: Termination::Exited,
+            final_response: String::new(),
+            final_response_truncated: false,
+            thread_id: None,
+            duration: Duration::ZERO,
+            activity_lines: 0,
+            activity_error: None,
+            stderr_tail: "login failed".to_owned(),
+        };
+
+        let (_, error) = execution_outcome("claude-code", &result);
+        assert_eq!(
+            error.as_deref(),
+            Some("claude-code exited with status exit status: 17; stderr: login failed")
+        );
+
+        result.termination = Termination::TimedOut;
+        let (_, error) = execution_outcome("claude-code", &result);
+        assert_eq!(error.as_deref(), Some("claude-code execution timed out"));
+
+        result.termination = Termination::Cancelled;
+        let (_, error) = execution_outcome("codex-minimal", &result);
+        assert_eq!(error.as_deref(), Some("codex-minimal execution cancelled"));
     }
 
     fn utc(value: &str) -> DateTime<Utc> {

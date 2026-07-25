@@ -17,7 +17,8 @@ use factory::inspection::{
     RunInspection, RunView, TaskView, print_inspection, print_runs, print_tasks,
 };
 use factory::runtime::{
-    CodexRuntime, RuntimeCancelled, Termination, write_stderr_best_effort, write_stdout_best_effort,
+    RuntimeCancelled, Termination, build_runtime, observation_channel, write_stderr_best_effort,
+    write_stdout_best_effort,
 };
 use factory::sandbox::SandboxWorker;
 use factory::source::{PollReport, SourceClient};
@@ -288,7 +289,7 @@ async fn run_cli() -> Result<u8> {
                     .validate(&cancellation)
                     .await?;
             } else {
-                CodexRuntime::default()
+                build_runtime(&config.default_runtime, true)?
                     .health_check_with_cancellation(cancellation)
                     .await?;
             }
@@ -909,14 +910,6 @@ async fn run_workflow(
             );
         }
     }
-    if workflow.runtime != "codex" {
-        bail!(
-            "workflow {:?} resolves to unsupported runtime {:?}; Factory v1 supports codex",
-            workflow.id,
-            workflow.runtime
-        );
-    }
-
     let cancellation = CancellationToken::new();
     let signal_token = cancellation.clone();
     let signal_task = tokio::spawn(async move {
@@ -924,7 +917,7 @@ async fn run_workflow(
             signal_token.cancel();
         }
     });
-    let runtime = CodexRuntime::default();
+    let runtime = build_runtime(&workflow.runtime, true)?;
     let health = match runtime
         .health_check_with_cancellation(cancellation.clone())
         .await
@@ -938,7 +931,8 @@ async fn run_workflow(
     };
     write_stderr_best_effort(
         format!(
-            "Codex ready: {} ({})\nRunning workflow {:?} in {} with timeout {}\n",
+            "Runtime {:?} ready: {} ({})\nRunning workflow {:?} in {} with timeout {}\n",
+            workflow.runtime,
             health.version,
             health.authentication,
             workflow.id,
@@ -947,18 +941,29 @@ async fn run_workflow(
         )
         .as_bytes(),
     );
+    let (observations, _receiver) = observation_channel();
     let result = runtime
         .run(
             &workflow.prompt,
             &workflow.working_directory,
             workflow.timeout,
             cancellation,
+            None,
+            observations,
+            None,
         )
         .await?;
     signal_task.abort();
 
     if !result.final_response.is_empty() {
         write_final_response(&result.final_response);
+    }
+    if workflow.runtime != "codex" && !result.succeeded() && !result.stderr_tail.is_empty() {
+        let mut stderr = result.stderr_tail.as_bytes().to_vec();
+        if !result.stderr_tail.ends_with('\n') {
+            stderr.push(b'\n');
+        }
+        write_stderr_best_effort(&stderr);
     }
     write_stderr_best_effort(
         format!(

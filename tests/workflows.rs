@@ -241,7 +241,7 @@ workflow = ".factory/workflows/triage.md"
     )
     .replace("runtime = \"codex\"", "runtime = \"claude\"");
     let fixture = Fixture::new(&config);
-    assert!(format!("{:#}", fixture.config().unwrap_err()).contains("must be \"codex\""));
+    assert!(format!("{:#}", fixture.config().unwrap_err()).contains("is not a known runtime"));
 
     let config = config
         .replace("runtime = \"claude\"", "runtime = \"codex\"")

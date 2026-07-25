@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -65,13 +66,55 @@ pub struct RuntimeObservation {
     pub sequence: u64,
 }
 
-type BeforeCodexSpawn<'a> = Box<dyn FnOnce(&RuntimeObservation) -> Result<()> + Send + 'a>;
+pub type BeforeSpawn<'a> = Box<dyn FnOnce(&RuntimeObservation) -> Result<()> + Send + 'a>;
 
 pub fn observation_channel() -> (
     watch::Sender<RuntimeObservation>,
     watch::Receiver<RuntimeObservation>,
 ) {
     watch::channel(RuntimeObservation::default())
+}
+
+/// A pluggable agent execution backend (Codex, Claude Code, ...). Callers
+/// obtain one via `build_runtime`; direct construction of a concrete type is
+/// only needed by the registry itself.
+#[async_trait]
+pub trait AgentRuntime: Send + Sync {
+    async fn health_check_with_cancellation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<RuntimeHealth>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        &self,
+        prompt: &str,
+        working_directory: &Path,
+        run_timeout: Duration,
+        cancellation: CancellationToken,
+        resume_session: Option<&str>,
+        observations: watch::Sender<RuntimeObservation>,
+        before_spawn: Option<BeforeSpawn<'_>>,
+    ) -> Result<ExecutionResult>;
+}
+
+/// Resolve a configured runtime name to a concrete `AgentRuntime`. This is
+/// the single source of truth for which runtime names are valid.
+///
+/// `stream_activity` only affects Codex (its rich JSON activity protocol can
+/// be echoed live to stdout/stderr); the generic runtimes never stream, so
+/// it's ignored for them.
+pub fn build_runtime(name: &str, stream_activity: bool) -> Result<Box<dyn AgentRuntime>> {
+    match name {
+        "codex" => Ok(Box::new(
+            CodexRuntime::default().with_activity_streaming(stream_activity),
+        )),
+        "codex-minimal" => Ok(Box::new(GenericRuntime::new(codex_minimal_preset()))),
+        "claude-code" => Ok(Box::new(GenericRuntime::new(claude_code_preset()))),
+        other => bail!(
+            "unknown runtime {other:?}; supported runtimes: codex, codex-minimal, claude-code"
+        ),
+    }
 }
 
 #[derive(Debug)]
@@ -361,7 +404,7 @@ impl CodexRuntime {
         cancellation: CancellationToken,
         resume_session: Option<&str>,
         observations: watch::Sender<RuntimeObservation>,
-        before_spawn: Option<BeforeCodexSpawn<'_>>,
+        before_spawn: Option<BeforeSpawn<'_>>,
     ) -> Result<ExecutionResult> {
         let started = Instant::now();
         let deadline = TokioInstant::now() + run_timeout;
@@ -630,6 +673,40 @@ impl CodexRuntime {
             bail!("Codex {check} check returned no output");
         }
         Ok(detail)
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for CodexRuntime {
+    async fn health_check_with_cancellation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<RuntimeHealth> {
+        // Resolves to the inherent method above (inherent methods take
+        // priority over trait methods of the same name).
+        CodexRuntime::health_check_with_cancellation(self, cancellation).await
+    }
+
+    async fn run(
+        &self,
+        prompt: &str,
+        working_directory: &Path,
+        run_timeout: Duration,
+        cancellation: CancellationToken,
+        resume_session: Option<&str>,
+        observations: watch::Sender<RuntimeObservation>,
+        before_spawn: Option<BeforeSpawn<'_>>,
+    ) -> Result<ExecutionResult> {
+        self.run_with_session_inner(
+            prompt,
+            working_directory,
+            run_timeout,
+            cancellation,
+            resume_session,
+            observations,
+            before_spawn,
+        )
+        .await
     }
 }
 
@@ -1307,6 +1384,382 @@ async fn stop_process_group_anchor(anchor: &mut Child, process_id: u32) -> Resul
     Ok(())
 }
 
+/// Static description of a non-Codex agent CLI: the executable, the args to
+/// run it with (the prompt is delivered over stdin, appended after these),
+/// and the args used to confirm the binary is installed and runnable.
+pub struct GenericPreset {
+    pub executable: &'static str,
+    pub run_args: Vec<&'static str>,
+    pub health_check_args: Vec<&'static str>,
+    pub authentication_check_args: Vec<&'static str>,
+    pub authentication_help: &'static str,
+    pub authentication_summary: &'static str,
+    pub validate_authentication: fn(&str) -> Result<()>,
+}
+
+fn codex_minimal_preset() -> GenericPreset {
+    GenericPreset {
+        executable: "codex",
+        run_args: vec![
+            "exec",
+            "--sandbox",
+            "danger-full-access",
+            "--color",
+            "never",
+            "-",
+        ],
+        health_check_args: vec!["--version"],
+        authentication_check_args: vec!["login", "status"],
+        authentication_help: "run codex login and verify codex login status",
+        authentication_summary: "Logged in using ChatGPT",
+        validate_authentication: validate_codex_authentication,
+    }
+}
+
+fn claude_code_preset() -> GenericPreset {
+    GenericPreset {
+        executable: "claude",
+        run_args: vec!["--print", "--permission-mode", "bypassPermissions"],
+        health_check_args: vec!["--version"],
+        authentication_check_args: vec!["auth", "status", "--json"],
+        authentication_help: "run claude auth login and verify claude auth status",
+        authentication_summary: "Authenticated with Claude Code",
+        validate_authentication: validate_claude_authentication,
+    }
+}
+
+fn validate_codex_authentication(output: &str) -> Result<()> {
+    if !output.to_ascii_lowercase().contains("chatgpt") {
+        bail!("Codex must use ChatGPT subscription authentication, not an API key");
+    }
+    Ok(())
+}
+
+fn validate_claude_authentication(output: &str) -> Result<()> {
+    let status: Value = serde_json::from_str(output)
+        .context("Claude Code returned invalid authentication status")?;
+    if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+        bail!("Claude Code is not logged in");
+    }
+    Ok(())
+}
+
+/// A generic subprocess runtime: spawn the configured executable, pipe the
+/// prompt in over stdin, capture stdout/stderr as opaque text. Unlike
+/// `CodexRuntime` it does not parse any structured activity protocol, so it
+/// has no thread ID, live activity summaries, PR-URL scraping, or session
+/// resume — `ExecutionResult`/`RuntimeObservation` fields tied to those stay
+/// `None`. This is the trade-off accepted for supporting arbitrary agent
+/// CLIs: a working integration over rich per-run telemetry.
+pub struct GenericRuntime {
+    preset: GenericPreset,
+}
+
+impl GenericRuntime {
+    pub fn new(preset: GenericPreset) -> Self {
+        Self { preset }
+    }
+
+    async fn check_command(
+        &self,
+        args: &[&str],
+        check: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String> {
+        let mut command = Command::new(self.preset.executable);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        configure_process_group(&mut command);
+        let mut child = spawn_with_retry(&mut command)
+            .await
+            .with_context(|| format!("could not execute {}", self.preset.executable))?;
+        let process_id = child.id();
+        let stdout = child
+            .stdout
+            .take()
+            .with_context(|| format!("{check} check did not expose stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .with_context(|| format!("{check} check did not expose stderr"))?;
+        let stdout_task = tokio::spawn(read_pipe_bounded(stdout, MAX_HEALTH_OUTPUT_BYTES));
+        let stderr_task = tokio::spawn(read_pipe_bounded(stderr, MAX_HEALTH_OUTPUT_BYTES));
+
+        let deadline = TokioInstant::now() + DEFAULT_HEALTH_TIMEOUT;
+        let status = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                terminate(&mut child, process_id, process_id).await?;
+                join_reader(stdout_task, "health-check stdout").await?;
+                join_reader(stderr_task, "health-check stderr").await?;
+                return Err(RuntimeCancelled.into());
+            }
+            () = sleep_until(deadline) => {
+                terminate(&mut child, process_id, process_id).await?;
+                join_reader(stdout_task, "health-check stdout").await?;
+                join_reader(stderr_task, "health-check stderr").await?;
+                bail!(
+                    "{} {check} check timed out after {}",
+                    self.preset.executable,
+                    humantime::format_duration(DEFAULT_HEALTH_TIMEOUT)
+                );
+            }
+            status = wait_for_clean_exit(&mut child, process_id, process_id) => {
+                status.with_context(|| format!("failed while waiting for {check} check"))?
+            }
+        };
+        let stdout =
+            String::from_utf8_lossy(&join_reader(stdout_task, "health-check stdout").await?)
+                .trim()
+                .to_owned();
+        let stderr =
+            String::from_utf8_lossy(&join_reader(stderr_task, "health-check stderr").await?)
+                .trim()
+                .to_owned();
+        if !status.success() {
+            let detail = if stderr.is_empty() { &stdout } else { &stderr };
+            bail!(
+                "{} {check} check exited with {status}: {detail}",
+                self.preset.executable
+            );
+        }
+        let detail = if stdout.is_empty() { stderr } else { stdout };
+        if detail.is_empty() {
+            bail!(
+                "{} {check} check returned no output",
+                self.preset.executable
+            );
+        }
+        Ok(detail)
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for GenericRuntime {
+    async fn health_check_with_cancellation(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Result<RuntimeHealth> {
+        let version = self
+            .check_command(&self.preset.health_check_args, "version", &cancellation)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} version check failed; install it or make it executable",
+                    self.preset.executable
+                )
+            })?;
+        let authentication = self
+            .check_command(
+                &self.preset.authentication_check_args,
+                "authentication",
+                &cancellation,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "{} authentication check failed; {}",
+                    self.preset.executable, self.preset.authentication_help
+                )
+            })?;
+        (self.preset.validate_authentication)(&authentication).with_context(|| {
+            format!(
+                "{} authentication check failed; {}",
+                self.preset.executable, self.preset.authentication_help
+            )
+        })?;
+        Ok(RuntimeHealth {
+            version,
+            authentication: self.preset.authentication_summary.to_owned(),
+        })
+    }
+
+    async fn run(
+        &self,
+        prompt: &str,
+        working_directory: &Path,
+        run_timeout: Duration,
+        cancellation: CancellationToken,
+        resume_session: Option<&str>,
+        observations: watch::Sender<RuntimeObservation>,
+        before_spawn: Option<BeforeSpawn<'_>>,
+    ) -> Result<ExecutionResult> {
+        let started = Instant::now();
+        let deadline = TokioInstant::now() + run_timeout;
+        if let Some(termination) = preparation_termination(&cancellation, deadline) {
+            return Ok(preparation_result(termination, started));
+        }
+        if resume_session.is_some() {
+            bail!(
+                "{} runtime does not support session resume",
+                self.preset.executable
+            );
+        }
+        let mut command = Command::new(self.preset.executable);
+        command
+            .args(&self.preset.run_args)
+            .current_dir(working_directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut process_group = RunProcessGroup::start().await?;
+        process_group.configure(&mut command)?;
+        if let Some(termination) = preparation_termination(&cancellation, deadline) {
+            process_group.stop().await?;
+            return Ok(preparation_result(termination, started));
+        }
+        let anchor_observation = RuntimeObservation {
+            process_id: process_group.process_id,
+            process_identity: process_group.process_identity.clone(),
+            sequence: 1,
+            ..RuntimeObservation::default()
+        };
+        if let Some(before_spawn) = before_spawn
+            && let Err(error) = before_spawn(&anchor_observation)
+        {
+            process_group.stop().await.context(
+                "failed to stop generic runtime process group after persistence failure",
+            )?;
+            return Err(error);
+        }
+        observations.send_replace(anchor_observation);
+        if let Some(termination) = preparation_termination(&cancellation, deadline) {
+            process_group.stop().await?;
+            return Ok(preparation_result(termination, started));
+        }
+
+        let spawned = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(Termination::Cancelled),
+            () = sleep_until(deadline) => Err(Termination::TimedOut),
+            result = spawn_with_retry(&mut command) => Ok(result),
+        };
+        let mut child = match spawned {
+            Err(termination) => {
+                process_group.stop().await?;
+                return Ok(preparation_result(termination, started));
+            }
+            Ok(Ok(child)) => child,
+            Ok(Err(error)) => {
+                let _ = process_group.stop().await;
+                return Err(error)
+                    .with_context(|| format!("failed to start {} CLI", self.preset.executable));
+            }
+        };
+        let process_id = child.id();
+        let mut stdin = child.stdin.take().context("process did not expose stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("process did not expose stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .context("process did not expose stderr")?;
+        let stdout_task = tokio::spawn(read_pipe_bounded(stdout, MAX_FINAL_RESPONSE_BYTES));
+        let stderr_task = tokio::spawn(read_pipe_bounded(stderr, MAX_STDERR_BYTES));
+
+        let deliver_prompt = async {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .context("failed to send prompt")?;
+            stdin.shutdown().await.context("failed to close stdin")?;
+            drop(stdin);
+            Result::<()>::Ok(())
+        };
+        tokio::pin!(deliver_prompt);
+        let early_termination = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Some(Termination::Cancelled),
+            () = sleep_until(deadline) => Some(Termination::TimedOut),
+            delivery = &mut deliver_prompt => {
+                if let Err(error) = delivery
+                    && !is_broken_pipe(&error)
+                {
+                    let _ = terminate(
+                        &mut child,
+                        process_id,
+                        process_group.process_id.or(process_id),
+                    )
+                    .await;
+                    let _ = process_group.stop().await;
+                    let _ = join_reader(stdout_task, "stdout").await;
+                    let _ = join_reader(stderr_task, "stderr").await;
+                    return Err(error);
+                }
+                None
+            }
+        };
+
+        let (status, termination) = if let Some(termination) = early_termination {
+            (
+                terminate(
+                    &mut child,
+                    process_id,
+                    process_group.process_id.or(process_id),
+                )
+                .await?,
+                termination,
+            )
+        } else {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    (
+                        terminate(
+                            &mut child,
+                            process_id,
+                            process_group.process_id.or(process_id),
+                        ).await?,
+                        Termination::Cancelled,
+                    )
+                }
+                () = sleep_until(deadline) => {
+                    (
+                        terminate(
+                            &mut child,
+                            process_id,
+                            process_group.process_id.or(process_id),
+                        ).await?,
+                        Termination::TimedOut,
+                    )
+                }
+                status = wait_for_clean_exit(
+                    &mut child,
+                    process_id,
+                    process_group.process_id.or(process_id),
+                ) => {
+                    (status.context("failed while waiting for process")?, Termination::Exited)
+                }
+            }
+        };
+        process_group.reap().await?;
+
+        let stdout_bytes = join_reader(stdout_task, "stdout").await?;
+        let stderr_bytes = join_reader(stderr_task, "stderr").await?;
+        let activity_lines = stdout_bytes.iter().filter(|byte| **byte == b'\n').count();
+        let final_response_truncated = stdout_bytes.len() >= MAX_FINAL_RESPONSE_BYTES;
+
+        Ok(ExecutionResult {
+            status,
+            termination,
+            final_response: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+            final_response_truncated,
+            thread_id: None,
+            duration: started.elapsed(),
+            activity_lines,
+            activity_error: None,
+            stderr_tail: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod observation_tests {
     use super::*;
@@ -1340,5 +1793,14 @@ mod observation_tests {
             safe_activity_summary(&serde_json::json!({ "type": "item.completed" })),
             None
         );
+    }
+
+    #[test]
+    fn generic_authentication_validators_reject_unusable_credentials() {
+        assert!(validate_codex_authentication("Logged in using ChatGPT").is_ok());
+        assert!(validate_codex_authentication("Logged in with an API key").is_err());
+        assert!(validate_claude_authentication(r#"{"loggedIn":true}"#).is_ok());
+        assert!(validate_claude_authentication(r#"{"loggedIn":false}"#).is_err());
+        assert!(validate_claude_authentication("not json").is_err());
     }
 }
