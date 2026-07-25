@@ -1646,7 +1646,7 @@ async fn execute_sandbox_task(
                 )?;
                 return Err(error.context(detail));
             }
-            record_execution(&mut ledger, run_id, &result)?;
+            record_execution(&mut ledger, run_id, "codex", &result)?;
             ledger.finish_run_sandbox(
                 run_id,
                 "removing",
@@ -1883,7 +1883,7 @@ async fn execute_task_inner(
                 Termination::Exited => "failed",
             };
             let detail = format_execution_detail(&result);
-            record_execution(&mut ledger, run_id, &result)?;
+            record_execution(&mut ledger, run_id, &workflow.runtime, &result)?;
             Ok((outcome, detail))
         }
         Err(error) => {
@@ -2360,20 +2360,20 @@ fn next_occurrence(
     Ok(candidate)
 }
 
-fn record_execution(ledger: &mut Ledger, run_id: i64, result: &ExecutionResult) -> Result<()> {
+fn execution_outcome(runtime: &str, result: &ExecutionResult) -> (RunOutcome, Option<String>) {
     let (outcome, error) = match result.termination {
         Termination::Cancelled => (
             RunOutcome::Cancelled,
-            Some("Codex execution cancelled".to_owned()),
+            Some(format!("{runtime} execution cancelled")),
         ),
         Termination::TimedOut => (
             RunOutcome::Failed,
-            Some("Codex execution timed out".to_owned()),
+            Some(format!("{runtime} execution timed out")),
         ),
         Termination::Exited if result.status.success() && result.activity_error.is_some() => (
             RunOutcome::Failed,
             Some(format!(
-                "Codex emitted malformed JSON activity: {}",
+                "{runtime} emitted malformed JSON activity: {}",
                 result.activity_error.as_deref().unwrap_or("unknown error")
             )),
         ),
@@ -2381,11 +2381,21 @@ fn record_execution(ledger: &mut Ledger, run_id: i64, result: &ExecutionResult) 
         Termination::Exited => (
             RunOutcome::Failed,
             Some(format!(
-                "Codex exited with status {}; stderr: {}",
-                result.status, result.stderr_tail
+                "{runtime} exited with status {}; stderr: {}",
+                result.status, result.stderr_tail,
             )),
         ),
     };
+    (outcome, error)
+}
+
+fn record_execution(
+    ledger: &mut Ledger,
+    run_id: i64,
+    runtime: &str,
+    result: &ExecutionResult,
+) -> Result<()> {
+    let (outcome, error) = execution_outcome(runtime, result);
     let finish = if result.termination == Termination::TimedOut {
         Ledger::finish_run_and_task_terminal
     } else {
@@ -2413,6 +2423,9 @@ fn decrement_active(active: &mut HashMap<String, usize>, repository: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+
     use super::*;
 
     #[test]
@@ -2428,6 +2441,36 @@ mod tests {
             None
         );
         assert_eq!(latest_worker_progress(None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_execution_errors_name_the_configured_runtime() {
+        let mut result = ExecutionResult {
+            status: std::process::ExitStatus::from_raw(17 << 8),
+            termination: Termination::Exited,
+            final_response: String::new(),
+            final_response_truncated: false,
+            thread_id: None,
+            duration: Duration::ZERO,
+            activity_lines: 0,
+            activity_error: None,
+            stderr_tail: "login failed".to_owned(),
+        };
+
+        let (_, error) = execution_outcome("claude-code", &result);
+        assert_eq!(
+            error.as_deref(),
+            Some("claude-code exited with status exit status: 17; stderr: login failed")
+        );
+
+        result.termination = Termination::TimedOut;
+        let (_, error) = execution_outcome("claude-code", &result);
+        assert_eq!(error.as_deref(), Some("claude-code execution timed out"));
+
+        result.termination = Termination::Cancelled;
+        let (_, error) = execution_outcome("codex-minimal", &result);
+        assert_eq!(error.as_deref(), Some("codex-minimal execution cancelled"));
     }
 
     fn utc(value: &str) -> DateTime<Utc> {
