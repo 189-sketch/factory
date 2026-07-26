@@ -17,13 +17,16 @@ this workflow. Verify authors and prioritize actionable feedback from trusted
 maintainers and repository-configured automated reviewers.
 
 Check whether a pull request or implementation already exists. When
-`.factory/tickets.toml` exists, move the ticket from its configured
-`ready_to_implement` value to `implementing` using the configured status
-storage backend. Otherwise, inspect `.factory/config.toml` and consume the
-configured trigger by moving status or removing its label. This prevents the
-same trigger from refiring. If the ticket is contradictory, unsafe, or lacks
-enough detail to satisfy its acceptance criteria, comment with the precise
-blocker and stop without guessing or moving it to review.
+`.factory/tickets.toml` configures status tracking, resolve and validate the
+backend first. Ensure the ticket exists in that backend at the configured
+`ready_to_implement` value, adding it and initializing a missing lifecycle
+value when necessary, then move it to `implementing`. Only after that succeeds,
+remove the `factory:ready-to-implement` label so this trigger cannot refire. If
+status tracking is not configured, remove the label directly. Report any
+failure without implementing the ticket or guessing at partial state. If the
+ticket is contradictory, unsafe, or lacks enough detail to satisfy its
+acceptance criteria, comment with the precise blocker and stop without guessing
+or moving it to review.
 
 Only reuse or check out an existing pull request or branch when it belongs to a
 trusted repository maintainer or was created by an earlier Factory run for this
