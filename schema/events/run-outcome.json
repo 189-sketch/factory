@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factory.local/schema/events/run-outcome.json",
+  "title": "run.outcome payload",
+  "description": "运行终态。对应 storage.rs RunOutcome(succeeded/failed/cancelled),result/error 经脱敏 + 有界截断。",
+  "type": "object",
+  "required": ["outcome"],
+  "additionalProperties": false,
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["succeeded", "failed", "cancelled"]
+    },
+    "result": {
+      "type": ["string", "null"],
+      "description": "成功结果摘要(脱敏 + 截断,含 PR 链接等)。"
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "失败/取消原因(脱敏 + 截断)。"
+    },
+    "pull_request": { "type": ["string", "null"] },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "第几次运行尝试(恢复重试递增,上限 MAX_RECOVERY_ATTEMPTS)。"
+    }
+  }
+}

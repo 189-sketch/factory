@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+# factory-core:codex — base + Codex CLI。agent 在容器内以 AGENT_UID 运行,由 core spawn。
+# Codex 用官方独立安装脚本(无需 Node);凭据运行时经 env 注入(P2),不进镜像。
+
+FROM factory-core:base
+
+USER root
+
+# 以 agent 用户安装 Codex CLI 到其 home,避免 core 持有 agent 运行时
+ARG CODEX_INSTALL_URL=https://chatgpt.com/codex/install.sh
+USER factory-agent
+RUN curl -fsSL ${CODEX_INSTALL_URL} | sh \
+    && codex --version
+
+# 让 core 能找到 codex(agent 的 home bin 加入 PATH)
+ENV PATH=/home/factory-agent/.local/bin:${PATH}
+
+# 运行身份仍是 core;core spawn codex 时降权到 factory-agent
+USER factory-core
+WORKDIR /factory/work
+
+CMD ["agent-entrypoint"]

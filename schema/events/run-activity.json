@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factory.local/schema/events/run-activity.json",
+  "title": "run.activity payload",
+  "description": "活动观测增量。对应 runtime.rs RuntimeObservation,经 sanitize_for_storage 脱敏 + 有界截断后外发。高频。",
+  "type": "object",
+  "required": ["sequence"],
+  "additionalProperties": false,
+  "properties": {
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "per-run 单调序号(RuntimeObservation.sequence),供 run 内排序/去重。不作全局补发游标(那是信封 seq)。"
+    },
+    "activity": {
+      "type": ["string", "null"],
+      "description": "人类可读活动摘要(safe_activity_summary 提炼 + 脱敏 + 截断)。"
+    },
+    "process_id": { "type": ["integer", "null"] },
+    "session_id": { "type": ["string", "null"], "description": "agent 会话 id,恢复时续用。" },
+    "pull_request": { "type": ["string", "null"], "description": "已发现的 PR URL。" },
+    "truncated": {
+      "type": "boolean",
+      "description": "活动是否因有界截断(MAX_OBSERVED_ACTIVITY_BYTES)而不完整。"
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factory.local/schema/events/task-state.json",
+  "title": "task.state payload",
+  "description": "任务状态机跃迁。对应 storage.rs TaskState(queued/running/succeeded/failed/cancelled),由账本原子事务跃迁。",
+  "type": "object",
+  "required": ["from", "to", "workflow", "ticket"],
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "type": ["string", "null"],
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled", null],
+      "description": "跃迁前状态;新建任务为 null。"
+    },
+    "to": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+    },
+    "workflow": {
+      "type": "string",
+      "description": "触发该任务的 workflow 标识(trigger id)。"
+    },
+    "ticket": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "工单标识(如 issue 号)。" },
+        "title": { "type": ["string", "null"] },
+        "url": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

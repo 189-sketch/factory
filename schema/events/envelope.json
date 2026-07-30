@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factory.local/schema/events/envelope.json",
+  "title": "Factory Event Envelope",
+  "description": "统一事件信封。所有经 SSE 外发的事件都包在这个信封里;payload 按事件类型引用各自的 schema。演进规则:additive-only,信封 v 只在破坏性变更时 +1。",
+  "type": "object",
+  "required": ["v", "type", "seq", "ts", "repository", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "description": "信封结构版本。additive 变更不动 v;仅破坏性变更 +1。"
+    },
+    "type": {
+      "type": "string",
+      "description": "事件类型,点分命名空间。首批:task.state / run.activity / run.outcome / repo.health。ui 必须容忍未知类型。",
+      "pattern": "^[a-z][a-z0-9]*(\\.[a-z0-9_]+)+$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "全局单调 event_id(G1 游标)。来自 core 账本 events 表自增主键,跨所有事件类型统一编号。SSE 的 id: 字段即此值,断线重连用 Last-Event-ID 补发 seq>N 的事件。"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "事件发生时间(RFC 3339 UTC)。仅作展示,不作游标。"
+    },
+    "repository": {
+      "type": "string",
+      "description": "规范化的 owner/repo 身份(与账本数据目录派生同源)。",
+      "pattern": "^[^/]+/[^/]+$"
+    },
+    "task_id": {
+      "type": ["integer", "null"],
+      "description": "关联的账本 task 主键;仓库级事件(如 repo.health)为 null。"
+    },
+    "run_id": {
+      "type": ["integer", "null"],
+      "description": "关联的账本 run 主键;非 run 事件为 null。"
+    },
+    "payload": {
+      "type": "object",
+      "description": "事件载荷,按 type 引用对应 schema。additive-only:只增字段,不改不删。"
+    }
+  }
+}

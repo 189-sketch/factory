@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://factory.local/schema/events/repo-health.json",
+  "title": "repo.health payload",
+  "description": "仓库级健康/状态,供 fleet 总览卡片。仓库级事件,信封 task_id/run_id 为 null。",
+  "type": "object",
+  "required": ["status"],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["ready", "polling", "running", "idle", "backoff", "error", "offline"],
+      "description": "仓库当前状态。idle 供 ui idle 计时;offline 表示容器失联。"
+    },
+    "active_runs": { "type": "integer", "minimum": 0 },
+    "queued_tasks": { "type": "integer", "minimum": 0 },
+    "last_poll_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_activity_at": { "type": ["string", "null"], "format": "date-time" },
+    "backoff_until": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "轮询退避截止时间(fleet repository_backoff)。"
+    },
+    "message": { "type": ["string", "null"], "description": "脱敏后的状态说明。" }
+  }
+}

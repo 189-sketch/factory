@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1
+# factory-core:claude — base + Claude Code CLI。agent 在容器内以 AGENT_UID 运行,由 core spawn。
+# Claude Code 用官方原生安装器(npm 安装已弃用);凭据运行时经 env 注入(P2),不进镜像。
+
+FROM factory-core:base
+
+USER root
+
+# 以 agent 用户安装 Claude Code 到其 home
+ARG CLAUDE_INSTALL_URL=https://claude.ai/install.sh
+USER factory-agent
+RUN curl -fsSL ${CLAUDE_INSTALL_URL} | bash \
+    && claude --version
+
+ENV PATH=/home/factory-agent/.local/bin:${PATH}
+
+USER factory-core
+WORKDIR /factory/work
+
+CMD ["agent-entrypoint"]
