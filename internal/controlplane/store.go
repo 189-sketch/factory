@@ -305,6 +305,10 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 	if input.Health != "healthy" && input.Health != "unhealthy" {
 		return protocol.Worker{}, invalid("invalid_health", "health must be healthy or unhealthy")
 	}
+	if input.CapacityHandoffVersion < 0 || input.CapacityHandoffVersion > 1 {
+		return protocol.Worker{}, invalid(
+			"invalid_capacity_handoff", "capacity_handoff_version must be 0 or 1")
+	}
 	if len(input.Repositories) == 0 {
 		return protocol.Worker{}, invalid("invalid_repositories", "at least one repository is required")
 	}
@@ -325,6 +329,45 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 		}
 		seenKeys[repo.Key], seenRemotes[repo.RemoteIdentity] = true, true
 	}
+	retainedCounts := make(map[string]int)
+	retainedAttemptIDs := make(map[string][]string)
+	seenRetainedAttempts := make(map[string]string)
+	hasUnattributedRetainedSummary := false
+	for index := range input.RetainedWorktrees {
+		worktree := &input.RetainedWorktrees[index]
+		worktree.AttemptID = strings.TrimSpace(worktree.AttemptID)
+		worktree.RepositoryID = strings.TrimSpace(worktree.RepositoryID)
+		// Older API clients may send display-only summaries before they know the
+		// control-plane repository ID. Preserve those summaries, but do not use
+		// incomplete or duplicate entries as capacity-handoff evidence.
+		if worktree.AttemptID == "" || worktree.RepositoryID == "" {
+			hasUnattributedRetainedSummary = true
+			continue
+		}
+		if repositoryID, seen := seenRetainedAttempts[worktree.AttemptID]; seen {
+			if repositoryID != worktree.RepositoryID {
+				hasUnattributedRetainedSummary = true
+			}
+			continue
+		}
+		seenRetainedAttempts[worktree.AttemptID] = worktree.RepositoryID
+		retainedCounts[worktree.RepositoryID]++
+		retainedAttemptIDs[worktree.RepositoryID] = append(
+			retainedAttemptIDs[worktree.RepositoryID], worktree.AttemptID)
+	}
+	disposedAttemptIDs := make([]string, 0, len(input.DisposedAttemptIDs))
+	seenDisposedAttempts := make(map[string]bool, len(input.DisposedAttemptIDs))
+	for _, value := range input.DisposedAttemptIDs {
+		attemptID := strings.TrimSpace(value)
+		if attemptID == "" || len(attemptID) > 200 {
+			return protocol.Worker{}, invalid(
+				"invalid_disposed_attempts", "disposed attempt IDs must be non-empty and at most 200 bytes")
+		}
+		if !seenDisposedAttempts[attemptID] {
+			seenDisposedAttempts[attemptID] = true
+			disposedAttemptIDs = append(disposedAttemptIDs, attemptID)
+		}
+	}
 	retained, err := json.Marshal(input.RetainedWorktrees)
 	if err != nil || len(retained) > protocol.MaxBodyBytes {
 		return protocol.Worker{}, invalid("invalid_retained_worktrees", "retained worktree summaries are too large")
@@ -335,6 +378,7 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 		return protocol.Worker{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	advertisedRepositoryIDs := make(map[string]bool, len(input.Repositories))
 	for _, repo := range input.Repositories {
 		var existingID string
 		err := tx.QueryRowContext(ctx, `
@@ -380,6 +424,11 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 		if err != nil {
 			return protocol.Worker{}, unavailable(err)
 		}
+		advertisedRepositoryIDs[repositoryID] = true
+		effectiveRetainedCount := repo.RetainedCount
+		if retainedCounts[repositoryID] > effectiveRetainedCount {
+			effectiveRetainedCount = retainedCounts[repositoryID]
+		}
 		var existingKey string
 		mappingErr := tx.QueryRowContext(ctx, `
 			SELECT display_key FROM worker_repositories
@@ -391,23 +440,87 @@ func (s *Store) RegisterWorker(ctx context.Context, workerID string, input proto
 				UPDATE worker_repositories
 				SET display_key = ?, retained_count = ?, advertised = 1, updated_at = ?
 				WHERE worker_id = ? AND repository_id = ?
-			`, repo.Key, repo.RetainedCount, now, workerID, repositoryID)
+			`, repo.Key, effectiveRetainedCount, now, workerID, repositoryID)
 		case mappingErr == nil:
 			_, err = tx.ExecContext(ctx, `
 				UPDATE worker_repositories
 				SET retained_count = ?, advertised = 1, updated_at = ?
 				WHERE worker_id = ? AND repository_id = ?
-			`, repo.RetainedCount, now, workerID, repositoryID)
+			`, effectiveRetainedCount, now, workerID, repositoryID)
 		case errors.Is(mappingErr, sql.ErrNoRows):
 			_, err = tx.ExecContext(ctx, `
 				INSERT INTO worker_repositories(worker_id, display_key, repository_id, retained_count, advertised, updated_at)
 				VALUES (?, ?, ?, ?, 1, ?)
-			`, workerID, repo.Key, repositoryID, repo.RetainedCount, now)
+			`, workerID, repo.Key, repositoryID, effectiveRetainedCount, now)
 		default:
 			err = mappingErr
 		}
 		if err != nil {
 			return protocol.Worker{}, unavailable(err)
+		}
+	}
+	canBulkAcknowledge := input.CapacityHandoffVersion == 0 && !hasUnattributedRetainedSummary
+	for repositoryID := range retainedCounts {
+		if !advertisedRepositoryIDs[repositoryID] {
+			canBulkAcknowledge = false
+		}
+	}
+	for _, attemptID := range disposedAttemptIDs {
+		var ownerID string
+		err := tx.QueryRowContext(ctx, `
+			SELECT worker_id
+			FROM attempts
+			WHERE id = ?
+		`, attemptID).Scan(&ownerID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && ownerID != workerID) {
+			return protocol.Worker{}, invalid(
+				"invalid_disposed_attempts", "disposed attempts must exist and be owned by this worker")
+		}
+		if err != nil {
+			return protocol.Worker{}, unavailable(err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE attempts
+			SET capacity_acknowledged = 1
+			WHERE id = ?
+		`, attemptID); err != nil {
+			return protocol.Worker{}, unavailable(err)
+		}
+	}
+	for repositoryID := range advertisedRepositoryIDs {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE attempts
+			SET capacity_acknowledged = 1
+			WHERE worker_id = ?
+			  AND capacity_acknowledged = 0
+			  AND state IN ('succeeded', 'failed', 'cancelled', 'lost')
+			  AND ? = 0
+			  AND ?
+			  AND execution_id IN (
+			      SELECT e.id
+			      FROM executions e
+			      JOIN tasks t ON t.id = e.task_id
+			      WHERE t.repository_id = ?
+			  )
+		`, workerID, input.ActiveCount, canBulkAcknowledge, repositoryID); err != nil {
+			return protocol.Worker{}, unavailable(err)
+		}
+		for _, attemptID := range retainedAttemptIDs[repositoryID] {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE attempts
+				SET capacity_acknowledged = 1
+				WHERE id = ?
+				  AND worker_id = ?
+				  AND state IN ('succeeded', 'failed', 'cancelled', 'lost')
+				  AND execution_id IN (
+				      SELECT e.id
+				      FROM executions e
+				      JOIN tasks t ON t.id = e.task_id
+				      WHERE t.repository_id = ?
+				  )
+			`, attemptID, workerID, repositoryID); err != nil {
+				return protocol.Worker{}, unavailable(err)
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

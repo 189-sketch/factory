@@ -1,10 +1,11 @@
 # Factory V2 MVP
 
-> **Status:** Proposed for review
+> **Status:** Implemented
 
-> **Implementation:** The control plane, UI, and local Unix worker execution
-> core are implemented. Durable worker manifests, restart reconciliation,
-> retained-worktree limits, and the cleanup CLI remain in issue #132.
+> **Implementation:** The control plane, UI, and crash-safe local Unix worker
+> are implemented. The worker uses durable attempt manifests, startup
+> reconciliation, repository-scoped retained-worktree limits, and explicit
+> preview or confirmed cleanup.
 
 ## 1. Executive summary
 
@@ -652,9 +653,14 @@ Successful clean worktrees are removed after completion. Failed, cancelled,
 dirty, or unpublished worktrees are retained. The worker retains at most ten
 per repository. At a repository's limit it continues heartbeats and may claim
 work for other advertised repositories, but it does not claim more work for
-that repository. The Workers page groups retained attempt IDs and their cleanup
-commands by repository. The operator previews and confirms cleanup through
-`factory-worker cleanup`.
+that repository. Registration publishes both the retained snapshot and exact
+attempt IDs whose local processes have stopped and worktrees are durably
+absent. The control plane releases those attempt reservations without waiting
+for unrelated active work to finish. Disposed IDs use a durable worker-level
+journal until registration succeeds, then absent manifests are durably pruned
+to bound later startup work. The Workers page groups
+retained attempt IDs and their cleanup commands by repository. The operator
+previews and confirms cleanup through `factory-worker cleanup`.
 
 ## 8. Security, privacy, and operations
 

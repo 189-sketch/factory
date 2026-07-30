@@ -58,6 +58,12 @@ worker lifetime. The first start writes an owner-only `worker-id`; later starts
 reuse it. A second process cannot use the same data directory. The worker also
 refuses a data directory below a Factory V1 `factory.sqlite3` state root.
 
+Each claimed attempt has an owner-only manifest at
+`<data_directory>/attempts/<attempt-id>.json`. The worker writes the initial
+manifest before it creates the worktree. It atomically replaces the manifest
+and synchronizes both the file and parent directory for worktree, process,
+lease, completion, retention, and cleanup transitions.
+
 ## Run
 
 Start the server first, then:
@@ -74,6 +80,18 @@ worker.
 Healthy workers heartbeat their capacity and repositories, reserve a local
 slot, and poll for assigned work. Claim retries reuse the same request ID and
 lease secret, so a lost response cannot start a duplicate attempt.
+
+## Upgrade from the schema 1 V2 preview
+
+Drain all `preparing` and `running` attempts before starting the upgraded
+control plane. Schema 1 had no durable local evidence for active worktree
+disposition, so migration 002 fails transactionally with
+`drain_active_v2_attempts_before_upgrade` if active attempts remain. Restart the
+old control plane and workers, let or cancel those attempts to a terminal state,
+and wait for every worker to publish an idle registration with
+`active_count: 0` and its final retained snapshot. Then retry the upgrade.
+Terminal history and attributable retained summaries are migrated
+automatically.
 
 ## Execution and failure behavior
 
@@ -123,11 +141,95 @@ worktree only when all live-attempt checks pass:
 - the worktree is clean;
 - its current commit is the original base or is reachable from a remote ref.
 
-Cleanup uses `git worktree remove` without force and never deletes the branch.
-Any mismatch or cleanup error retains the worktree. Failed, cancelled, dirty,
-and unpublished worktrees are also retained for inspection.
+Automatic successful cleanup uses `git worktree remove` without force and
+never deletes the branch. Any mismatch or cleanup error retains the worktree.
+Failed, cancelled, dirty, and unpublished worktrees are also retained for
+inspection.
 
-Durable attempt manifests, restart reconciliation, retained-worktree capacity,
-and preview or confirmed cleanup commands are intentionally delivered by issue
-#132. Until then, the worker does not scan, repair, or delete worktrees left by
-an earlier worker process.
+At startup, before registration or claims, the worker reads every attempt
+manifest. It stops any still-live process group only when the recorded process
+identity still matches. It never resumes Codex. It then compares the manifest,
+filesystem, and `git worktree list` and records one of these outcomes:
+
+- never created;
+- retained;
+- missing;
+- inconsistent;
+- cleanup in progress;
+- cleaned.
+
+An inconsistent or unproven identity makes the worker unhealthy and prevents
+claims. A missing or never-created worktree does not consume retained capacity.
+Only verified retained worktrees count toward the limit of ten per repository.
+A claimed attempt reserves one possible retained slot. After completion, the
+control plane keeps that reservation until a worker registration atomically
+publishes the repository's retained count and acknowledges the handoff.
+The worker names attempts whose local process has stopped and whose worktree is
+durably absent in
+`disposed_attempt_ids`. It keeps those acknowledgments pending until the
+registration succeeds, including after startup reconciliation, so unrelated
+active work cannot delay capacity release. Pending IDs are stored atomically in
+`disposed-attempts.json` before completion is reported and are removed from the
+journal only after the server commits a registration.
+`capacity_handoff_version: 1`
+disables the legacy idle-worker bulk acknowledgment path; current workers use
+only exact retained or disposed attempt IDs. The server can record this local
+proof before an expired attempt is swept to `lost`; active-attempt capacity
+continues to apply until that state transition. A failed journal write makes the
+worker unhealthy and prevents terminal completion; the in-memory exact
+registration remains a recovery path while the process is running. Successful
+handoffs durably remove absent manifests before clearing the disposal journal,
+so later restarts do not scan or resend historical IDs.
+
+Historical attempts are acknowledged once by the schema migration because
+pre-manifest workers could not publish exact disposition evidence. The
+migration first derives their retained counts from complete legacy summaries.
+Active historical attempts are not pre-acknowledged: they reserve capacity by
+state before sweep and as unclassified terminal attempts afterward, until an
+exact retained or disposed handoff proves their local outcome.
+For upgrade compatibility, the control plane never trusts a reported count
+below complete, uniquely attributable retained-worktree summaries in the same
+registration. Display-only summaries without an attempt or repository ID remain
+valid API input, but disable bulk idle-worker acknowledgment and do not
+acknowledge a capacity handoff themselves. An active legacy registration can
+acknowledge only terminal attempts named by complete summaries; unlisted
+attempts remain reserved until an idle registration.
+A full repository remains queued while the worker continues heartbeats and may
+claim work for another repository. Transient control-plane or Git failures
+during reconciliation are retried before the worker first registers; they are
+not recorded as identity inconsistencies.
+
+## Inspect and clean retained worktrees
+
+Stop the worker before cleanup because the command takes the same exclusive
+data-directory lock. Preview is the default:
+
+```sh
+factory-worker cleanup ATTEMPT_ID --config /path/to/worker.toml
+```
+
+The preview prints the complete manifest, repository identity, worktree path,
+branch, commit, Git status, and retention reason. It does not change the
+manifest, worktree, or branch.
+
+After reviewing the preview, confirm cleanup explicitly:
+
+```sh
+factory-worker cleanup ATTEMPT_ID --confirm --config /path/to/worker.toml
+```
+
+Confirmed cleanup durably records `cleanup_started`, revalidates the
+manifest-owned V2 path and Git registration, removes that worktree, and then
+durably records `cleaned`. It never deletes the branch. Because confirmation
+can remove a dirty retained worktree, copy or commit any uncommitted work you
+want to keep before using `--confirm`.
+
+The manifest distinguishes operator-confirmed cleanup from automatic cleanup.
+After an interruption, startup may force-remove only an operator-confirmed
+worktree. It revalidates an interrupted automatic cleanup and retains the
+worktree if it became dirty or gained unpublished commits.
+
+Cleanup fails closed for a missing manifest, a path outside the worker's V2
+worktree directory, a repository or branch identity mismatch, a partial
+worktree, or an unverified process identity. It never scans or removes Factory
+V1 paths, branches, or state.

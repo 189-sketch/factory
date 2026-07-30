@@ -86,8 +86,8 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 	var active int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM attempts
-		WHERE worker_id = ? AND state IN ('preparing', 'running') AND lease_expires_at > ?
-	`, workerID, nowMillis).Scan(&active); err != nil {
+		WHERE worker_id = ? AND state IN ('preparing', 'running')
+	`, workerID).Scan(&active); err != nil {
 		return nil, unavailable(err)
 	}
 	if healthy == 0 || now.Sub(fromMillis(lastHeartbeat)) > protocol.WorkerOnlineWindow || active >= capacity {
@@ -110,7 +110,24 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		WHERE e.assigned_worker_id = ?
 		  AND e.state = 'queued'
 		  AND wr.advertised = 1
-		  AND wr.retained_count < ?
+		  AND wr.retained_count + (
+		      SELECT COUNT(*)
+		      FROM attempts active_attempt
+		      JOIN executions active_execution ON active_execution.id = active_attempt.execution_id
+		      JOIN tasks active_task ON active_task.id = active_execution.task_id
+		      WHERE active_attempt.worker_id = e.assigned_worker_id
+		        AND active_task.repository_id = t.repository_id
+		        AND active_attempt.state IN ('preparing', 'running')
+		  ) + (
+		      SELECT COUNT(*)
+		      FROM attempts terminal_attempt
+		      JOIN executions terminal_execution ON terminal_execution.id = terminal_attempt.execution_id
+		      JOIN tasks terminal_task ON terminal_task.id = terminal_execution.task_id
+		      WHERE terminal_attempt.worker_id = e.assigned_worker_id
+		        AND terminal_task.repository_id = t.repository_id
+		        AND terminal_attempt.state IN ('succeeded', 'failed', 'cancelled', 'lost')
+		        AND terminal_attempt.capacity_acknowledged = 0
+		  ) < ?
 		ORDER BY e.created_at, e.id
 		LIMIT 1
 	`, workerID, protocol.MaxRetainedPerRepo).Scan(&executionID)
