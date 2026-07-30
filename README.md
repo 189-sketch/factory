@@ -124,26 +124,27 @@ recovery, and cleanup.
 ## V2 control plane and local worker
 
 The local V2 server includes its web interface in the Go binary, and the Unix
-worker runs assigned Codex tasks in separate managed Git worktrees. Normal
+worker runs assigned Codex or Claude Code tasks in separate managed Git worktrees. Normal
 builds use the committed embedded UI and do not need Node.js:
 
 ```sh
 ./scripts/build-v2.sh
 ```
 
-Create an ignored local configuration from the two-repository sample, edit its
+Create the local configuration from the two-repository sample, edit its
 repository paths, then start the complete local control plane:
 
 ```sh
-mkdir -p .factory-v2
-cp examples/v2-worker.toml .factory-v2/worker.toml
-$EDITOR .factory-v2/worker.toml
-./scripts/run-v2-local.sh .factory-v2/worker.toml
+mkdir -p ~/.factory
+cp examples/v2-worker.toml ~/.factory/worker.toml
+$EDITOR ~/.factory/worker.toml
+./scripts/run-v2-local.sh
 ```
 
 Open `http://127.0.0.1:7337/` to inspect the registered worker, delegate work,
-and follow durable task state. The server remains loopback-only and V2 state and
-worktrees remain separate from V1. The
+and follow durable task state. The server remains loopback-only. All local
+Factory data lives below `~/.factory`, with separate V1, server, and worker
+subdirectories. The
 [complete local V2 guide](docs/v2-local.md) covers fresh-checkout setup,
 delegation, polling, results, cancellation, retry, restart, cleanup, automated
 browser proof, and a bounded authenticated Codex smoke test. The
@@ -157,11 +158,11 @@ V1 intentionally supports:
 
 - one repository or an explicit fleet of repository-owned configurations;
 - status, label, and schedule triggers;
-- Codex workers in managed worktrees or Docker clones;
+- Codex and Claude Code workers in managed worktrees;
 - explicit Markdown workflows;
 - durable queueing, supervision, history, cancellation, and recovery.
 
-Jira, Linear, cross-repository workflows, other agent runtimes, hosted workers,
+Jira, Linear, cross-repository workflows, additional agent runtimes, hosted workers,
 and webhook wake-ups can fit behind the same source, trigger, workflow, and
 worker boundaries later. This repository includes a
 [Jira source adapter](docs/jira.md) as an example of that extension point, but

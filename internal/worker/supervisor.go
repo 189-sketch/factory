@@ -28,11 +28,12 @@ const (
 )
 
 type supervisorInit struct {
-	CodexExecutable string `json:"codex_executable"`
-	Worktree        string `json:"worktree"`
-	ResultPath      string `json:"result_path"`
-	Prompt          string `json:"prompt"`
-	TimeoutSeconds  int    `json:"timeout_seconds"`
+	Runtime           string `json:"runtime"`
+	RuntimeExecutable string `json:"runtime_executable"`
+	Worktree          string `json:"worktree"`
+	ResultPath        string `json:"result_path"`
+	Prompt            string `json:"prompt"`
+	TimeoutSeconds    int    `json:"timeout_seconds"`
 }
 
 type supervisorMessage struct {
@@ -83,7 +84,11 @@ func RunSupervisor(control *os.File, input io.Reader, output, errorOutput io.Wri
 	if err := decoder.Decode(&init); err != nil {
 		return fmt.Errorf("decode supervisor input: %w", err)
 	}
-	if init.CodexExecutable == "" || init.Worktree == "" || init.ResultPath == "" || init.TimeoutSeconds < 1 {
+	if init.Runtime == "" {
+		init.Runtime = protocol.RuntimeCodex
+	}
+	if !protocol.SupportedRuntime(init.Runtime) || init.RuntimeExecutable == "" ||
+		init.Worktree == "" || init.ResultPath == "" || init.TimeoutSeconds < 1 {
 		return errors.New("supervisor input is incomplete")
 	}
 	if init.TimeoutSeconds > int(protocol.MaxTimeout/time.Second) {
@@ -170,7 +175,7 @@ func RunSupervisor(control *os.File, input io.Reader, output, errorOutput io.Wri
 				_ = anchor.Wait()
 				return writer.send(supervisorMessage{Type: "exit", Reason: "timeout", Error: "task timeout reached"})
 			case "start":
-				return superviseCodex(init, anchor, anchorIdentity, groupID, commands, controlErrors, leaseTimer, writer)
+				return superviseRuntime(init, anchor, anchorIdentity, groupID, commands, controlErrors, leaseTimer, writer)
 			}
 		case err := <-controlErrors:
 			_ = stopOwnedProcessGroup(anchorPID, anchorIdentity, terminationGrace)
@@ -187,7 +192,7 @@ func RunSupervisor(control *os.File, input io.Reader, output, errorOutput io.Wri
 	}
 }
 
-func superviseCodex(
+func superviseRuntime(
 	init supervisorInit,
 	anchor *exec.Cmd,
 	anchorIdentity string,
@@ -197,23 +202,39 @@ func superviseCodex(
 	leaseTimer *time.Timer,
 	writer *synchronizedEncoder,
 ) error {
-	command := exec.Command(init.CodexExecutable,
-		"exec", "--json", "--color", "never", "--output-last-message", init.ResultPath, "-")
+	var arguments []string
+	var claudeResult *claudeResultCapture
+	switch init.Runtime {
+	case protocol.RuntimeCodex:
+		arguments = []string{"exec", "--json", "--color", "never", "--output-last-message", init.ResultPath, "-"}
+	case protocol.RuntimeClaudeCode:
+		arguments = []string{
+			"--print",
+			"--output-format", "stream-json",
+			"--verbose",
+			"--permission-mode", "bypassPermissions",
+		}
+		claudeResult = &claudeResultCapture{}
+	default:
+		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, errors.New("unsupported worker runtime"))
+	}
+	displayName := runtimeDisplayName(init.Runtime)
+	command := exec.Command(init.RuntimeExecutable, arguments...)
 	command.Dir = init.Worktree
 	configureExistingProcessGroup(command, groupID)
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("open Codex stdin: %w", err))
+		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("open %s stdin: %w", displayName, err))
 	}
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("create Codex stdout pipe: %w", err))
+		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("create %s stdout pipe: %w", displayName, err))
 	}
 	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
 		stdout.Close()
 		stdoutWriter.Close()
-		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("create Codex stderr pipe: %w", err))
+		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("create %s stderr pipe: %w", displayName, err))
 	}
 	command.Stdout = stdoutWriter
 	command.Stderr = stderrWriter
@@ -222,7 +243,7 @@ func superviseCodex(
 		stdoutWriter.Close()
 		stderr.Close()
 		stderrWriter.Close()
-		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("start Codex: %w", err))
+		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("start %s: %w", displayName, err))
 	}
 	stdoutWriter.Close()
 	stderrWriter.Close()
@@ -235,15 +256,19 @@ func superviseCodex(
 		promptErrors <- errors.Join(writeErr, closeErr)
 	}()
 	stderrTail := &tailBuffer{limit: protocol.MaxErrorBytes}
+	var captureLine func([]byte, bool)
+	if claudeResult != nil {
+		captureLine = claudeResult.capture
+	}
 	readers := sync.WaitGroup{}
 	readers.Add(2)
 	go func() {
 		defer readers.Done()
-		streamSupervisorOutput(stdout, "stdout", writer, nil)
+		streamSupervisorOutput(stdout, "stdout", writer, nil, captureLine)
 	}()
 	go func() {
 		defer readers.Done()
-		streamSupervisorOutput(stderr, "stderr", writer, stderrTail)
+		streamSupervisorOutput(stderr, "stderr", writer, stderrTail, nil)
 	}()
 	wait := make(chan error, 1)
 	go func() {
@@ -313,7 +338,7 @@ func superviseCodex(
 			}
 		case <-time.After(2 * time.Second):
 			if waitErr == nil {
-				waitErr = errors.New("Codex process did not reap after group termination")
+				waitErr = fmt.Errorf("%s process did not reap after group termination", displayName)
 			}
 		}
 	}
@@ -322,14 +347,27 @@ func superviseCodex(
 	select {
 	case promptErr := <-promptErrors:
 		if promptErr != nil && !errors.Is(promptErr, os.ErrClosed) && reason == "exited" && waitErr == nil {
-			waitErr = fmt.Errorf("send prompt to Codex: %w", promptErr)
+			waitErr = fmt.Errorf("send prompt to %s: %w", displayName, promptErr)
 		}
 	default:
 	}
 
-	result, truncated, resultErr := readBoundedText(init.ResultPath, protocol.MaxResultBytes)
-	if resultErr != nil && reason == "exited" && waitErr == nil {
-		waitErr = resultErr
+	var result string
+	var truncated bool
+	if claudeResult != nil {
+		result = claudeResult.result
+		truncated = claudeResult.truncated
+		if !claudeResult.found && reason == "exited" && waitErr == nil {
+			waitErr = errors.New("Claude Code returned no terminal result event")
+		} else if claudeResult.isError && reason == "exited" && waitErr == nil {
+			waitErr = errors.New(firstNonEmpty(result, "Claude Code reported a terminal error"))
+		}
+	} else {
+		var resultErr error
+		result, truncated, resultErr = readBoundedText(init.ResultPath, protocol.MaxResultBytes)
+		if resultErr != nil && reason == "exited" && waitErr == nil {
+			waitErr = resultErr
+		}
 	}
 	_ = os.Remove(init.ResultPath)
 	message := supervisorMessage{
@@ -409,7 +447,13 @@ func parseControlCommand(command string) (string, time.Duration, error) {
 	return "", 0, fmt.Errorf("unknown supervisor command %q", command)
 }
 
-func streamSupervisorOutput(reader io.Reader, stream string, writer *synchronizedEncoder, tail *tailBuffer) {
+func streamSupervisorOutput(
+	reader io.Reader,
+	stream string,
+	writer *synchronizedEncoder,
+	tail *tailBuffer,
+	capture func([]byte, bool),
+) {
 	buffered := bufio.NewReaderSize(reader, 32<<10)
 	line := make([]byte, 0, 32<<10)
 	hadData := false
@@ -420,6 +464,9 @@ func streamSupervisorOutput(reader io.Reader, stream string, writer *synchronize
 			hadData = true
 			if tail != nil {
 				_, _ = tail.Write(fragment)
+			}
+			if capture != nil {
+				capture(fragment, false)
 			}
 			remaining := maxSupervisorLineBytes - len(line)
 			if len(fragment) > remaining {
@@ -433,6 +480,9 @@ func streamSupervisorOutput(reader io.Reader, stream string, writer *synchronize
 				if tail != nil {
 					_, _ = tail.Write([]byte{'\n'})
 				}
+				if capture != nil {
+					capture(nil, true)
+				}
 				_ = writer.send(supervisorMessage{
 					Type: "output", Stream: stream, Text: string(line), Truncated: truncated,
 				})
@@ -444,6 +494,298 @@ func streamSupervisorOutput(reader io.Reader, stream string, writer *synchronize
 		if err != nil {
 			return
 		}
+	}
+}
+
+type claudeResultCapture struct {
+	result    string
+	found     bool
+	isError   bool
+	truncated bool
+	line      claudeResultLineCapture
+}
+
+type claudeResultLineCapture struct {
+	sanitized        []byte
+	result           []byte
+	invalid          bool
+	depth            int
+	expectTopKey     bool
+	inString         bool
+	stringEscaped    bool
+	stringIsKey      bool
+	keyRaw           []byte
+	keyTooLarge      bool
+	awaitingColon    bool
+	candidateKey     string
+	valueKey         string
+	inResult         bool
+	resultEscaped    bool
+	unicodeDigits    int
+	unicodeValue     rune
+	pendingSurrogate rune
+	resultSeen       bool
+	resultTruncated  bool
+}
+
+func (capture *claudeResultCapture) capture(fragment []byte, end bool) {
+	if len(fragment) > 0 {
+		capture.line.write(fragment)
+	}
+	if !end {
+		return
+	}
+	capture.finishLine()
+}
+
+func (capture *claudeResultCapture) finishLine() {
+	line := &capture.line
+	if line.inResult {
+		line.invalid = true
+	}
+	var event struct {
+		Type    string `json:"type"`
+		Result  string `json:"result"`
+		IsError bool   `json:"is_error"`
+	}
+	if line.invalid || json.Unmarshal(line.sanitized, &event) != nil || event.Type != "result" {
+		line.reset()
+		return
+	}
+	result := event.Result
+	truncated := false
+	if line.resultSeen {
+		result = strings.ToValidUTF8(string(line.result), "\uFFFD")
+		truncated = line.resultTruncated || len(result) > protocol.MaxResultBytes
+	}
+	capture.result = boundedText(result, protocol.MaxResultBytes)
+	capture.found = true
+	capture.isError = event.IsError
+	capture.truncated = truncated || len(event.Result) > protocol.MaxResultBytes
+	line.reset()
+}
+
+func (line *claudeResultLineCapture) write(fragment []byte) {
+	for _, value := range fragment {
+		if line.inResult {
+			line.writeResultByte(value)
+			continue
+		}
+		line.appendSanitized(value)
+		if line.inString {
+			line.writeStringByte(value)
+			continue
+		}
+		if value == ' ' || value == '\t' || value == '\r' {
+			continue
+		}
+		if line.awaitingColon {
+			line.awaitingColon = false
+			if value == ':' {
+				line.valueKey = line.candidateKey
+				continue
+			}
+			line.valueKey = ""
+		}
+		if line.valueKey != "" {
+			key := line.valueKey
+			line.valueKey = ""
+			if key == "result" {
+				line.resultSeen = false
+				line.result = line.result[:0]
+				line.resultTruncated = false
+				line.pendingSurrogate = 0
+				if value == '"' {
+					line.resultSeen = true
+					line.inResult = true
+					continue
+				}
+			}
+		}
+		switch value {
+		case '"':
+			line.inString = true
+			line.stringEscaped = false
+			line.stringIsKey = line.depth == 1 && line.expectTopKey
+			line.keyRaw = line.keyRaw[:0]
+			line.keyTooLarge = false
+			line.expectTopKey = false
+		case '{', '[':
+			line.depth++
+			if value == '{' && line.depth == 1 {
+				line.expectTopKey = true
+			}
+		case '}', ']':
+			line.depth--
+		case ',':
+			if line.depth == 1 {
+				line.expectTopKey = true
+			}
+		}
+	}
+}
+
+func (line *claudeResultLineCapture) appendSanitized(value byte) {
+	if len(line.sanitized) == maxSupervisorLineBytes {
+		line.invalid = true
+		return
+	}
+	line.sanitized = append(line.sanitized, value)
+}
+
+func (line *claudeResultLineCapture) writeStringByte(value byte) {
+	if line.stringIsKey && value != '"' {
+		if len(line.keyRaw) < 256 {
+			line.keyRaw = append(line.keyRaw, value)
+		} else {
+			line.keyTooLarge = true
+		}
+	}
+	if line.stringEscaped {
+		line.stringEscaped = false
+		return
+	}
+	if value == '\\' {
+		line.stringEscaped = true
+		return
+	}
+	if value != '"' {
+		return
+	}
+	line.inString = false
+	if !line.stringIsKey || line.keyTooLarge {
+		return
+	}
+	quoted := make([]byte, 0, len(line.keyRaw)+2)
+	quoted = append(quoted, '"')
+	quoted = append(quoted, line.keyRaw...)
+	quoted = append(quoted, '"')
+	var key string
+	if json.Unmarshal(quoted, &key) == nil {
+		line.candidateKey = key
+		line.awaitingColon = true
+	}
+}
+
+func (line *claudeResultLineCapture) writeResultByte(value byte) {
+	if line.unicodeDigits > 0 {
+		digit, ok := hexDigit(value)
+		if !ok {
+			line.invalid = true
+			line.unicodeDigits = 0
+			return
+		}
+		line.unicodeValue = line.unicodeValue<<4 | rune(digit)
+		line.unicodeDigits--
+		if line.unicodeDigits == 0 {
+			line.appendUnicode(line.unicodeValue)
+		}
+		return
+	}
+	if line.resultEscaped {
+		line.resultEscaped = false
+		switch value {
+		case '"', '\\', '/':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{value})
+		case 'b':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{'\b'})
+		case 'f':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{'\f'})
+		case 'n':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{'\n'})
+		case 'r':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{'\r'})
+		case 't':
+			line.flushPendingSurrogate()
+			line.appendResult([]byte{'\t'})
+		case 'u':
+			line.unicodeDigits = 4
+			line.unicodeValue = 0
+		default:
+			line.invalid = true
+		}
+		return
+	}
+	switch {
+	case value == '"':
+		line.flushPendingSurrogate()
+		line.inResult = false
+		line.appendSanitized(value)
+	case value == '\\':
+		line.resultEscaped = true
+	case value < 0x20:
+		line.invalid = true
+	default:
+		line.flushPendingSurrogate()
+		line.appendResult([]byte{value})
+	}
+}
+
+func (line *claudeResultLineCapture) appendUnicode(value rune) {
+	switch {
+	case value >= 0xD800 && value <= 0xDBFF:
+		line.flushPendingSurrogate()
+		line.pendingSurrogate = value
+	case value >= 0xDC00 && value <= 0xDFFF && line.pendingSurrogate != 0:
+		combined := 0x10000 + (line.pendingSurrogate-0xD800)<<10 + value - 0xDC00
+		line.pendingSurrogate = 0
+		line.appendRune(combined)
+	case value >= 0xDC00 && value <= 0xDFFF:
+		line.appendRune(utf8.RuneError)
+	default:
+		line.flushPendingSurrogate()
+		line.appendRune(value)
+	}
+}
+
+func (line *claudeResultLineCapture) flushPendingSurrogate() {
+	if line.pendingSurrogate == 0 {
+		return
+	}
+	line.pendingSurrogate = 0
+	line.appendRune(utf8.RuneError)
+}
+
+func (line *claudeResultLineCapture) appendRune(value rune) {
+	var encoded [utf8.UTFMax]byte
+	count := utf8.EncodeRune(encoded[:], value)
+	line.appendResult(encoded[:count])
+}
+
+func (line *claudeResultLineCapture) appendResult(value []byte) {
+	if len(line.result) < protocol.MaxResultBytes+utf8.UTFMax {
+		remaining := protocol.MaxResultBytes + utf8.UTFMax - len(line.result)
+		if len(value) > remaining {
+			value = value[:remaining]
+		}
+		line.result = append(line.result, value...)
+	}
+	if len(line.result) > protocol.MaxResultBytes {
+		line.resultTruncated = true
+	}
+}
+
+func (line *claudeResultLineCapture) reset() {
+	sanitized := line.sanitized[:0]
+	result := line.result[:0]
+	*line = claudeResultLineCapture{sanitized: sanitized, result: result}
+}
+
+func hexDigit(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
 	}
 }
 

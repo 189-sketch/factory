@@ -108,6 +108,41 @@ case "$prompt" in
 esac
 `
 
+const fakeClaudeScript = `#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then
+  echo "2.1.220 (Claude Code)"
+  exit 0
+fi
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ] && [ "${3:-}" = "--json" ]; then
+  echo '{"loggedIn":true}'
+  exit 0
+fi
+if [ "${1:-}" != "--print" ] ||
+   [ "${2:-}" != "--output-format" ] ||
+   [ "${3:-}" != "stream-json" ] ||
+   [ "${4:-}" != "--verbose" ] ||
+   [ "${5:-}" != "--permission-mode" ] ||
+   [ "${6:-}" != "bypassPermissions" ]; then
+  echo "unexpected fake Claude Code arguments" >&2
+  exit 90
+fi
+prompt="$(cat)"
+if [ "$prompt" != "complete this task" ]; then
+  echo "unexpected fake Claude Code prompt" >&2
+  exit 91
+fi
+if [ "${FACTORY_TEST_CLAUDE_OVERSIZED_RESULT:-}" = "1" ]; then
+  printf '{"type":"result","subtype":"success","result":"'
+  head -c 1100000 /dev/zero | tr '\000' x
+  printf '"}\n'
+  exit 0
+fi
+echo '{"type":"system","subtype":"init"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+echo '{"type":"result","subtype":"success","result":"completed by fake Claude Code"}'
+`
+
 func TestWorkerSupervisorHelperProcess(t *testing.T) {
 	if os.Getenv("FACTORY_TEST_SUPERVISOR") != "1" {
 		return
@@ -196,10 +231,129 @@ func writeFakeCodex(t *testing.T, path string) {
 	}
 }
 
+func writeFakeClaude(t *testing.T, path string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(fakeClaudeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaudeCodeHealthAndSupervisorContract(t *testing.T) {
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	writeFakeClaude(t, claudePath)
+	value := checkHealth(context.Background(), "git", protocol.RuntimeClaudeCode, claudePath)
+	if value.State != "healthy" || value.RuntimeVersion != "2.1.220 (Claude Code)" {
+		t.Fatalf("Claude Code health = %#v", value)
+	}
+
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	repository := createRepository(t, "claude-supervisor")
+	process, err := startSupervisor(
+		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		supervisorInit{
+			Runtime:           protocol.RuntimeClaudeCode,
+			RuntimeExecutable: claudePath,
+			Worktree:          repository.path,
+			ResultPath:        filepath.Join(t.TempDir(), "unused-result"),
+			Prompt:            "complete this task",
+			TimeoutSeconds:    60,
+		},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.awaitReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.send("start"); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	sawResultEvent := false
+	for {
+		select {
+		case message := <-process.messages:
+			if message.Type == "output" && strings.Contains(message.Text, `"type":"result"`) {
+				sawResultEvent = true
+			}
+			if message.Type != "exit" {
+				continue
+			}
+			if message.ExitCode != 0 || message.Reason != "exited" ||
+				message.Result != "completed by fake Claude Code" || !sawResultEvent {
+				t.Fatalf("Claude Code supervisor exit = %#v", message)
+			}
+			return
+		case err := <-process.decodeErrors:
+			t.Fatalf("decode Claude Code supervisor output: %v", err)
+		case <-timeout.C:
+			t.Fatal("Claude Code supervisor did not exit")
+		}
+	}
+}
+
+func TestClaudeCodeSupervisorAcceptsOversizedResult(t *testing.T) {
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	t.Setenv("FACTORY_TEST_CLAUDE_OVERSIZED_RESULT", "1")
+	claudePath := filepath.Join(t.TempDir(), "claude")
+	writeFakeClaude(t, claudePath)
+	repository := createRepository(t, "claude-oversized-result")
+	process, err := startSupervisor(
+		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		supervisorInit{
+			Runtime:           protocol.RuntimeClaudeCode,
+			RuntimeExecutable: claudePath,
+			Worktree:          repository.path,
+			ResultPath:        filepath.Join(t.TempDir(), "unused-result"),
+			Prompt:            "complete this task",
+			TimeoutSeconds:    60,
+		},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.awaitReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.send("start"); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	sawTruncatedOutput := false
+	for {
+		select {
+		case message := <-process.messages:
+			if message.Type == "output" && message.Stream == "stdout" && message.Truncated {
+				sawTruncatedOutput = len(message.Text) == maxSupervisorLineBytes
+			}
+			if message.Type != "exit" {
+				continue
+			}
+			if message.ExitCode != 0 || message.Reason != "exited" || !message.Truncated ||
+				len(message.Result) != protocol.MaxResultBytes || !sawTruncatedOutput {
+				t.Fatalf("Claude Code oversized result exit = %#v; truncated output = %v",
+					message, sawTruncatedOutput)
+			}
+			if strings.Trim(message.Result, "x") != "" {
+				t.Fatal("Claude Code oversized result did not preserve its bounded prefix")
+			}
+			return
+		case err := <-process.decodeErrors:
+			t.Fatalf("decode Claude Code supervisor output: %v", err)
+		case <-timeout.C:
+			t.Fatal("Claude Code oversized result supervisor did not exit")
+		}
+	}
+}
+
 func testOptions(codexPath string) Options {
 	return Options{
 		GitExecutable:        "git",
-		CodexExecutable:      codexPath,
+		RuntimeExecutable:    codexPath,
 		SupervisorCommand:    []string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
 		WorkerVersion:        "test",
 		PollInterval:         20 * time.Millisecond,
@@ -369,7 +523,7 @@ func TestConfigurationStableIdentityLockAndHealthRecovery(t *testing.T) {
 	}
 	writeFakeCodex(t, codexPath)
 	waitForWorker(t, fixture.store, firstID, func(worker protocol.Worker) bool {
-		return worker.Health == "healthy" && worker.CodexVersion == "codex-cli test-1.0"
+		return worker.Health == "healthy" && worker.RuntimeVersion == "codex-cli test-1.0"
 	})
 	cancel()
 	if err := <-done; err != nil {
@@ -1085,7 +1239,7 @@ func TestParentPipeLossStopsCodexGroup(t *testing.T) {
 	process, err := startSupervisor(
 		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
 		supervisorInit{
-			CodexExecutable: codexPath, Worktree: repository.path, ResultPath: result,
+			RuntimeExecutable: codexPath, Worktree: repository.path, ResultPath: result,
 			Prompt: "FAKE_MODE=fork", TimeoutSeconds: 60,
 		}, io.Discard)
 	if err != nil {
@@ -1168,6 +1322,7 @@ func TestLoadConfigRejectsUnknownAndResolvesRelativePaths(t *testing.T) {
 	configPath := filepath.Join(root, "worker.toml")
 	body := fmt.Sprintf(`server = "http://127.0.0.1:7337"
 name = "local"
+runtime = "claude-code"
 max_concurrent = 1
 data_directory = "data"
 
@@ -1184,11 +1339,90 @@ path = %q
 	if config.DataDirectory != filepath.Join(root, "data") {
 		t.Fatalf("resolved data directory = %s", config.DataDirectory)
 	}
+	if config.Runtime != protocol.RuntimeClaudeCode {
+		t.Fatalf("runtime = %q", config.Runtime)
+	}
 	if err := os.WriteFile(configPath, []byte(body+"unsafe_shortcut = true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadConfig(configPath); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown field error = %v", err)
+	}
+}
+
+func TestDefaultConfigPathUsesFactoryHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FACTORY_V2_DATA_HOME", "")
+	t.Setenv("FACTORY_V2_WORKER_CONFIG", "")
+
+	path, err := DefaultConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".factory", "worker.toml"); path != want {
+		t.Fatalf("config path = %q, want %q", path, want)
+	}
+}
+
+func TestDefaultConfigPathHonorsOverrides(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("FACTORY_V2_DATA_HOME", root)
+	t.Setenv("FACTORY_V2_WORKER_CONFIG", "")
+
+	path, err := DefaultConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "worker.toml"); path != want {
+		t.Fatalf("config path = %q, want %q", path, want)
+	}
+
+	explicit := filepath.Join(t.TempDir(), "custom.toml")
+	t.Setenv("FACTORY_V2_WORKER_CONFIG", explicit)
+	path, err = DefaultConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != explicit {
+		t.Fatalf("config path = %q, want %q", path, explicit)
+	}
+}
+
+func TestValidateNoLegacyDefaultConfigRefusesLegacyState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("FACTORY_V2_DATA_HOME", "")
+	t.Setenv("FACTORY_V2_WORKER_CONFIG", "")
+	legacyRoot := filepath.Join(home, ".factory-v2")
+	legacyConfig := filepath.Join(legacyRoot, "worker.toml")
+	if err := os.MkdirAll(legacyRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyConfig, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ValidateNoLegacyDefaultConfig()
+	if err == nil {
+		t.Fatal("legacy V2 worker state was accepted")
+	}
+	for _, want := range []string{legacyConfig, "FACTORY_V2_DATA_HOME=" + legacyRoot} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err, want)
+		}
+	}
+
+	t.Setenv("FACTORY_V2_DATA_HOME", legacyRoot)
+	if err := ValidateNoLegacyDefaultConfig(); err != nil {
+		t.Fatalf("explicit legacy root validation: %v", err)
+	}
+	path, err := DefaultConfigPath()
+	if err != nil {
+		t.Fatalf("explicit legacy root: %v", err)
+	}
+	if path != legacyConfig {
+		t.Fatalf("explicit legacy config = %q, want %q", path, legacyConfig)
 	}
 }
 
@@ -1281,7 +1515,7 @@ func TestSupervisorOutputBoundsOneLogicalLineAndPreservesNextLine(t *testing.T) 
 	second := `{"type":"item.completed","text":"next"}`
 	var output bytes.Buffer
 	writer := &synchronizedEncoder{encoder: json.NewEncoder(&output)}
-	streamSupervisorOutput(strings.NewReader(first+"\n"+second+"\n"), "stdout", writer, nil)
+	streamSupervisorOutput(strings.NewReader(first+"\n"+second+"\n"), "stdout", writer, nil, nil)
 
 	decoder := json.NewDecoder(&output)
 	var messages []supervisorMessage
@@ -1308,6 +1542,48 @@ func TestSupervisorOutputBoundsOneLogicalLineAndPreservesNextLine(t *testing.T) 
 	}
 }
 
+func TestClaudeResultCaptureRejectsOversizedMalformedAndNonResultLines(t *testing.T) {
+	cases := map[string]string{
+		"malformed result": `{"type":"result","result":"` +
+			strings.Repeat("x", maxSupervisorLineBytes+100) + `\q"}`,
+		"non-result event": `{"type":"assistant","result":"` +
+			strings.Repeat("x", maxSupervisorLineBytes+100) + `"}`,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			capture := &claudeResultCapture{}
+			writer := &synchronizedEncoder{encoder: json.NewEncoder(io.Discard)}
+			streamSupervisorOutput(strings.NewReader(input+"\n"), "stdout", writer, nil, capture.capture)
+			if capture.found {
+				t.Fatalf("oversized %s was accepted as a terminal result", name)
+			}
+		})
+	}
+}
+
+func TestClaudeResultCaptureDecodesEscapedResultBeyondOutputLimit(t *testing.T) {
+	result := strings.Repeat("\x00", maxSupervisorLineBytes/6+100)
+	input, err := json.Marshal(map[string]any{
+		"type":     "result",
+		"subtype":  "success",
+		"is_error": false,
+		"result":   result,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(input) <= maxSupervisorLineBytes || len(result) >= protocol.MaxResultBytes {
+		t.Fatalf("invalid test bounds: encoded=%d result=%d", len(input), len(result))
+	}
+	capture := &claudeResultCapture{}
+	writer := &synchronizedEncoder{encoder: json.NewEncoder(io.Discard)}
+	streamSupervisorOutput(bytes.NewReader(append(input, '\n')), "stdout", writer, nil, capture.capture)
+	if !capture.found || capture.truncated || capture.result != result {
+		t.Fatalf("escaped oversized-line result: found=%v truncated=%v result length=%d",
+			capture.found, capture.truncated, len(capture.result))
+	}
+}
+
 func TestEventSenderRetriesTransientFailureWithSameSequence(t *testing.T) {
 	requests := make(chan protocol.EventBatchRequest, 2)
 	var count atomic.Int32
@@ -1329,7 +1605,7 @@ func TestEventSenderRetriesTransientFailureWithSameSequence(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sender := newEventSender(ctx, newClient(server.URL, nil), "attempt", "lease")
+	sender := newEventSender(ctx, newClient(server.URL, nil), "attempt", "lease", protocol.RuntimeClaudeCode)
 	sender.enqueue("stderr", "retry me", false)
 	sender.closeAndWait(5 * time.Second)
 	if count.Load() != 2 {
@@ -1339,6 +1615,8 @@ func TestEventSenderRetriesTransientFailureWithSameSequence(t *testing.T) {
 	second := <-requests
 	if len(first.Events) != 1 || len(second.Events) != 1 ||
 		first.Events[0].Sequence != 0 || second.Events[0].Sequence != 0 ||
+		first.Events[0].Kind != protocol.RuntimeClaudeCode ||
+		second.Events[0].Kind != protocol.RuntimeClaudeCode ||
 		!bytes.Equal(first.Events[0].Payload, second.Events[0].Payload) {
 		t.Fatalf("event retry changed content: first=%#v second=%#v", first.Events, second.Events)
 	}
