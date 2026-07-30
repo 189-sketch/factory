@@ -71,7 +71,8 @@ exit 64
 
 #[test]
 fn repository_factory_config_polls_github_issues_by_readiness_label() {
-    let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".factory/config.toml");
+    let config_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.factory/config.toml");
     let config = fs::read_to_string(config_path)
         .unwrap()
         .parse::<DocumentMut>()

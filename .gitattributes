@@ -1,0 +1,2 @@
+*.sh text eol=lf
+factory-core/.factory/sources/* text eol=lf

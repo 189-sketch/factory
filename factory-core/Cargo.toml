@@ -1,0 +1,49 @@
+[package]
+name = "factory-core"
+description = "A local-first supervisor for agent workflows"
+readme = "../README.md"
+keywords = ["agents", "automation", "cli", "github", "workflow"]
+categories = ["command-line-utilities", "development-tools"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "factory"
+path = "src/lib.rs"
+
+[[bin]]
+name = "factory"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+cron.workspace = true
+dirs.workspace = true
+fs2.workspace = true
+humantime.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true

@@ -252,6 +252,10 @@ enum Command {
         #[arg(long)]
         data_directory: Option<PathBuf>,
     },
+    /// Serve the Factory control plane (health endpoint only, for now).
+    Serve,
+    /// Bootstrap a container: clone, restore snapshots, init, serve, and run.
+    AgentEntrypoint,
 }
 
 #[derive(Debug, Subcommand)]
@@ -757,6 +761,41 @@ async fn run_cli() -> Result<u8> {
                 remove_database_files(&database)?;
             }
             println!("action: removed durable state; configuration and worktrees preserved");
+        }
+        Command::Serve => {
+            let current = std::env::current_dir().context("failed to resolve current directory")?;
+            let repository = factory::init::discover_repository(&current)?;
+            let config = factory::serve::control_plane_config(&repository)?;
+            let port = factory::serve::serve_port()?;
+            write_stderr_best_effort(
+                format!(
+                    "Factory serving: port={port} repository={}\n",
+                    repository.display()
+                )
+                .as_bytes(),
+            );
+            let cancellation = CancellationToken::new();
+            let signal_token = cancellation.clone();
+            let signal_task = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    signal_token.cancel();
+                }
+            });
+            factory::serve::serve(&config, port, cancellation).await?;
+            signal_task.abort();
+            write_stderr_best_effort(b"Factory serve stopped.\n");
+        }
+        Command::AgentEntrypoint => {
+            let cancellation = CancellationToken::new();
+            let signal_token = cancellation.clone();
+            let signal_task = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    signal_token.cancel();
+                }
+            });
+            let result = factory::entrypoint::agent_entrypoint(cancellation).await;
+            signal_task.abort();
+            return result;
         }
     }
 
@@ -1398,8 +1437,7 @@ async fn run_poller(
             signal_token.cancel();
         }
     });
-    let daemon = FactoryDaemon::new(config, catalog, ledger.path());
-    daemon.run(cancellation).await?;
+    factory::daemon::run_repository_daemon(config, catalog, ledger.path(), cancellation).await?;
     signal_task.abort();
     write_stderr_best_effort(b"Factory stopped.\n");
     Ok(0)
