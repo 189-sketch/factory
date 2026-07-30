@@ -3847,6 +3847,20 @@ fn decrement_active(active: &mut HashMap<String, usize>, repository: &str) {
     }
 }
 
+/// Run the repository polling loop in-process until cancellation.
+/// Shared by `factory run` and `factory agent-entrypoint` so both drive the
+/// same daemon over the same Config and Ledger handles.
+pub async fn run_repository_daemon(
+    config: Config,
+    catalog: WorkflowCatalog,
+    ledger_path: impl Into<PathBuf>,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    FactoryDaemon::new(config, catalog, ledger_path)
+        .run(cancellation)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]

@@ -848,7 +848,7 @@ pub fn repository_remote_identity(repository: &Path) -> Result<String> {
     canonical_github_identity(origin.trim()).context("origin is not a supported GitHub remote")
 }
 
-fn canonical_github_identity(origin: &str) -> Result<String> {
+pub fn canonical_github_identity(origin: &str) -> Result<String> {
     let path = if let Some(path) = origin.strip_prefix("git@github.com:") {
         path
     } else if let Some(remainder) = origin.strip_prefix("https://") {

@@ -131,7 +131,7 @@ fn catalog_display_groups_the_repository_and_aligns_workflows() {
 
 #[test]
 fn jira_example_uses_flat_executable_workflow_paths() {
-    let config = include_str!("../examples/jira-config.toml").replace(
+    let config = include_str!("../../examples/jira-config.toml").replace(
         r#"command = [
   ".factory/sources/jira",
   "--project", "SPS",
@@ -143,7 +143,7 @@ fn jira_example_uses_flat_executable_workflow_paths() {
     for name in ["triage", "implement"] {
         fs::copy(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join(format!("examples/jira-{name}.md")),
+                .join(format!("../examples/jira-{name}.md")),
             fixture
                 .repository
                 .join(format!(".factory/workflows/jira-{name}.md")),

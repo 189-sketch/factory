@@ -37,7 +37,7 @@ esac
             bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/create-demo-issue.sh");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/create-demo-issue.sh");
 
         let output = Command::new(script)
             .arg("A rough idea")
@@ -64,7 +64,7 @@ esac
 
     #[test]
     fn rejects_a_missing_idea_without_calling_github() {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/create-demo-issue.sh");
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/create-demo-issue.sh");
 
         let output = Command::new(script).output().unwrap();
 

@@ -12,6 +12,8 @@ WORKDIR /src
 # 仅用缓存层拷清单,再拷源码
 COPY Cargo.toml Cargo.lock ./
 COPY factory-core/Cargo.toml ./factory-core/Cargo.toml
+# edition 2024 要求 resolver>=2;顶层清单不含 package 时 cargo 需显式指定
+RUN printf '\n[workspace]\nresolver = "3"\n' >> Cargo.toml
 COPY factory-core/src ./factory-core/src
 
 # rusqlite bundled 需要 C 工具链编译内嵌 sqlite

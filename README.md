@@ -121,6 +121,23 @@ contract, first demonstration, two-repository fleet setup, and sandbox setup. Th
 [operations guide](docs/operations.md) covers inspection, cancellation,
 recovery, and cleanup.
 
+## Container deployment
+
+The repository builds as a Cargo workspace with `factory-core` as the only
+member; the binary stays `factory`. Two subcommands back the container image
+contract (`docker/Dockerfile.base`):
+
+- `factory serve` binds `0.0.0.0:${FACTORY_PORT:-7788}` and answers
+  `GET /api/v1/health` with `{status, version, repository}`; every other path
+  is 404. The full HTTP/SSE control plane lands in a later change.
+- `factory agent-entrypoint` bootstraps a fresh container from environment:
+  `FACTORY_GIT_URL` (required) and `FACTORY_BRANCH` (optional) drive a clone
+  into `${FACTORY_WORK_DIR:-/factory/work}/<repo>`, a `factory/snapshot/<repo>`
+  retention branch is restored when present, `factory init` scaffolds
+  `.factory/` idempotently, then the control plane and the polling loop run
+  concurrently in one process. Any failed step exits non-zero with sanitized
+  output.
+
 ## V1 scope
 
 V1 intentionally supports:

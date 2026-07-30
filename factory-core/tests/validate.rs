@@ -232,8 +232,11 @@ fn rejects_an_existing_database_that_is_not_writable() {
 #[test]
 fn validates_a_configurable_source_label_trigger() {
     let (temp, path, repository, data_home) = valid_config();
-    let contents =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml")).unwrap();
+    let contents = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/config.toml"
+    ))
+    .unwrap();
     fs::write(
         &path,
         contents.replace(
@@ -302,8 +305,11 @@ exit 64
 #[test]
 fn rejects_an_empty_source_command() {
     let (_temp, path, _repository, data_home) = valid_config();
-    let contents =
-        fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/config.toml")).unwrap();
+    let contents = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/config.toml"
+    ))
+    .unwrap();
     fs::write(
         &path,
         contents.replace(r#"command = [".factory/sources/github"]"#, "command = []"),
