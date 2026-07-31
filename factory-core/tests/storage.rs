@@ -1989,3 +1989,107 @@ fn appended_event_is_visible_within_the_same_transaction_as_state_transition() {
         "claim must append a task.state event in the same transaction, got {events:?}"
     );
 }
+
+#[test]
+fn task_lifecycle_emits_ordered_task_state_and_run_outcome_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    ledger.enqueue(&ticket("rev-1")).unwrap();
+    let runtimes = ticket_runtimes();
+    let claimed = ledger
+        .claim_and_start_run(
+            &["owainlewis/factory".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    ledger
+        .finish_run_and_task(
+            claimed.run.id,
+            RunOutcome::Succeeded,
+            Some("opened PR https://github.com/owainlewis/factory/pull/45"),
+            None,
+            Some("session-1"),
+        )
+        .unwrap();
+
+    let events = ledger.events_after(0).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+    assert_eq!(
+        kinds,
+        vec!["task.state", "task.state", "run.outcome", "task.state"],
+        "expected create -> claim -> outcome -> terminal, got {kinds:?}"
+    );
+    // Global monotonic seq.
+    for window in events.windows(2) {
+        assert!(window[0].event_id < window[1].event_id);
+    }
+    // create: from=null -> queued
+    assert_eq!(events[0].payload["from"], serde_json::Value::Null);
+    assert_eq!(events[0].payload["to"], "queued");
+    assert_eq!(events[0].task_id, Some(claimed.task.id));
+    assert_eq!(events[0].run_id, None);
+    // claim: queued -> running, linked to the run
+    assert_eq!(events[1].payload["from"], "queued");
+    assert_eq!(events[1].payload["to"], "running");
+    assert_eq!(events[1].run_id, Some(claimed.run.id));
+    // run.outcome carries the PR link and 1-based attempt
+    assert_eq!(events[2].event_type, "run.outcome");
+    assert_eq!(events[2].payload["outcome"], "succeeded");
+    assert_eq!(events[2].payload["attempt"], 1);
+    assert!(
+        events[2].payload["result"]
+            .as_str()
+            .unwrap()
+            .contains("pull/45")
+    );
+    // terminal task.state: running -> succeeded
+    assert_eq!(events[3].payload["from"], "running");
+    assert_eq!(events[3].payload["to"], "succeeded");
+    assert_eq!(events[3].task_id, Some(claimed.task.id));
+}
+
+#[test]
+fn run_outcome_error_is_sanitized_in_the_event_payload() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    ledger.enqueue(&ticket("rev-1")).unwrap();
+    let runtimes = ticket_runtimes();
+    let claimed = ledger
+        .claim_and_start_run(
+            &["owainlewis/factory".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    let secret = "ghp_0123456789abcdef0123456789abcdef0123";
+    ledger
+        .finish_run_and_task(
+            claimed.run.id,
+            RunOutcome::Failed,
+            None,
+            Some(&format!("clone failed with {secret}")),
+            None,
+        )
+        .unwrap();
+    let events = ledger.events_after(0).unwrap();
+    let outcome = events
+        .iter()
+        .find(|e| e.event_type == "run.outcome")
+        .unwrap();
+    let rendered = outcome.payload.to_string();
+    assert!(
+        !rendered.contains(secret),
+        "run.outcome error must be sanitized, got {rendered}"
+    );
+}
