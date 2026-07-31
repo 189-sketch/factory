@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use axum::extract::{Query, Request, State};
+use axum::extract::{Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::middleware::{self, Next};
@@ -18,7 +18,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
-use crate::storage::{DATABASE_NAME, Ledger, LedgerEvent};
+use crate::inspection::{RunView, TaskView};
+use crate::storage::{DATABASE_NAME, Ledger, LedgerEvent, RunContainer, RunSandbox, TaskState};
 
 const DEFAULT_PORT: u16 = 7788;
 
@@ -144,8 +145,10 @@ fn build_router(state: AppState) -> Router {
     // additionally accepts `?token=` because EventSource cannot set headers.
     let protected = Router::new()
         .route("/events", get(events_handler))
-        .route("/api/v1/tasks", get(unimplemented_handler))
-        .route("/api/v1/runs", get(unimplemented_handler))
+        .route("/api/v1/tasks", get(tasks_handler))
+        .route("/api/v1/tasks/{id}", get(task_handler))
+        .route("/api/v1/runs", get(runs_handler))
+        .route("/api/v1/runs/{id}", get(run_handler))
         .route("/api/v1/status", get(unimplemented_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -158,6 +161,209 @@ fn build_router(state: AppState) -> Router {
 
 async fn health_handler(State(state): State<AppState>) -> Json<HealthReport> {
     Json(health_report(&state.config))
+}
+
+/// The error half of a control-plane handler result. `Response` is large, so
+/// clippy's large-Err lint fires; that is the idiomatic axum handler shape, so
+/// the lint is allowed at the handler sites rather than distorting the API.
+type HandlerResult<T> = Result<T, Response>;
+
+/// Open the ledger for a control-plane query, mapping a failure to the shared
+/// error envelope.
+#[allow(clippy::result_large_err)]
+fn open_ledger(state: &AppState) -> Result<Ledger, Response> {
+    Ledger::open(&state.database).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ledger_unavailable",
+            &format!("failed to open the ledger: {error}"),
+        )
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct TasksQuery {
+    state: Option<String>,
+}
+
+#[allow(clippy::result_large_err)]
+async fn tasks_handler(
+    State(state): State<AppState>,
+    Query(query): Query<TasksQuery>,
+) -> HandlerResult<Json<Vec<TaskView>>> {
+    let state_filter = match query.state.as_deref() {
+        Some(value) => Some(value.parse::<TaskState>().map_err(|_| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_state",
+                &format!("unknown task state {value:?}"),
+            )
+        })?),
+        None => None,
+    };
+    let ledger = open_ledger(&state)?;
+    let tasks = ledger.tasks().map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to list tasks: {error}"),
+        )
+    })?;
+    let views = tasks
+        .iter()
+        .filter(|task| state_filter.is_none_or(|state| task.state == state))
+        .map(TaskView::from)
+        .collect();
+    Ok(Json(views))
+}
+
+#[allow(clippy::result_large_err)]
+async fn task_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+) -> HandlerResult<Json<TaskView>> {
+    let ledger = open_ledger(&state)?;
+    let task = ledger.task(id).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to load task: {error}"),
+        )
+    })?;
+    match task {
+        Some(task) => Ok(Json(TaskView::from(&task))),
+        None => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("task {id} does not exist"),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RunsQuery {
+    task_id: Option<i64>,
+}
+
+#[allow(clippy::result_large_err)]
+async fn runs_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RunsQuery>,
+) -> HandlerResult<Json<Vec<RunView>>> {
+    let ledger = open_ledger(&state)?;
+    let runs = match query.task_id {
+        Some(task_id) => ledger.runs_for_task(task_id),
+        None => ledger.runs(None),
+    }
+    .map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to list runs: {error}"),
+        )
+    })?;
+    Ok(Json(runs.iter().map(RunView::from).collect()))
+}
+
+#[derive(Debug, Serialize)]
+struct RunDetail {
+    #[serde(flatten)]
+    run: RunView,
+    container: Option<ContainerView>,
+    sandbox: Option<SandboxView>,
+}
+
+/// Serializable container metadata for a run detail (RunContainer holds a
+/// PathBuf and does not implement Serialize).
+#[derive(Debug, Serialize)]
+struct ContainerView {
+    container_id: String,
+    instance_id: String,
+    image_ref: String,
+    state: String,
+    exit_code: Option<i32>,
+    created_at: i64,
+    removed_at: Option<i64>,
+}
+
+impl From<&RunContainer> for ContainerView {
+    fn from(container: &RunContainer) -> Self {
+        Self {
+            container_id: container.container_id.clone(),
+            instance_id: container.instance_id.clone(),
+            image_ref: container.image_ref.clone(),
+            state: container.state.clone(),
+            exit_code: container.exit_code,
+            created_at: container.created_at,
+            removed_at: container.removed_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct SandboxView {
+    sandbox_name: String,
+    instance_id: String,
+    template_ref: String,
+    state: String,
+    exit_code: Option<i32>,
+    created_at: i64,
+    removed_at: Option<i64>,
+}
+
+impl From<&RunSandbox> for SandboxView {
+    fn from(sandbox: &RunSandbox) -> Self {
+        Self {
+            sandbox_name: sandbox.sandbox_name.clone(),
+            instance_id: sandbox.instance_id.clone(),
+            template_ref: sandbox.template_ref.clone(),
+            state: sandbox.state.clone(),
+            exit_code: sandbox.exit_code,
+            created_at: sandbox.created_at,
+            removed_at: sandbox.removed_at,
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+async fn run_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+) -> HandlerResult<Json<RunDetail>> {
+    let ledger = open_ledger(&state)?;
+    let run = ledger.run(id).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to load run: {error}"),
+        )
+    })?;
+    let Some(run) = run else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("run {id} does not exist"),
+        ));
+    };
+    let container = ledger.run_container(id).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to load the run container: {error}"),
+        )
+    })?;
+    let sandbox = ledger.run_sandbox(id).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to load the run sandbox: {error}"),
+        )
+    })?;
+    Ok(Json(RunDetail {
+        run: RunView::from(&run),
+        container: container.as_ref().map(ContainerView::from),
+        sandbox: sandbox.as_ref().map(SandboxView::from),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
