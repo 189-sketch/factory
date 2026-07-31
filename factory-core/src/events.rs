@@ -4,6 +4,7 @@
 //! event never reaches the ui (the additive-only contract's guardrail).
 
 use anyhow::{Context, Result};
+use std::str::FromStr;
 
 use crate::storage::EventType;
 
@@ -46,27 +47,35 @@ impl EventValidator {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         let payload = envelope.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-        let validator = match event_type {
-            "task.state" => &self.task_state,
-            "run.activity" => &self.run_activity,
-            "run.outcome" => &self.run_outcome,
-            "repo.health" => &self.repo_health,
+        let Some(validator) = self.validator_for_type(event_type) else {
             // Unknown types are tolerated (additive-only): the ui ignores them.
-            _ => return Ok(()),
+            return Ok(());
         };
         validate(validator, &payload)
+    }
+
+    /// The payload validator for an event-type string, or None for an unknown
+    /// (tolerated, additive-only) type.
+    fn validator_for_type(&self, event_type: &str) -> Option<&jsonschema::Validator> {
+        EventType::from_str(event_type)
+            .ok()
+            .map(|event_type| self.validator_for(event_type))
+    }
+
+    /// The payload validator for a known event type.
+    fn validator_for(&self, event_type: EventType) -> &jsonschema::Validator {
+        match event_type {
+            EventType::TaskState => &self.task_state,
+            EventType::RunActivity => &self.run_activity,
+            EventType::RunOutcome => &self.run_outcome,
+            EventType::RepoHealth => &self.repo_health,
+        }
     }
 
     /// Convenience for tests and the fanout: is this event of the given type
     /// valid against its payload schema?
     pub fn payload_valid(&self, event_type: EventType, payload: &serde_json::Value) -> bool {
-        let validator = match event_type {
-            EventType::TaskState => &self.task_state,
-            EventType::RunActivity => &self.run_activity,
-            EventType::RunOutcome => &self.run_outcome,
-            EventType::RepoHealth => &self.repo_health,
-        };
-        validator.is_valid(payload)
+        self.validator_for(event_type).is_valid(payload)
     }
 }
 

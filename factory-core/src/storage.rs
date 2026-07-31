@@ -672,6 +672,20 @@ impl EventType {
     }
 }
 
+impl FromStr for EventType {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "task.state" => Ok(Self::TaskState),
+            "run.activity" => Ok(Self::RunActivity),
+            "run.outcome" => Ok(Self::RunOutcome),
+            "repo.health" => Ok(Self::RepoHealth),
+            other => bail!("unknown event type {other:?}"),
+        }
+    }
+}
+
 /// A single appended event row. `payload` is the sanitized envelope payload
 /// (the per-type body validated against schema/events/*.json downstream).
 #[derive(Debug, Clone, PartialEq)]
@@ -4062,7 +4076,9 @@ fn run_outcome_payload(
         RunOutcome::Succeeded => "succeeded",
         RunOutcome::Failed => "failed",
         RunOutcome::Cancelled => "cancelled",
-        RunOutcome::Running => "succeeded", // unreachable; terminal callers only
+        // run.outcome is a terminal event; a non-terminal outcome here is a
+        // programming error and must never silently emit a wrong payload.
+        RunOutcome::Running => unreachable!("run.outcome requires a terminal outcome"),
     };
     serde_json::json!({
         "outcome": outcome,
