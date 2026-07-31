@@ -10,7 +10,7 @@ use axum::http::header;
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -19,7 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::inspection::{RunView, TaskView};
-use crate::storage::{DATABASE_NAME, Ledger, LedgerEvent, RunContainer, RunSandbox, TaskState};
+use crate::storage::{
+    CancellationRequest, DATABASE_NAME, Ledger, LedgerEvent, RunContainer, RunSandbox, TaskState,
+};
 
 const DEFAULT_PORT: u16 = 7788;
 
@@ -206,6 +208,8 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/tasks/{id}", get(task_handler))
         .route("/api/v1/runs", get(runs_handler))
         .route("/api/v1/runs/{id}", get(run_handler))
+        .route("/api/v1/runs/{id}/cancel", post(cancel_run_handler))
+        .route("/api/v1/onboard", post(onboard_handler))
         .route("/api/v1/status", get(status_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
@@ -441,6 +445,186 @@ async fn status_handler(State(state): State<AppState>) -> HandlerResult<Json<ser
     Ok(Json(serde_json::to_value(view).unwrap_or_else(|_| {
         serde_json::json!({"status": "error"})
     })))
+}
+
+/// The body every write endpoint accepts: an idempotency key the ui supplies
+/// so a retried submission does not repeat the side effect.
+#[derive(Debug, Deserialize)]
+struct WriteRequest {
+    client_request_id: String,
+}
+
+/// Resolve a write's idempotency: if this `client_request_id` was already
+/// processed, return the stored response instead of re-running the operation.
+#[allow(clippy::result_large_err)]
+fn idempotent_replay(
+    ledger: &Ledger,
+    client_request_id: &str,
+) -> Result<Option<Response>, Response> {
+    if client_request_id.trim().is_empty() {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "client_request_id must not be empty",
+        ));
+    }
+    ledger
+        .control_request(client_request_id)
+        .map_err(|error| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "query_failed",
+                &format!("failed to read the idempotency record: {error}"),
+            )
+        })
+        .map(|stored| {
+            stored.map(|response| {
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    response,
+                )
+                    .into_response()
+            })
+        })
+}
+
+#[allow(clippy::result_large_err)]
+async fn cancel_run_handler(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<i64>,
+    Json(body): Json<WriteRequest>,
+) -> HandlerResult<Response> {
+    let mut ledger = open_ledger(&state)?;
+    if let Some(replay) = idempotent_replay(&ledger, &body.client_request_id)? {
+        return Ok(replay);
+    }
+
+    let request = ledger.request_run_cancellation(id).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cancel_failed",
+            &format!("failed to request cancellation: {error}"),
+        )
+    })?;
+    let (status, outcome, run) = match &request {
+        CancellationRequest::Requested(run) => (StatusCode::OK, "cancellation_requested", Some(run)),
+        CancellationRequest::AlreadyRequested(run) => {
+            (StatusCode::OK, "cancellation_requested", Some(run))
+        }
+        CancellationRequest::Terminal(run) => (StatusCode::OK, "terminal", Some(run)),
+        CancellationRequest::OwnedElsewhere(run) => (StatusCode::OK, "terminal", Some(run)),
+        CancellationRequest::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
+    };
+    let Some(run) = run else {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("run {id} does not exist"),
+        ));
+    };
+    let body_json = serde_json::json!({
+        "client_request_id": body.client_request_id,
+        "status": if status == StatusCode::OK { "ok" } else { "error" },
+        "outcome": outcome,
+        "run": RunView::from(run),
+    });
+    let body_text = body_json.to_string();
+    ledger
+        .record_control_request(&body.client_request_id, "cancel", "completed", &body_text)
+        .map_err(|error| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cancel_failed",
+                &format!("failed to record the idempotency record: {error}"),
+            )
+        })?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body_text,
+    )
+        .into_response())
+}
+
+#[allow(clippy::result_large_err)]
+async fn onboard_handler(
+    State(state): State<AppState>,
+    Json(body): Json<WriteRequest>,
+) -> HandlerResult<Response> {
+    let mut ledger = open_ledger(&state)?;
+    if let Some(replay) = idempotent_replay(&ledger, &body.client_request_id)? {
+        return Ok(replay);
+    }
+
+    // Trigger one source scheduling evaluation (the source half of
+    // `factory run --once`), not waiting for the next poll cycle.
+    let report = run_source_evaluation(&state, &mut ledger).await.map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "onboard_failed",
+            &format!("failed to evaluate the source: {error}"),
+        )
+    })?;
+    let body_json = serde_json::json!({
+        "client_request_id": body.client_request_id,
+        "status": "ok",
+        "tasks_created": report.tasks_created,
+        "issues_seen": report.issues_seen,
+    });
+    let body_text = body_json.to_string();
+    ledger
+        .record_control_request(&body.client_request_id, "onboard", "completed", &body_text)
+        .map_err(|error| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "onboard_failed",
+                &format!("failed to record the idempotency record: {error}"),
+            )
+        })?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body_text,
+    )
+        .into_response())
+}
+
+/// A minimal source-evaluation outcome for the onboard endpoint.
+#[derive(Debug)]
+struct SourceEvaluation {
+    tasks_created: usize,
+    issues_seen: usize,
+}
+
+/// Run one source scheduling evaluation, equivalent to the source half of
+/// `factory run --once`. Without a configured source this is a no-op.
+async fn run_source_evaluation(
+    state: &AppState,
+    ledger: &mut Ledger,
+) -> Result<SourceEvaluation> {
+    if state.config.source.is_none() {
+        return Ok(SourceEvaluation {
+            tasks_created: 0,
+            issues_seen: 0,
+        });
+    }
+    let catalog = crate::workflow::WorkflowCatalog::load(&state.config)?;
+    let client = crate::source::SourceClient;
+    let cancellation = CancellationToken::new();
+    let report = client
+        .poll_once(&state.config, &catalog, ledger, cancellation)
+        .await?;
+    let (tasks_created, issues_seen) = report
+        .repositories
+        .iter()
+        .fold((0usize, 0usize), |(tasks, issues), repo| {
+            (tasks + repo.tasks_created, issues + repo.issues_seen)
+        });
+    Ok(SourceEvaluation {
+        tasks_created,
+        issues_seen,
+    })
 }
 
 #[derive(Debug, Deserialize)]
