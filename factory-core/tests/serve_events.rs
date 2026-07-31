@@ -294,7 +294,7 @@ fn events_backfills_after_last_event_id_across_a_restart() {
             "example/repository",
             Some(1),
             None,
-            serde_json::json!({"from": null, "to": "queued"}),
+            serde_json::json!({"from": null, "to": "queued", "workflow": "wf", "ticket": {"id": "1"}}),
         )
         .unwrap();
     let second = ledger
@@ -303,19 +303,28 @@ fn events_backfills_after_last_event_id_across_a_restart() {
             "example/repository",
             Some(1),
             Some(1),
-            serde_json::json!({"from": "queued", "to": "running"}),
+            serde_json::json!({"from": "queued", "to": "running", "workflow": "wf", "ticket": {"id": "1"}}),
         )
         .unwrap();
     drop(ledger);
 
     // First serve instance: connect with Last-Event-ID = first, get only the gap.
+    // (The periodic repo.health emitter may interleave health frames, so
+    // filter to the task.state events we appended.)
     let port = free_port();
     let mut child = fixture.spawn_serve(port);
     wait_for_serve(&mut child, port);
     let mut stream = open_sse(port, &format!("/events?last_id={}", first.event_id));
-    let frames = read_frames(&mut stream, 1, Duration::from_secs(10));
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].id.as_ref().unwrap().parse::<i64>().unwrap(), second.event_id);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut task_states = Vec::new();
+    while Instant::now() < deadline && task_states.is_empty() {
+        for frame in read_frames(&mut stream, 1, Duration::from_secs(2)) {
+            if frame.event.as_deref() == Some("task.state") {
+                task_states.push(frame.id.as_ref().unwrap().parse::<i64>().unwrap());
+            }
+        }
+    }
+    assert_eq!(task_states, vec![second.event_id]);
     drop(stream);
     child.kill().unwrap();
     child.wait().unwrap();
@@ -325,12 +334,18 @@ fn events_backfills_after_last_event_id_across_a_restart() {
     let mut child = fixture.spawn_serve(port);
     wait_for_serve(&mut child, port);
     let mut stream = open_sse(port, "/events");
-    // No cursor: both committed events backfill in order.
-    let frames = read_frames(&mut stream, 2, Duration::from_secs(10));
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].id.as_ref().unwrap().parse::<i64>().unwrap(), first.event_id);
-    assert_eq!(frames[1].id.as_ref().unwrap().parse::<i64>().unwrap(), second.event_id);
-    assert_eq!(frames[0].event.as_deref(), Some("task.state"));
+    // No cursor: both committed task.state events backfill in order, alongside
+    // any periodic repo.health frames.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut task_states = Vec::new();
+    while Instant::now() < deadline && task_states.len() < 2 {
+        for frame in read_frames(&mut stream, 1, Duration::from_secs(2)) {
+            if frame.event.as_deref() == Some("task.state") {
+                task_states.push(frame.id.as_ref().unwrap().parse::<i64>().unwrap());
+            }
+        }
+    }
+    assert_eq!(task_states, vec![first.event_id, second.event_id]);
     child.kill().unwrap();
     child.wait().unwrap();
 }
@@ -473,4 +488,63 @@ fn http_status_anonymous(port: u16, path: &str) -> u16 {
     stream.read_to_end(&mut raw).unwrap();
     let raw = String::from_utf8(raw).unwrap();
     raw.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+#[test]
+fn invalid_event_is_dropped_but_the_stream_continues() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_serve(&mut child, port);
+
+    // Insert a malformed task.state payload directly (bypassing the sanitized
+    // append path), then a valid one. The malformed one must be dropped; the
+    // valid one must still arrive.
+    // SAFETY: same rationale as Fixture::ledger; this test owns its data home.
+    unsafe { std::env::set_var("FACTORY_DATA_HOME", &fixture.data_home) };
+    let data_directory = factory::config::repository_data_directory(&fixture.repository).unwrap();
+    let connection = rusqlite::Connection::open(
+        data_directory.join(factory::storage::DATABASE_NAME),
+    )
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO events (type, ts, repository, task_id, run_id, payload)
+             VALUES ('task.state', '2026-07-31T00:00:00Z', 'example/repository', 1, NULL,
+                     '{\"from\": null}')",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut ledger = fixture.ledger();
+    ledger
+        .append_event(
+            EventType::TaskState,
+            "example/repository",
+            Some(1),
+            None,
+            serde_json::json!({"from": null, "to": "queued", "workflow": "wf", "ticket": {"id": "1"}}),
+        )
+        .unwrap();
+
+    // Read task.state frames: only the valid one should appear (the malformed
+    // one is dropped). The periodic repo.health frames are ignored.
+    let mut stream = open_sse(port, "/events");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut task_state_seqs = Vec::new();
+    while Instant::now() < deadline && task_state_seqs.is_empty() {
+        for frame in read_frames(&mut stream, 1, Duration::from_secs(2)) {
+            if frame.event.as_deref() == Some("task.state") {
+                let envelope: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
+                task_state_seqs.push(envelope["seq"].as_i64().unwrap());
+            }
+        }
+    }
+    // Exactly one task.state (the valid one) survived; the malformed one was
+    // dropped without breaking the stream.
+    assert_eq!(task_state_seqs.len(), 1, "got {task_state_seqs:?}");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }

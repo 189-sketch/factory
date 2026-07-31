@@ -129,6 +129,7 @@ struct AppState {
     config: Arc<Config>,
     token: Arc<String>,
     database: Arc<PathBuf>,
+    validator: Arc<crate::events::EventValidator>,
 }
 
 /// Serve the control plane: anonymous `GET /api/v1/health` plus the
@@ -136,11 +137,18 @@ struct AppState {
 /// per-container bearer token.
 pub async fn serve(config: &Config, port: u16, cancellation: CancellationToken) -> Result<()> {
     let token = api_token()?;
+    // Compile the contract schemas once, failing fast so serve refuses to
+    // start rather than stream unvalidated events.
+    let validator = Arc::new(
+        crate::events::EventValidator::compile()
+            .context("failed to compile the event contract schemas")?,
+    );
     let database = Arc::new(config.data_directory.join(DATABASE_NAME));
     let state = AppState {
         config: Arc::new(config.clone()),
         token: Arc::new(token),
         database: database.clone(),
+        validator,
     };
     let repository = crate::config::repository_remote_identity(&config.repositories[0])
         .unwrap_or_else(|_| "unknown".to_owned());
@@ -670,7 +678,7 @@ async fn events_handler(
         _ => None,
     };
 
-    let stream = build_event_stream(ledger, notifier, cursor, unsupported);
+    let stream = build_event_stream(ledger, notifier, cursor, unsupported, state.validator.clone());
     let mut response = Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(HEARTBEAT_INTERVAL).text("keep-alive"))
         .into_response();
@@ -689,6 +697,7 @@ struct EventStreamState {
     notifier: watch::Receiver<i64>,
     last_sent: i64,
     pending: std::collections::VecDeque<Event>,
+    validator: Arc<crate::events::EventValidator>,
 }
 
 /// Build the live + backfill stream. The single unfolding state owns the
@@ -699,6 +708,7 @@ fn build_event_stream(
     notifier: watch::Receiver<i64>,
     cursor: i64,
     unsupported: Option<(u32, u32)>,
+    validator: Arc<crate::events::EventValidator>,
 ) -> impl tokio_stream::Stream<Item = Result<Event, Infallible>> {
     let mut state = EventStreamState {
         ledger,
@@ -708,6 +718,7 @@ fn build_event_stream(
             .map(|(client, server)| handshake_event(client, server))
             .into_iter()
             .collect(),
+        validator,
     };
     // Poll the durable watermark as a fallback: events committed by *other*
     // Ledger connections (the daemon loop holds its own) don't fire this
@@ -725,7 +736,16 @@ fn build_event_stream(
             for event in state.ledger.events_after(state.last_sent).unwrap_or_default() {
                 if event.event_id > state.last_sent {
                     state.last_sent = event.event_id;
-                    state.pending.push_back(sse_event(&event));
+                    // Validate the outbound envelope against the contract; a
+                    // malformed event is dropped (logged), never sent, and the
+                    // stream continues.
+                    match sse_event(&event, &state.validator) {
+                        Some(frame) => state.pending.push_back(frame),
+                        None => eprintln!(
+                            "Factory dropped an invalid outbound event id={} type={}",
+                            event.event_id, event.event_type
+                        ),
+                    }
                 }
             }
             if let Some(event) = state.pending.pop_front() {
@@ -747,9 +767,11 @@ fn build_event_stream(
     }
 }
 
-/// Wrap a ledger event in the schema/events/envelope.json envelope and render
-/// it as one SSE frame (`id:` = global cursor, `event:` = type, `retry:`).
-fn sse_event(event: &LedgerEvent) -> Event {
+/// Wrap a ledger event in the schema/events/envelope.json envelope, validate
+/// it against the contract, and render it as one SSE frame (`id:` = global
+/// cursor, `event:` = type, `retry:`). Returns None when the event fails
+/// validation (the caller drops it without breaking the stream).
+fn sse_event(event: &LedgerEvent, validator: &crate::events::EventValidator) -> Option<Event> {
     let envelope = serde_json::json!({
         "v": ENVELOPE_VERSION,
         "type": event.event_type,
@@ -760,12 +782,18 @@ fn sse_event(event: &LedgerEvent) -> Event {
         "run_id": event.run_id,
         "payload": event.payload,
     });
+    if let Err(reason) = validator.validate_envelope(&envelope) {
+        eprintln!("Factory event id={} failed schema validation: {reason}", event.event_id);
+        return None;
+    }
     let data = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
-    Event::default()
-        .id(event.event_id.to_string())
-        .event(&event.event_type)
-        .retry(SSE_RETRY)
-        .data(data)
+    Some(
+        Event::default()
+            .id(event.event_id.to_string())
+            .event(&event.event_type)
+            .retry(SSE_RETRY)
+            .data(data),
+    )
 }
 
 fn handshake_event(client: u32, server: u32) -> Event {
