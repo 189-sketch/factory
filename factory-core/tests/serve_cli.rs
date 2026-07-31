@@ -54,6 +54,19 @@ impl Fixture {
             .spawn()
             .unwrap()
     }
+
+    /// Open the ledger the spawned serve process serves, to seed tasks/runs.
+    fn ledger(&self) -> factory::storage::Ledger {
+        // SAFETY: each test drives a single serve child; ledger access here is
+        // not concurrent with other tests on the same data home.
+        unsafe { std::env::set_var("FACTORY_DATA_HOME", &self.data_home) };
+        let data_directory =
+            factory::config::repository_data_directory(&self.repository).unwrap();
+        factory::storage::Ledger::open(
+            &data_directory.join(factory::storage::DATABASE_NAME),
+        )
+        .unwrap()
+    }
 }
 
 fn init_git_repository(path: &Path, origin: &str) {
@@ -335,4 +348,120 @@ fn serve_requires_initialized_repository() {
         .arg("serve")
         .assert()
         .failure();
+}
+
+/// Seed one queued task and one running run directly in the ledger.
+fn seed_task_and_run(fixture: &Fixture) -> (i64, i64) {
+    use factory::storage::TaskIdentity;
+    let mut ledger = fixture.ledger();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    let identity = TaskIdentity::ticket(
+        "example/repository",
+        "implement-ready-ticket",
+        "7",
+        "rev-1",
+    )
+    .unwrap();
+    ledger.enqueue(&identity).unwrap();
+    let runtimes = std::collections::HashMap::from([(
+        (
+            "example/repository".to_owned(),
+            "implement-ready-ticket".to_owned(),
+            "ticket".to_owned(),
+        ),
+        "codex".to_owned(),
+    )]);
+    let claimed = ledger
+        .claim_and_start_run(
+            &["example/repository".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    (claimed.task.id, claimed.run.id)
+}
+
+#[test]
+fn tasks_query_filters_by_state_and_serves_detail() {
+    let fixture = Fixture::new();
+    let (task_id, _run_id) = seed_task_and_run(&fixture);
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // All tasks (one running).
+    let response = http_get_token(port, "/api/v1/tasks", TOKEN);
+    assert_eq!(response.status, 200);
+    let tasks = response.json();
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["id"], task_id);
+    assert_eq!(tasks[0]["state"], "running");
+    assert_eq!(tasks[0]["workflow"], "implement-ready-ticket");
+
+    // ?state=running matches; ?state=queued is empty.
+    let response = http_get_token(port, "/api/v1/tasks?state=running", TOKEN);
+    assert_eq!(response.json().as_array().unwrap().len(), 1);
+    let response = http_get_token(port, "/api/v1/tasks?state=queued", TOKEN);
+    assert_eq!(response.json().as_array().unwrap().len(), 0);
+
+    // Unknown state -> 400 with the error envelope.
+    let response = http_get_token(port, "/api/v1/tasks?state=bogus", TOKEN);
+    assert_eq!(response.status, 400);
+    assert_eq!(response.json()["error"]["code"], "invalid_state");
+
+    // Detail by id; missing id -> 404.
+    let response = http_get_token(port, &format!("/api/v1/tasks/{task_id}"), TOKEN);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["id"], task_id);
+    let response = http_get_token(port, "/api/v1/tasks/9999", TOKEN);
+    assert_eq!(response.status, 404);
+    assert_eq!(response.json()["error"]["code"], "not_found");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn runs_query_filters_by_task_and_serves_detail() {
+    let fixture = Fixture::new();
+    let (task_id, run_id) = seed_task_and_run(&fixture);
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // All runs; filter by task_id.
+    let response = http_get_token(port, "/api/v1/runs", TOKEN);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json().as_array().unwrap().len(), 1);
+    let response = http_get_token(port, &format!("/api/v1/runs?task_id={task_id}"), TOKEN);
+    assert_eq!(response.json().as_array().unwrap().len(), 1);
+    let response = http_get_token(port, "/api/v1/runs?task_id=9999", TOKEN);
+    assert_eq!(response.json().as_array().unwrap().len(), 0);
+
+    // Detail includes outcome and container/sandbox keys.
+    let response = http_get_token(port, &format!("/api/v1/runs/{run_id}"), TOKEN);
+    assert_eq!(response.status, 200);
+    let detail = response.json();
+    assert_eq!(detail["id"], run_id);
+    assert_eq!(detail["task_id"], task_id);
+    assert_eq!(detail["outcome"], "running");
+    assert!(detail.get("container").is_some());
+    assert!(detail.get("sandbox").is_some());
+    assert!(detail["container"].is_null());
+    assert!(detail["sandbox"].is_null());
+
+    let response = http_get_token(port, "/api/v1/runs/9999", TOKEN);
+    assert_eq!(response.status, 404);
+
+    // All query endpoints reject anonymous access.
+    assert_eq!(http_get(port, "/api/v1/tasks").status, 401);
+    assert_eq!(http_get(port, "/api/v1/runs").status, 401);
+    assert_eq!(http_get(port, &format!("/api/v1/runs/{run_id}")).status, 401);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
