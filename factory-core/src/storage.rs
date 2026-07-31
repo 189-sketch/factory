@@ -685,6 +685,20 @@ pub struct LedgerEvent {
     pub payload: serde_json::Value,
 }
 
+/// The aggregated repository-health view backing both the `repo.health` event
+/// payload and the `GET /api/v1/status` snapshot. Field semantics follow
+/// schema/events/repo-health.json.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepoHealthView {
+    pub status: String,
+    pub active_runs: i64,
+    pub queued_tasks: i64,
+    pub last_poll_at: Option<i64>,
+    pub last_activity_at: Option<i64>,
+    pub backoff_until: Option<i64>,
+    pub message: Option<String>,
+}
+
 pub struct Ledger {
     connection: Connection,
     path: PathBuf,
@@ -2631,6 +2645,92 @@ impl Ledger {
             .context("failed to read repository health")
     }
 
+    /// Aggregate the repository-health snapshot used by both the `repo.health`
+    /// event and the `/api/v1/status` control-plane endpoint. Derives the
+    /// card status from live ledger state (running runs, queued tasks,
+    /// recorded health/backoff) per schema/events/repo-health.json.
+    pub fn repo_health_view(&self, repository: &str) -> Result<RepoHealthView> {
+        let active_runs = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE repository = ?1 AND outcome = 'running'",
+                [repository],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to count active runs")?;
+        let queued_tasks = self
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE repository = ?1 AND state = 'queued'",
+                [repository],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("failed to count queued tasks")?;
+        let last_activity_at = self
+            .connection
+            .query_row(
+                "SELECT MAX(last_activity_at) FROM runs WHERE repository = ?1",
+                [repository],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .context("failed to read last run activity")?;
+        let last_poll_at = self
+            .connection
+            .query_row(
+                "SELECT MAX(polled_at) FROM poll_status WHERE repository = ?1",
+                [repository],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .context("failed to read last poll time")?;
+        let health = self.repository_health(repository)?;
+        let (health_state, health_error, backoff_until) = match &health {
+            Some(snapshot) => (
+                Some(snapshot.state.as_str()),
+                snapshot.validation_error.clone(),
+                snapshot.next_retry_at,
+            ),
+            None => (None, None, None),
+        };
+        // Status precedence (schema enum): error > backoff > running > polling
+        // > ready > idle. `offline` is reserved for the ui when a container is
+        // unreachable, so the core never emits it.
+        let status = if health_error.is_some() {
+            "error"
+        } else if matches!(health_state, Some("backing_off" | "rate_limited"))
+            || backoff_until.is_some()
+        {
+            "backoff"
+        } else if active_runs > 0 {
+            "running"
+        } else if matches!(health_state, Some("healthy")) && last_poll_at.is_some() {
+            "polling"
+        } else if queued_tasks > 0 || matches!(health_state, Some("healthy")) {
+            "ready"
+        } else {
+            "idle"
+        };
+        let message = health_error.map(|value| {
+            truncate_utf8(&crate::inspection::sanitize_for_storage(&value), MAX_ERROR_BYTES)
+        });
+        Ok(RepoHealthView {
+            status: status.to_owned(),
+            active_runs,
+            queued_tasks,
+            last_poll_at,
+            last_activity_at,
+            backoff_until,
+            message,
+        })
+    }
+
+    /// Append a repo.health event from the current aggregated snapshot.
+    /// Timestamps are rendered RFC3339 per schema/events/repo-health.json.
+    pub fn record_repo_health_event(&mut self, repository: &str) -> Result<LedgerEvent> {
+        let view = self.repo_health_view(repository)?;
+        let payload = repo_health_payload(&view);
+        self.append_event(EventType::RepoHealth, repository, None, None, payload)
+    }
+
     pub fn record_poll_status(
         &self,
         repository: &str,
@@ -3869,6 +3969,24 @@ fn task_state_payload(
             "title": null,
             "url": null,
         },
+    })
+}
+
+/// Render milliseconds-since-epoch as RFC3339 UTC (schema date-time format).
+fn millis_to_rfc3339(millis: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(millis).map(|value| value.to_rfc3339())
+}
+
+/// Build the schema/events/repo-health.json payload from the aggregated view.
+fn repo_health_payload(view: &RepoHealthView) -> serde_json::Value {
+    serde_json::json!({
+        "status": view.status,
+        "active_runs": view.active_runs,
+        "queued_tasks": view.queued_tasks,
+        "last_poll_at": view.last_poll_at.and_then(millis_to_rfc3339),
+        "last_activity_at": view.last_activity_at.and_then(millis_to_rfc3339),
+        "backoff_until": view.backoff_until.and_then(millis_to_rfc3339),
+        "message": view.message,
     })
 }
 

@@ -1,5 +1,5 @@
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +36,19 @@ const SSE_RETRY: Duration = Duration::from_millis(3000);
 /// How often the SSE stream polls the durable watermark for events committed
 /// by other Ledger connections. Bounds cross-connection fanout latency.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How often the repo.health snapshot is aggregated and (on change) emitted.
+/// Overridable via FACTORY_REPO_HEALTH_INTERVAL_MS for tests.
+const REPO_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
+
+fn repo_health_interval() -> Duration {
+    std::env::var("FACTORY_REPO_HEALTH_INTERVAL_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(REPO_HEALTH_INTERVAL)
+}
 
 #[derive(Debug, Serialize)]
 pub struct HealthReport {
@@ -113,7 +126,7 @@ fn error_response(status: StatusCode, code: &'static str, message: &str) -> Resp
 struct AppState {
     config: Arc<Config>,
     token: Arc<String>,
-    database: Arc<Path>,
+    database: Arc<PathBuf>,
 }
 
 /// Serve the control plane: anonymous `GET /api/v1/health` plus the
@@ -121,12 +134,21 @@ struct AppState {
 /// per-container bearer token.
 pub async fn serve(config: &Config, port: u16, cancellation: CancellationToken) -> Result<()> {
     let token = api_token()?;
-    let database = Arc::from(config.data_directory.join(DATABASE_NAME).into_boxed_path());
+    let database = Arc::new(config.data_directory.join(DATABASE_NAME));
     let state = AppState {
         config: Arc::new(config.clone()),
         token: Arc::new(token),
-        database,
+        database: database.clone(),
     };
+    let repository = crate::config::repository_remote_identity(&config.repositories[0])
+        .unwrap_or_else(|_| "unknown".to_owned());
+    // Emit repo.health periodically and whenever the aggregated snapshot
+    // changes, so the overview card tracks live ledger state.
+    let health_task = tokio::spawn(emit_repo_health(
+        database,
+        repository,
+        cancellation.clone(),
+    ));
     let app = build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
@@ -134,7 +156,42 @@ pub async fn serve(config: &Config, port: u16, cancellation: CancellationToken) 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { cancellation.cancelled().await })
         .await
-        .context("the Factory control plane failed")
+        .context("the Factory control plane failed")?;
+    health_task.abort();
+    Ok(())
+}
+
+/// Periodically aggregate the repository-health snapshot and append a
+/// repo.health event when it changes (or at least every interval), so the
+/// overview card reflects live ledger state without spamming identical events.
+async fn emit_repo_health(
+    database: Arc<PathBuf>,
+    repository: String,
+    cancellation: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(repo_health_interval());
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_fingerprint: Option<String> = None;
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let result = tokio::task::block_in_place(|| -> Result<(bool, String)> {
+            let mut ledger = Ledger::open(&database)?;
+            let view = ledger.repo_health_view(&repository)?;
+            let fingerprint = serde_json::to_string(&view)?;
+            let changed = last_fingerprint.as_deref() != Some(fingerprint.as_str());
+            if changed {
+                ledger.record_repo_health_event(&repository)?;
+            }
+            Ok((changed, fingerprint))
+        });
+        match result {
+            Ok((_, fingerprint)) => last_fingerprint = Some(fingerprint),
+            Err(error) => eprintln!("Factory failed to emit a repo.health event: {error:#}"),
+        }
+    }
 }
 
 fn build_router(state: AppState) -> Router {
@@ -149,7 +206,7 @@ fn build_router(state: AppState) -> Router {
         .route("/api/v1/tasks/{id}", get(task_handler))
         .route("/api/v1/runs", get(runs_handler))
         .route("/api/v1/runs/{id}", get(run_handler))
-        .route("/api/v1/status", get(unimplemented_handler))
+        .route("/api/v1/status", get(status_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     public
@@ -366,6 +423,26 @@ async fn run_handler(
     }))
 }
 
+/// The repository overview snapshot (`GET /api/v1/status`): the same shape as
+/// a `repo.health` event payload, so the ui can initialise a card then follow
+/// the event stream for deltas.
+#[allow(clippy::result_large_err)]
+async fn status_handler(State(state): State<AppState>) -> HandlerResult<Json<serde_json::Value>> {
+    let ledger = open_ledger(&state)?;
+    let repository = crate::config::repository_remote_identity(&state.config.repositories[0])
+        .unwrap_or_else(|_| "unknown".to_owned());
+    let view = ledger.repo_health_view(&repository).map_err(|error| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "query_failed",
+            &format!("failed to aggregate repository status: {error}"),
+        )
+    })?;
+    Ok(Json(serde_json::to_value(view).unwrap_or_else(|_| {
+        serde_json::json!({"status": "error"})
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     /// Backfill cursor (alternative to the Last-Event-ID header).
@@ -526,14 +603,6 @@ fn handshake_event(client: u32, server: u32) -> Event {
         .event("unsupported")
         .retry(SSE_RETRY)
         .data(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned()))
-}
-
-async fn unimplemented_handler() -> Response {
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "this control-plane endpoint arrives in a later change",
-    )
 }
 
 async fn not_found_handler() -> Response {

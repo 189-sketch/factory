@@ -2140,3 +2140,89 @@ fn run_activity_event_carries_sequence_and_sanitized_bounded_activity() {
     );
     assert_eq!(event.payload["sequence"], 8);
 }
+
+#[test]
+fn repo_health_view_reflects_live_state_and_event_is_schema_shaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+
+    // Empty repository: no runs, no polls -> idle.
+    let view = ledger.repo_health_view("owainlewis/factory").unwrap();
+    assert_eq!(view.status, "idle");
+    assert_eq!(view.active_runs, 0);
+    assert_eq!(view.queued_tasks, 0);
+
+    // A queued task -> ready.
+    ledger.enqueue(&ticket("rev-1")).unwrap();
+    let view = ledger.repo_health_view("owainlewis/factory").unwrap();
+    assert_eq!(view.status, "ready");
+    assert_eq!(view.queued_tasks, 1);
+
+    // A running run -> running.
+    let runtimes = ticket_runtimes();
+    let claimed = ledger
+        .claim_and_start_run(
+            &["owainlewis/factory".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    let view = ledger.repo_health_view("owainlewis/factory").unwrap();
+    assert_eq!(view.status, "running");
+    assert_eq!(view.active_runs, 1);
+    assert!(view.last_activity_at.is_some());
+
+    // Emit the event and check its payload shape.
+    let event = ledger
+        .record_repo_health_event("owainlewis/factory")
+        .unwrap();
+    assert_eq!(event.event_type, "repo.health");
+    assert_eq!(event.task_id, None);
+    assert_eq!(event.run_id, None);
+    assert_eq!(event.payload["status"], "running");
+    assert_eq!(event.payload["active_runs"], 1);
+    assert_eq!(event.payload["queued_tasks"], 0);
+    assert!(event.payload["last_activity_at"].is_string());
+    assert!(event.payload.get("backoff_until").is_some());
+    drop(claimed);
+}
+
+#[test]
+fn repo_health_view_reports_backoff_and_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .record_repository_health(
+            "owainlewis/factory",
+            "backing_off",
+            None,
+            3,
+            Some(1_800_000_000_000),
+        )
+        .unwrap();
+    let view = ledger.repo_health_view("owainlewis/factory").unwrap();
+    assert_eq!(view.status, "backoff");
+    assert_eq!(view.backoff_until, Some(1_800_000_000_000));
+
+    ledger
+        .record_repository_health(
+            "owainlewis/factory",
+            "invalid_config",
+            Some("bad workflow ghp_0123456789abcdef0123456789abcdef0123"),
+            1,
+            None,
+        )
+        .unwrap();
+    let view = ledger.repo_health_view("owainlewis/factory").unwrap();
+    assert_eq!(view.status, "error");
+    let message = view.message.unwrap();
+    assert!(
+        !message.contains("ghp_"),
+        "message must be sanitized, got {message}"
+    );
+}
