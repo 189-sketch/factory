@@ -1,21 +1,40 @@
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use axum::extract::{Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::middleware::{self, Next};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
+use crate::storage::{DATABASE_NAME, Ledger, LedgerEvent};
 
 const DEFAULT_PORT: u16 = 7788;
+
+/// The current event-envelope version (schema/events/envelope.json). The
+/// handshake compares the ui's requested `?v=` against this.
+const ENVELOPE_VERSION: u32 = 1;
+
+/// SSE idle heartbeat interval (R2 §2: 15-30s keep-alive).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Advisory EventSource reconnect delay, sent as `retry:` on each frame.
+const SSE_RETRY: Duration = Duration::from_millis(3000);
+
+/// How often the SSE stream polls the durable watermark for events committed
+/// by other Ledger connections. Bounds cross-connection fanout latency.
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Serialize)]
 pub struct HealthReport {
@@ -93,6 +112,7 @@ fn error_response(status: StatusCode, code: &'static str, message: &str) -> Resp
 struct AppState {
     config: Arc<Config>,
     token: Arc<String>,
+    database: Arc<Path>,
 }
 
 /// Serve the control plane: anonymous `GET /api/v1/health` plus the
@@ -100,9 +120,11 @@ struct AppState {
 /// per-container bearer token.
 pub async fn serve(config: &Config, port: u16, cancellation: CancellationToken) -> Result<()> {
     let token = api_token()?;
+    let database = Arc::from(config.data_directory.join(DATABASE_NAME).into_boxed_path());
     let state = AppState {
         config: Arc::new(config.clone()),
         token: Arc::new(token),
+        database,
     };
     let app = build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port))
@@ -121,7 +143,7 @@ fn build_router(state: AppState) -> Router {
     // Protected surface: every other route requires the bearer token. `/events`
     // additionally accepts `?token=` because EventSource cannot set headers.
     let protected = Router::new()
-        .route("/events", get(events_placeholder))
+        .route("/events", get(events_handler))
         .route("/api/v1/tasks", get(unimplemented_handler))
         .route("/api/v1/runs", get(unimplemented_handler))
         .route("/api/v1/status", get(unimplemented_handler))
@@ -138,12 +160,166 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthReport> {
     Json(health_report(&state.config))
 }
 
-async fn events_placeholder() -> Response {
-    error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "the SSE event stream arrives in a later change",
-    )
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    /// Backfill cursor (alternative to the Last-Event-ID header).
+    last_id: Option<i64>,
+    /// Envelope version the ui speaks, for the capability handshake.
+    v: Option<u32>,
+}
+
+/// The SSE stream. Order of operations converges the replay/subscribe race:
+/// subscribe to committed events first, snapshot the backfill cursor, then
+/// drain forward — the watermark only increases, and `> last_sent` dedupes.
+async fn events_handler(
+    State(state): State<AppState>,
+    headers: header::HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Response {
+    let ledger = match Ledger::open(&state.database) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ledger_unavailable",
+                &format!("failed to open the ledger: {error}"),
+            );
+        }
+    };
+    let notifier = ledger.subscribe_events();
+
+    // Resolve the backfill cursor: explicit query param wins, then the header.
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    let cursor = query.last_id.or(header_cursor).unwrap_or(0);
+
+    // Capability handshake: a ui speaking an older envelope than the core has
+    // already raised is told to upgrade with an explicit event up front, not
+    // silently fed an unparseable structure.
+    let unsupported = match query.v {
+        Some(v) if v < ENVELOPE_VERSION => Some((v, ENVELOPE_VERSION)),
+        _ => None,
+    };
+
+    let stream = build_event_stream(ledger, notifier, cursor, unsupported);
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(HEARTBEAT_INTERVAL).text("keep-alive"))
+        .into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        header::HeaderValue::from_static("no"),
+    );
+    response
+}
+
+/// The per-connection stream state: the ledger handle (its own connection),
+/// the committed-event notifier, and the next batch of rendered events to
+/// emit before blocking on the watermark again.
+struct EventStreamState {
+    ledger: Ledger,
+    notifier: watch::Receiver<i64>,
+    last_sent: i64,
+    pending: std::collections::VecDeque<Event>,
+}
+
+/// Build the live + backfill stream. The single unfolding state owns the
+/// mutable cursor, so `last_sent` advances monotonically and the
+/// `> last_sent` filter dedupes the replay/subscribe overlap.
+fn build_event_stream(
+    ledger: Ledger,
+    notifier: watch::Receiver<i64>,
+    cursor: i64,
+    unsupported: Option<(u32, u32)>,
+) -> impl tokio_stream::Stream<Item = Result<Event, Infallible>> {
+    let mut state = EventStreamState {
+        ledger,
+        notifier,
+        last_sent: cursor,
+        pending: unsupported
+            .map(|(client, server)| handshake_event(client, server))
+            .into_iter()
+            .collect(),
+    };
+    // Poll the durable watermark as a fallback: events committed by *other*
+    // Ledger connections (the daemon loop holds its own) don't fire this
+    // connection's watch, so a short poll bounds the cross-connection latency.
+    let mut poll = tokio::time::interval(POLL_INTERVAL);
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    async_stream::stream! {
+        loop {
+            if let Some(event) = state.pending.pop_front() {
+                yield Ok(event);
+                continue;
+            }
+            // Drain the durable gap after the cursor (initial backfill, then
+            // every committed advance), then block until the watermark moves.
+            for event in state.ledger.events_after(state.last_sent).unwrap_or_default() {
+                if event.event_id > state.last_sent {
+                    state.last_sent = event.event_id;
+                    state.pending.push_back(sse_event(&event));
+                }
+            }
+            if let Some(event) = state.pending.pop_front() {
+                yield Ok(event);
+                continue;
+            }
+            // Wake on a same-connection commit (immediate) or the poll tick
+            // (cross-connection), whichever comes first.
+            tokio::select! {
+                changed = state.notifier.changed() => {
+                    if changed.is_err() {
+                        // The sender side is gone (ledger dropped); end the stream.
+                        break;
+                    }
+                }
+                _ = poll.tick() => {}
+            }
+        }
+    }
+}
+
+/// Wrap a ledger event in the schema/events/envelope.json envelope and render
+/// it as one SSE frame (`id:` = global cursor, `event:` = type, `retry:`).
+fn sse_event(event: &LedgerEvent) -> Event {
+    let envelope = serde_json::json!({
+        "v": ENVELOPE_VERSION,
+        "type": event.event_type,
+        "seq": event.event_id,
+        "ts": event.ts,
+        "repository": event.repository,
+        "task_id": event.task_id,
+        "run_id": event.run_id,
+        "payload": event.payload,
+    });
+    let data = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
+    Event::default()
+        .id(event.event_id.to_string())
+        .event(&event.event_type)
+        .retry(SSE_RETRY)
+        .data(data)
+}
+
+fn handshake_event(client: u32, server: u32) -> Event {
+    let payload = serde_json::json!({
+        "v": server,
+        "type": "unsupported",
+        "seq": 0,
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "repository": "",
+        "task_id": null,
+        "run_id": null,
+        "payload": {
+            "client_v": client,
+            "server_v": server,
+            "message": "envelope version unsupported; upgrade the ui",
+        },
+    });
+    Event::default()
+        .event("unsupported")
+        .retry(SSE_RETRY)
+        .data(serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned()))
 }
 
 async fn unimplemented_handler() -> Response {

@@ -258,16 +258,51 @@ fn serve_accepts_bearer_header_and_query_token_on_events() {
     let mut child = fixture.spawn_serve(port);
     wait_for_health(&mut child, port);
 
-    // Authorization header passes the auth gate (handler is a stub for now).
-    let response = http_get_token(port, "/events", TOKEN);
-    assert_ne!(response.status, 401, "bearer header must authenticate");
-
-    // ?token= query passes for EventSource, which cannot set headers.
-    let response = http_get(port, &format!("/events?token={TOKEN}"));
-    assert_ne!(response.status, 401, "?token= must authenticate on /events");
+    // A correct bearer token upgrades to an SSE stream (never a 401).
+    assert_eq!(events_auth_status(port, &format!("/events"), Some(TOKEN)), 200);
+    // The ?token= query also authenticates (EventSource cannot set headers).
+    assert_eq!(events_auth_status(port, &format!("/events?token={TOKEN}"), None), 200);
+    // No token and a wrong token are rejected.
+    assert_eq!(events_auth_status(port, "/events", None), 401);
+    assert_eq!(events_auth_status(port, "/events", Some("wrong")), 401);
 
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+/// Read only the status line of an /events response, without consuming the
+/// (potentially never-ending) SSE body.
+fn events_auth_status(port: u16, path: &str, token: Option<&str>) -> u16 {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Connection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    let mut status_line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        if stream.read(&mut byte).unwrap_or(0) == 0 {
+            break;
+        }
+        status_line.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&status_line)
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse::<u16>()
+        .unwrap()
 }
 
 #[test]

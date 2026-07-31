@@ -689,6 +689,7 @@ pub struct Ledger {
     connection: Connection,
     path: PathBuf,
     _state_lock: File,
+    event_notifier: tokio::sync::watch::Sender<i64>,
 }
 
 pub struct StateLockGuard {
@@ -985,10 +986,12 @@ impl Ledger {
             .busy_timeout(std::time::Duration::from_secs(5))
             .context("failed to configure SQLite busy timeout")?;
         migrate(&connection)?;
+        let latest_event_id = latest_event_id(&connection)?;
         Ok(Self {
             connection,
             path: path.to_owned(),
             _state_lock: state_lock,
+            event_notifier: tokio::sync::watch::channel(latest_event_id).0,
         })
     }
 
@@ -2094,6 +2097,8 @@ impl Ledger {
         transaction
             .commit()
             .context("failed to commit atomic task and run claim")?;
+        let latest = latest_event_id(&self.connection)?;
+        self.event_notifier.send_replace(latest);
         Ok(Some(ClaimedRun { task, run }))
     }
 
@@ -2222,6 +2227,7 @@ impl Ledger {
         transaction
             .commit()
             .context("failed to commit event append")?;
+        self.event_notifier.send_replace(event.event_id);
         Ok(event)
     }
 
@@ -2229,6 +2235,13 @@ impl Ledger {
     /// ascending. This is the SSE backfill (Last-Event-ID) query.
     pub fn events_after(&self, after: i64) -> Result<Vec<LedgerEvent>> {
         events_after_conn(&self.connection, after)
+    }
+
+    /// Subscribe to committed-event notifications. The watch value is the
+    /// latest committed `event_id`; it only ever increases. The SSE stream
+    /// subscribes first, then backfills, then drains forward on change.
+    pub fn subscribe_events(&self) -> tokio::sync::watch::Receiver<i64> {
+        self.event_notifier.subscribe()
     }
 
     pub fn start_run(&mut self, task_id: i64, runtime: &str) -> Result<Run> {
@@ -3684,6 +3697,18 @@ fn task_state_payload(
             "url": null,
         },
     })
+}
+
+/// The highest committed `event_id`, or 0 when no events exist yet. This is
+/// the initial watermark for the SSE committed-event notifier.
+fn latest_event_id(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(event_id), 0) FROM events",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to read the latest event id")
 }
 
 fn events_after_conn(connection: &Connection, after: i64) -> Result<Vec<LedgerEvent>> {
