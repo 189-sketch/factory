@@ -92,6 +92,7 @@ impl Fixture {
             .env("FACTORY_GIT_URL_BASE", &self.bare_remote)
             .env("FACTORY_RUN_COMMAND", &run_stub)
             .env("FACTORY_PORT", port.to_string())
+            .env("FACTORY_API_TOKEN", "agent-entrypoint-test-token")
             .env_remove("FACTORY_BRANCH")
             .current_dir(&self.work_root)
             .stdout(Stdio::piped())
