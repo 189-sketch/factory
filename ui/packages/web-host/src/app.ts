@@ -1,6 +1,8 @@
 import express, { type Express, type Request, type Response } from "express";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
+import type { UiEventBus } from "./events.js";
 import { NormalizationError } from "./identity.js";
+import type { OnboardingPipeline } from "./onboard.js";
 import {
   RepositoryConflictError,
   type RepositoryRegistry,
@@ -64,7 +66,22 @@ function sendError(res: Response, status: number, code: string, message: string)
   res.status(status).json(errorBody(code, message));
 }
 
-export function createApp(registry: RepositoryRegistry): Express {
+const onboardBodySchema = z.object({
+  git_url: z.string().min(1, "git_url is required"),
+  provider: z.string().min(1, "provider is required"),
+  branch: z.string().nullable().optional(),
+  trigger_labels: z.array(z.string()).optional(),
+  idle_timeout_seconds: z.number().int().positive().nullable().optional(),
+  backend: z.string().optional(),
+  credential_ref: z.string().nullable().optional(),
+});
+
+export interface AppDeps {
+  pipeline?: OnboardingPipeline;
+  bus?: UiEventBus;
+}
+
+export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Express {
   const app = express();
   app.use(express.json());
   // Never cache registry responses.
@@ -75,6 +92,57 @@ export function createApp(registry: RepositoryRegistry): Express {
 
   app.get("/ui/api/health", (_req: Request, res: Response) => {
     res.status(200).json({ status: "ok" });
+  });
+
+  // Onboarding pipeline: submit a git URL, get a running container (or an
+  // idempotent existing registration). Progress streams over /ui/events.
+  app.post("/ui/api/onboard", async (req: Request, res: Response) => {
+    if (!deps.pipeline) {
+      sendError(res, 503, "unavailable", "onboarding pipeline not configured");
+      return;
+    }
+    try {
+      const body = onboardBodySchema.parse(req.body ?? {});
+      const result = await deps.pipeline.onboard({
+        gitUrl: body.git_url,
+        provider: body.provider,
+        branch: body.branch ?? null,
+        triggerLabels: body.trigger_labels,
+        idleTimeoutSeconds: body.idle_timeout_seconds ?? null,
+        backend: body.backend,
+        credentialRef: body.credential_ref ?? null,
+      });
+      if (!result.ok) {
+        res
+          .status(502)
+          .json(errorBody("onboard_failed", `${result.step}: ${result.error}`));
+        return;
+      }
+      res.status(result.idempotent ? 200 : 201).json(toDto(result.repository));
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  // ui-synthesized event stream (onboarding progress now, container
+  // aggregation in W4). SSE with no buffering.
+  app.get("/ui/events", (req: Request, res: Response) => {
+    if (!deps.bus) {
+      sendError(res, 503, "unavailable", "event bus not configured");
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(`retry: 3000\n\n`);
+    const subscription = deps.bus.subscribe((event) => {
+      res.write(`event: ${event.type}\n`);
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    });
+    req.on("close", () => subscription.close());
   });
 
   app.get("/ui/api/repos", (_req: Request, res: Response) => {
