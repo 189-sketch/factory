@@ -1,0 +1,119 @@
+name: Images
+
+# Build the factory-core image chain (base -> codex / claude) so the onboarding
+# pipeline has images to pull. Push is opt-in: it only happens on a version tag
+# (v*) when a registry is configured, keeping latest as a dev-only float (C1
+# version-lock policy).
+
+on:
+  # Rebuild when the image definitions or the core source they compile changes.
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - "factory-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/build-images.sh"
+      - ".github/workflows/images.yml"
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "docker/**"
+      - "factory-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/build-images.sh"
+      - ".github/workflows/images.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Immutable release tag to stamp (e.g. 0.3.0); empty = dev only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_PREFIX: factory-core
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: base, dockerfile: docker/Dockerfile.base }
+          - { name: codex, dockerfile: docker/Dockerfile.codex }
+          - { name: claude, dockerfile: docker/Dockerfile.claude }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version tag
+        id: meta
+        run: |
+          # Dev builds float on `latest`; release builds (v* tag or manual
+          # version input) stamp an immutable <name>-<version> tag.
+          version=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            version="${{ inputs.version }}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "push=$([[ -n "${version}" && "${{ github.event_name }}" != "pull_request" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # base must exist locally as factory-core:base before codex/claude build
+      # (they are FROM factory-core:base). Build it once in the codex/claude
+      # jobs too so the matrix stays independent; buildx cache makes it cheap.
+      - name: Build base (prerequisite for provider images)
+        if: matrix.name != 'base'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.base
+          load: true
+          tags: ${{ env.IMAGE_PREFIX }}:base
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+      - name: Compute tags
+        id: tags
+        run: |
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}"
+          name="${{ matrix.name }}"
+          tags="${image}:${name}"
+          if [[ "${name}" != "base" ]]; then
+            tags="${tags},${image}:${name}-latest"
+          fi
+          if [[ -n "${{ steps.meta.outputs.version }}" ]]; then
+            tags="${tags},${image}:${name}-${{ steps.meta.outputs.version }}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (and push on release)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: ${{ steps.meta.outputs.push != 'true' }}
+          push: ${{ steps.meta.outputs.push }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
