@@ -9,7 +9,7 @@ use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "factory.sqlite3";
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
 pub const MAX_ERROR_BYTES: usize = 64 * 1024;
 pub const MAX_SESSION_ID_BYTES: usize = 1024;
@@ -650,6 +650,39 @@ pub struct PollStatus {
     pub tasks_created: usize,
     pub error: Option<String>,
     pub polled_at: i64,
+}
+
+/// The bounded set of event types emitted on the SSE stream (schema/events/*.json).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventType {
+    TaskState,
+    RunActivity,
+    RunOutcome,
+    RepoHealth,
+}
+
+impl EventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskState => "task.state",
+            Self::RunActivity => "run.activity",
+            Self::RunOutcome => "run.outcome",
+            Self::RepoHealth => "repo.health",
+        }
+    }
+}
+
+/// A single appended event row. `payload` is the sanitized envelope payload
+/// (the per-type body validated against schema/events/*.json downstream).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerEvent {
+    pub event_id: i64,
+    pub event_type: String,
+    pub ts: String,
+    pub repository: String,
+    pub task_id: Option<i64>,
+    pub run_id: Option<i64>,
+    pub payload: serde_json::Value,
 }
 
 pub struct Ledger {
@@ -2045,6 +2078,19 @@ impl Ledger {
                 [task.id],
             )
             .context("failed to clear claimed recovery source")?;
+        append_event_in(
+            &transaction,
+            EventType::TaskState,
+            &task.repository,
+            Some(task.id),
+            Some(run.id),
+            task_state_payload(
+                Some(TaskState::Queued),
+                TaskState::Running,
+                &task.workflow,
+                task.source_item.as_deref(),
+            ),
+        )?;
         transaction
             .commit()
             .context("failed to commit atomic task and run claim")?;
@@ -2153,6 +2199,36 @@ impl Ledger {
             .context("failed to query tasks")?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to read tasks")
+    }
+
+    /// Append an event to the ledger, assigning the next global monotonic
+    /// `event_id`. The payload is sanitized with the same redaction pass as
+    /// ledger persistence before storage so the SSE stream can never become a
+    /// credential exfiltration side channel. The event is visible to
+    /// `events_after` only after this connection's transaction commits.
+    pub fn append_event(
+        &mut self,
+        event_type: EventType,
+        repository: &str,
+        task_id: Option<i64>,
+        run_id: Option<i64>,
+        payload: serde_json::Value,
+    ) -> Result<LedgerEvent> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to begin event append transaction")?;
+        let event = append_event_in(&transaction, event_type, repository, task_id, run_id, payload)?;
+        transaction
+            .commit()
+            .context("failed to commit event append")?;
+        Ok(event)
+    }
+
+    /// Replay every event with `event_id > after`, ordered by `event_id`
+    /// ascending. This is the SSE backfill (Last-Event-ID) query.
+    pub fn events_after(&self, after: i64) -> Result<Vec<LedgerEvent>> {
+        events_after_conn(&self.connection, after)
     }
 
     pub fn start_run(&mut self, task_id: i64, runtime: &str) -> Result<Run> {
@@ -2964,6 +3040,9 @@ fn migrate(connection: &Connection) -> Result<()> {
         if version < 12 {
             migrate_v12(connection)?;
         }
+        if version < 13 {
+            migrate_v13(connection)?;
+        }
         Ok(())
     })();
     match result {
@@ -3317,6 +3396,27 @@ fn migrate_v12(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_v13(connection: &Connection) -> Result<()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS events (
+                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 type TEXT NOT NULL,
+                 ts TEXT NOT NULL,
+                 repository TEXT NOT NULL,
+                 task_id INTEGER,
+                 run_id INTEGER,
+                 payload TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS events_id_idx ON events(event_id);
+             INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                 VALUES (13, unixepoch('subsec') * 1000);
+             PRAGMA user_version = 13;",
+        )
+        .context("failed to migrate SQLite ledger to version 13")?;
+    Ok(())
+}
+
 fn query_task(connection: &Connection, id: i64) -> Result<Option<Task>> {
     connection
         .query_row("SELECT * FROM tasks WHERE id = ?1", [id], row_to_task)
@@ -3503,6 +3603,120 @@ fn now_millis() -> Result<i64> {
         .context("system clock is before the Unix epoch")?
         .as_millis();
     i64::try_from(millis).context("system time cannot be represented by SQLite")
+}
+
+/// Append an event inside an existing transaction so a state transition and
+/// its emitted event commit (or roll back) atomically. Returns the row with
+/// its assigned global monotonic `event_id`.
+fn append_event_in(
+    connection: &Connection,
+    event_type: EventType,
+    repository: &str,
+    task_id: Option<i64>,
+    run_id: Option<i64>,
+    payload: serde_json::Value,
+) -> Result<LedgerEvent> {
+    let ts = chrono::Utc::now().to_rfc3339();
+    let payload = sanitize_event_payload(payload);
+    let payload_text =
+        serde_json::to_string(&payload).context("failed to encode event payload")?;
+    connection
+        .execute(
+            "INSERT INTO events (type, ts, repository, task_id, run_id, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                event_type.as_str(),
+                ts,
+                repository,
+                task_id,
+                run_id,
+                payload_text
+            ],
+        )
+        .context("failed to append ledger event")?;
+    let event_id = connection.last_insert_rowid();
+    Ok(LedgerEvent {
+        event_id,
+        event_type: event_type.as_str().to_owned(),
+        ts,
+        repository: repository.to_owned(),
+        task_id,
+        run_id,
+        payload,
+    })
+}
+
+/// Recursively sanitize every string in an event payload with the same
+/// `sanitize_for_storage` pass used for ledger persistence, so the SSE stream
+/// shares the ledger's redaction policy.
+fn sanitize_event_payload(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => serde_json::Value::String(
+            crate::inspection::sanitize_for_storage(&text),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(sanitize_event_payload).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, sanitize_event_payload(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Build the schema/events/task-state.json payload for a TaskState transition.
+/// `from` is null for a newly created task.
+fn task_state_payload(
+    from: Option<TaskState>,
+    to: TaskState,
+    workflow: &str,
+    ticket: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "from": from.map(TaskState::as_str),
+        "to": to.as_str(),
+        "workflow": workflow,
+        "ticket": {
+            "id": ticket.unwrap_or(""),
+            "title": null,
+            "url": null,
+        },
+    })
+}
+
+fn events_after_conn(connection: &Connection, after: i64) -> Result<Vec<LedgerEvent>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT event_id, type, ts, repository, task_id, run_id, payload
+             FROM events WHERE event_id > ?1 ORDER BY event_id",
+        )
+        .context("failed to prepare event replay query")?;
+    let events = statement
+        .query_map([after], |row| {
+            let payload_text: String = row.get(6)?;
+            let payload = serde_json::from_str(&payload_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(LedgerEvent {
+                event_id: row.get(0)?,
+                event_type: row.get(1)?,
+                ts: row.get(2)?,
+                repository: row.get(3)?,
+                task_id: row.get(4)?,
+                run_id: row.get(5)?,
+                payload,
+            })
+        })
+        .context("failed to query event replay")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read event replay")?;
+    Ok(events)
 }
 
 fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
