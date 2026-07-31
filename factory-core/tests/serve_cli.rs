@@ -144,6 +144,26 @@ fn http_get_token(port: u16, path: &str, token: &str) -> HttpResponse {
     http_request(port, "GET", path, &[("Authorization", &format!("Bearer {token}"))])
 }
 
+/// POST a JSON body with the bearer token and read the full response.
+fn http_post_json(port: u16, path: &str, token: Option<&str>, body: &str) -> HttpResponse {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let auth = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    parse_response(&raw)
+}
+
 fn parse_response(raw: &[u8]) -> HttpResponse {
     let raw = String::from_utf8(raw.to_vec()).unwrap();
     let (head, body) = raw.split_once("\r\n\r\n").unwrap();
@@ -461,6 +481,134 @@ fn runs_query_filters_by_task_and_serves_detail() {
     assert_eq!(http_get(port, "/api/v1/tasks").status, 401);
     assert_eq!(http_get(port, "/api/v1/runs").status, 401);
     assert_eq!(http_get(port, &format!("/api/v1/runs/{run_id}")).status, 401);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn cancel_is_idempotent_and_terminal_returns_current_state() {
+    let fixture = Fixture::new();
+    let (_task_id, run_id) = seed_task_and_run(&fixture);
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // First cancel: the seeded run is owned by this (live) test process.
+    let body = r#"{"client_request_id":"cancel-1"}"#;
+    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body);
+    assert_eq!(response.status, 200);
+    let first = response.json();
+    assert_eq!(first["outcome"], "cancellation_requested");
+    assert_eq!(first["run"]["id"], run_id);
+
+    // The run now has a cancellation requested; verify via the detail query.
+    let detail = http_get_token(port, &format!("/api/v1/runs/{run_id}"), TOKEN).json();
+    assert!(detail["cancellation_requested_at"].is_number());
+
+    // Same client_request_id again: replay of the first result, no new effect.
+    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body);
+    assert_eq!(response.status, 200);
+    let second = response.json();
+    assert_eq!(second["outcome"], "cancellation_requested");
+
+    // A different client_request_id on the already-requested run: idempotent
+    // current-state result, not an error.
+    let body2 = r#"{"client_request_id":"cancel-2"}"#;
+    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body2);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["outcome"], "cancellation_requested");
+
+    // Cancelling a missing run: 404 with the error envelope.
+    let body3 = r#"{"client_request_id":"cancel-3"}"#;
+    let response = http_post_json(port, "/api/v1/runs/9999/cancel", Some(TOKEN), body3);
+    assert_eq!(response.status, 404);
+    assert_eq!(response.json()["error"]["code"], "not_found");
+
+    // Anonymous cancel is rejected.
+    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), None, body);
+    assert_eq!(response.status, 401);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn cancel_terminal_run_returns_current_state_idempotently() {
+    let fixture = Fixture::new();
+    use factory::storage::{RunOutcome, TaskIdentity};
+    let mut ledger = fixture.ledger();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    let identity = TaskIdentity::ticket("example/repository", "implement-ready-ticket", "9", "r1")
+        .unwrap();
+    ledger.enqueue(&identity).unwrap();
+    let runtimes = std::collections::HashMap::from([(
+        (
+            "example/repository".to_owned(),
+            "implement-ready-ticket".to_owned(),
+            "ticket".to_owned(),
+        ),
+        "codex".to_owned(),
+    )]);
+    let claimed = ledger
+        .claim_and_start_run(&["example/repository".to_owned()], &runtimes, "owner", std::process::id())
+        .unwrap()
+        .unwrap();
+    // Finish the run so it is terminal.
+    ledger
+        .finish_run_and_task(claimed.run.id, RunOutcome::Succeeded, Some("done"), None, None)
+        .unwrap();
+    drop(ledger);
+
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    let body = r#"{"client_request_id":"cancel-terminal"}"#;
+    let response = http_post_json(port, &format!("/api/v1/runs/{}/cancel", claimed.run.id), Some(TOKEN), body);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.json()["outcome"], "terminal");
+    assert_eq!(response.json()["run"]["outcome"], "succeeded");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn onboard_is_idempotent_and_replays_the_first_result() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // No source is configured in the fixture, so onboard evaluates to a no-op
+    // but still records and replays idempotently.
+    let body = r#"{"client_request_id":"onboard-1"}"#;
+    let first = http_post_json(port, "/api/v1/onboard", Some(TOKEN), body);
+    assert_eq!(first.status, 200);
+    assert_eq!(first.json()["status"], "ok");
+    assert_eq!(first.json()["client_request_id"], "onboard-1");
+
+    // Same client_request_id replays the first response.
+    let second = http_post_json(port, "/api/v1/onboard", Some(TOKEN), body);
+    assert_eq!(second.status, 200);
+    assert_eq!(second.json()["client_request_id"], "onboard-1");
+
+    // Anonymous onboard is rejected.
+    let response = http_post_json(port, "/api/v1/onboard", None, body);
+    assert_eq!(response.status, 401);
+
+    // Idempotency survives a serve restart: a fresh serve process must replay.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+    let replay = http_post_json(port, "/api/v1/onboard", Some(TOKEN), body);
+    assert_eq!(replay.status, 200);
+    assert_eq!(replay.json()["client_request_id"], "onboard-1");
 
     child.kill().unwrap();
     child.wait().unwrap();

@@ -9,7 +9,7 @@ use fs2::FileExt;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "factory.sqlite3";
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 pub const MAX_RESULT_BYTES: usize = 256 * 1024;
 pub const MAX_ERROR_BYTES: usize = 64 * 1024;
 pub const MAX_SESSION_ID_BYTES: usize = 1024;
@@ -2270,6 +2270,44 @@ impl Ledger {
         self.event_notifier.subscribe()
     }
 
+    /// Fetch the stored response for a control-plane `client_request_id`, if
+    /// this request has already been processed. Powers write idempotency.
+    pub fn control_request(&self, client_request_id: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT response FROM control_requests WHERE client_request_id = ?1",
+                [client_request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read a control-plane idempotency record")
+    }
+
+    /// Record the response for a control-plane `client_request_id` durably, so
+    /// a repeated submission returns the first result even across a restart.
+    /// Returns true when this call stored a new record (first submission).
+    pub fn record_control_request(
+        &mut self,
+        client_request_id: &str,
+        kind: &str,
+        status: &str,
+        response: &str,
+    ) -> Result<bool> {
+        if client_request_id.trim().is_empty() {
+            bail!("client_request_id must not be empty");
+        }
+        let inserted = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO control_requests
+                 (client_request_id, kind, status, response, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![client_request_id, kind, status, response, now_millis()?],
+            )
+            .context("failed to record a control-plane idempotency record")?;
+        Ok(inserted == 1)
+    }
+
     /// Fire the committed-event notifier with the current durable watermark.
     /// Called after every transaction that appends events commits.
     fn notify_events(&self) {
@@ -3329,6 +3367,9 @@ fn migrate(connection: &Connection) -> Result<()> {
         if version < 13 {
             migrate_v13(connection)?;
         }
+        if version < 14 {
+            migrate_v14(connection)?;
+        }
         Ok(())
     })();
     match result {
@@ -3700,6 +3741,24 @@ fn migrate_v13(connection: &Connection) -> Result<()> {
              PRAGMA user_version = 13;",
         )
         .context("failed to migrate SQLite ledger to version 13")?;
+    Ok(())
+}
+
+fn migrate_v14(connection: &Connection) -> Result<()> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS control_requests (
+                 client_request_id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL CHECK (kind IN ('cancel', 'onboard')),
+                 status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+                 response TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+             INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                 VALUES (14, unixepoch('subsec') * 1000);
+             PRAGMA user_version = 14;",
+        )
+        .context("failed to migrate SQLite ledger to version 14")?;
     Ok(())
 }
 
