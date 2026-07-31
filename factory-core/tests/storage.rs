@@ -2093,3 +2093,50 @@ fn run_outcome_error_is_sanitized_in_the_event_payload() {
         "run.outcome error must be sanitized, got {rendered}"
     );
 }
+
+#[test]
+fn run_activity_event_carries_sequence_and_sanitized_bounded_activity() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    ledger.enqueue(&ticket("rev-1")).unwrap();
+    let runtimes = ticket_runtimes();
+    let claimed = ledger
+        .claim_and_start_run(
+            &["owainlewis/factory".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    let run = ledger.run(claimed.run.id).unwrap().unwrap();
+
+    let secret = "ghp_0123456789abcdef0123456789abcdef0123";
+    let event = ledger
+        .record_run_activity_event(&run, 7, Some(&format!("progress with {secret}")))
+        .unwrap();
+    assert_eq!(event.event_type, "run.activity");
+    assert_eq!(event.task_id, Some(claimed.task.id));
+    assert_eq!(event.run_id, Some(claimed.run.id));
+    assert_eq!(event.payload["sequence"], 7);
+    assert_eq!(event.payload["truncated"], false);
+    let rendered = event.payload.to_string();
+    assert!(!rendered.contains(secret), "activity must be sanitized");
+
+    // Over-64KiB activity is bounded and flagged truncated.
+    let huge = "x".repeat(128 * 1024);
+    let event = ledger
+        .record_run_activity_event(&run, 8, Some(&huge))
+        .unwrap();
+    assert_eq!(event.payload["truncated"], true);
+    let activity = event.payload["activity"].as_str().unwrap();
+    assert!(
+        activity.len() <= 64 * 1024,
+        "activity must be bounded to 64KiB, got {}",
+        activity.len()
+    );
+    assert_eq!(event.payload["sequence"], 8);
+}
