@@ -4,7 +4,7 @@
 //! backfill across a serve restart, the `?v=` handshake, and heartbeat frames.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
@@ -52,6 +52,8 @@ impl Fixture {
             .env("FACTORY_DATA_HOME", &self.data_home)
             .env("FACTORY_PORT", port.to_string())
             .env("FACTORY_API_TOKEN", TOKEN)
+            // Fast repo.health cadence so tests observe the periodic emission.
+            .env("FACTORY_REPO_HEALTH_INTERVAL_MS", "200")
             .arg("serve")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -241,30 +243,41 @@ fn events_stream_fans_out_live_committed_events() {
     // Append a committed event from a separate connection; the stream must
     // fan it out (via the cross-connection poll).
     let mut ledger = fixture.ledger();
+    // Use a task.state event so the test is unambiguous: the periodic
+    // repo.health emitter also produces frames on the stream now.
     ledger
         .append_event(
-            EventType::RepoHealth,
+            EventType::TaskState,
             "example/repository",
+            Some(1),
             None,
-            None,
-            serde_json::json!({"status": "ready"}),
+            serde_json::json!({"from": null, "to": "queued", "workflow": "wf", "ticket": {"id": "1"}}),
         )
         .unwrap();
 
-    let frames = read_frames(&mut stream, 1, Duration::from_secs(10));
-    assert_eq!(frames.len(), 1, "expected one live event, got {frames:?}");
-    let frame = &frames[0];
-    assert_eq!(frame.event.as_deref(), Some("repo.health"));
+    // Read until our task.state frame arrives (a periodic repo.health may
+    // arrive first); assert our event fanned out with the right envelope.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut found: Option<SseFrame> = None;
+    while Instant::now() < deadline && found.is_none() {
+        for frame in read_frames(&mut stream, 1, Duration::from_secs(2)) {
+            if frame.event.as_deref() == Some("task.state") {
+                found = Some(frame);
+                break;
+            }
+        }
+    }
+    let frame = found.expect("expected a task.state frame");
     assert_eq!(frame.retry.as_deref(), Some("3000"));
     let id: i64 = frame.id.as_ref().unwrap().parse().unwrap();
     assert!(id >= 1);
     let envelope: serde_json::Value = serde_json::from_str(&frame.data).unwrap();
     assert_eq!(envelope["v"], 1);
-    assert_eq!(envelope["type"], "repo.health");
+    assert_eq!(envelope["type"], "task.state");
     assert_eq!(envelope["seq"], id);
     assert_eq!(envelope["repository"], "example/repository");
-    assert_eq!(envelope["payload"]["status"], "ready");
-    assert!(envelope["task_id"].is_null());
+    assert_eq!(envelope["payload"]["to"], "queued");
+    assert_eq!(envelope["task_id"], 1);
     assert!(envelope["run_id"].is_null());
 
     child.kill().unwrap();
@@ -376,4 +389,88 @@ fn events_heartbeat_keeps_an_idle_connection_alive() {
 
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+#[test]
+fn status_endpoint_returns_the_current_repo_health_snapshot() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_serve(&mut child, port);
+
+    let response = http_get_json(port, "/api/v1/status");
+    assert_eq!(response["status"], "idle");
+    assert_eq!(response["active_runs"], 0);
+    assert_eq!(response["queued_tasks"], 0);
+    assert!(response.get("backoff_until").is_some());
+
+    // Anonymous access is rejected.
+    let status = http_status_anonymous(port, "/api/v1/status");
+    assert_eq!(status, 401);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn repo_health_event_is_emitted_on_the_sse_stream() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_serve(&mut child, port);
+
+    // The periodic emitter fires the first repo.health snapshot shortly after
+    // startup; the SSE stream fans it out.
+    let mut stream = open_sse(port, "/events");
+    let frames = read_frames(&mut stream, 1, Duration::from_secs(10));
+    assert!(!frames.is_empty(), "expected a repo.health event");
+    let health = frames
+        .iter()
+        .find(|frame| frame.event.as_deref() == Some("repo.health"))
+        .expect("expected a repo.health frame");
+    let envelope: serde_json::Value = serde_json::from_str(&health.data).unwrap();
+    assert_eq!(envelope["type"], "repo.health");
+    assert_eq!(envelope["payload"]["status"], "idle");
+    assert!(envelope["task_id"].is_null());
+    assert!(envelope["run_id"].is_null());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// GET a JSON control-plane endpoint with the bearer token.
+fn http_get_json(port: u16, path: &str) -> serde_json::Value {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8(raw).unwrap();
+    let body = raw.split_once("\r\n\r\n").unwrap().1;
+    serde_json::from_str(body).unwrap_or_else(|error| panic!("not JSON ({error}): {body}"))
+}
+
+/// GET an endpoint without a token and return only the status code.
+fn http_status_anonymous(port: u16, path: &str) -> u16 {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8(raw).unwrap();
+    raw.split_whitespace().nth(1).unwrap().parse().unwrap()
 }
