@@ -168,7 +168,7 @@ fn concurrent_first_open_converges_on_one_complete_schema() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     let schedule_tables: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema
@@ -1197,7 +1197,7 @@ fn migrates_a_version_one_ledger_without_losing_tasks() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 }
 
 #[test]
@@ -1235,7 +1235,7 @@ fn opens_an_existing_version_eight_ledger() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
 }
 
 #[test]
