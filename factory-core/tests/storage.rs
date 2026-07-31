@@ -168,7 +168,7 @@ fn concurrent_first_open_converges_on_one_complete_schema() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     let schedule_tables: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema
@@ -1197,7 +1197,7 @@ fn migrates_a_version_one_ledger_without_losing_tasks() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]
@@ -1209,12 +1209,14 @@ fn opens_an_existing_version_eight_ledger() {
     let connection = Connection::open(&path).unwrap();
     connection
         .execute_batch(
-            "DROP TABLE poll_status;
+            "DROP TABLE events;
+             DROP TABLE poll_status;
              DROP TABLE repository_health;
              DROP TABLE run_sandboxes;
              DROP TABLE run_containers;
              ALTER TABLE task_workspaces DROP COLUMN backend;
              DROP TABLE project_claims;
+             DELETE FROM schema_migrations WHERE version = 13;
              DELETE FROM schema_migrations WHERE version = 12;
              DELETE FROM schema_migrations WHERE version = 11;
              DELETE FROM schema_migrations WHERE version = 10;
@@ -1233,7 +1235,7 @@ fn opens_an_existing_version_eight_ledger() {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]
@@ -1819,4 +1821,171 @@ fn failed_writes_do_not_damage_prior_state() {
         TaskState::Queued
     );
     assert!(ledger.runs_for_task(task.id).unwrap().is_empty());
+}
+
+#[test]
+fn events_after_returns_appended_events_in_global_monotonic_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    assert!(ledger.events_after(0).unwrap().is_empty());
+
+    let first = ledger
+        .append_event(
+            factory::storage::EventType::TaskState,
+            "owainlewis/factory",
+            Some(1),
+            None,
+            serde_json::json!({"from": null, "to": "queued"}),
+        )
+        .unwrap();
+    let second = ledger
+        .append_event(
+            factory::storage::EventType::RunOutcome,
+            "owainlewis/factory",
+            Some(1),
+            Some(7),
+            serde_json::json!({"outcome": "succeeded"}),
+        )
+        .unwrap();
+    let third = ledger
+        .append_event(
+            factory::storage::EventType::RepoHealth,
+            "owainlewis/factory",
+            None,
+            None,
+            serde_json::json!({"status": "ready"}),
+        )
+        .unwrap();
+
+    assert!(first.event_id < second.event_id);
+    assert!(second.event_id < third.event_id);
+
+    let all = ledger.events_after(0).unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].event_id, first.event_id);
+    assert_eq!(all[1].event_id, second.event_id);
+    assert_eq!(all[2].event_id, third.event_id);
+    assert_eq!(all[0].event_type, "task.state");
+    assert_eq!(all[1].event_type, "run.outcome");
+    assert_eq!(all[2].event_type, "repo.health");
+    assert_eq!(all[0].repository, "owainlewis/factory");
+    assert_eq!(all[0].task_id, Some(1));
+    assert_eq!(all[0].run_id, None);
+    assert_eq!(all[1].run_id, Some(7));
+    assert_eq!(all[2].task_id, None);
+    assert_eq!(all[2].run_id, None);
+    assert!(!all[0].ts.is_empty());
+}
+
+#[test]
+fn events_after_replays_only_the_gap_after_the_cursor() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..5 {
+        ids.push(
+            ledger
+                .append_event(
+                    factory::storage::EventType::TaskState,
+                    "owainlewis/factory",
+                    Some(index as i64),
+                    None,
+                    serde_json::json!({"seq": index}),
+                )
+                .unwrap()
+                .event_id,
+        );
+    }
+    let replayed = ledger.events_after(ids[1]).unwrap();
+    assert_eq!(replayed.len(), 3);
+    assert_eq!(
+        replayed.iter().map(|event| event.event_id).collect::<Vec<_>>(),
+        vec![ids[2], ids[3], ids[4]]
+    );
+}
+
+#[test]
+fn event_ids_are_globally_monotonic_across_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("ledger.db");
+    let first_id;
+    {
+        let mut ledger = Ledger::open(&database).unwrap();
+        first_id = ledger
+            .append_event(
+                factory::storage::EventType::TaskState,
+                "owainlewis/factory",
+                None,
+                None,
+                serde_json::json!({}),
+            )
+            .unwrap()
+            .event_id;
+    }
+    let mut ledger = Ledger::open(&database).unwrap();
+    let second_id = ledger
+        .append_event(
+            factory::storage::EventType::RepoHealth,
+            "owainlewis/factory",
+            None,
+            None,
+            serde_json::json!({}),
+        )
+        .unwrap()
+        .event_id;
+    assert!(second_id > first_id, "event_id must survive ledger reopen");
+    let replayed = ledger.events_after(first_id).unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].event_id, second_id);
+}
+
+#[test]
+fn event_payload_is_sanitized_and_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    let secret = "ghp_0123456789abcdef0123456789abcdef0123";
+    let event = ledger
+        .append_event(
+            factory::storage::EventType::RunActivity,
+            "owainlewis/factory",
+            Some(1),
+            Some(1),
+            serde_json::json!({"activity": format!("token is {secret}")}),
+        )
+        .unwrap();
+    let stored = event.payload.to_string();
+    assert!(
+        !stored.contains(secret),
+        "event payload must be sanitized, got {stored}"
+    );
+}
+
+#[test]
+fn appended_event_is_visible_within_the_same_transaction_as_state_transition() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
+    ledger
+        .register_daemon_owner("owner", std::process::id())
+        .unwrap();
+    ledger.enqueue(&ticket("rev-1")).unwrap();
+    let runtimes = ticket_runtimes();
+    let claimed = ledger
+        .claim_and_start_run(
+            &["owainlewis/factory".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
+        .unwrap()
+        .unwrap();
+    // The claim transition itself must have appended a task.state event atomically.
+    let events = ledger.events_after(0).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "task.state"
+                && event.task_id == Some(claimed.task.id)
+                && event.run_id == Some(claimed.run.id)),
+        "claim must append a task.state event in the same transaction, got {events:?}"
+    );
 }
