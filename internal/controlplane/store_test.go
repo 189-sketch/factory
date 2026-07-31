@@ -172,7 +172,7 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 	for index := range retained {
 		retained[index] = protocol.RetainedWorktree{
 			AttemptID:    fmt.Sprintf("00000000-0000-4000-8000-%012d", index),
-			RepositoryID: "legacy-repository",
+			RepositoryID: "case-alias-repository",
 			Path:         fmt.Sprintf("/tmp/legacy-%d", index),
 			Reason:       "legacy retained worktree",
 		}
@@ -217,12 +217,17 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 		INSERT INTO repositories(id, remote_identity, created_at)
 		VALUES ('legacy-repository', 'github.com/example/migration', 1);
 		INSERT INTO repositories(id, remote_identity, created_at)
+		VALUES ('case-alias-repository', 'github.com/Example/Migration', 2);
+		INSERT INTO repositories(id, remote_identity, created_at)
 		VALUES ('invalid-repository', 'github.com/example/invalid-migration', 1);
 		INSERT INTO repositories(id, remote_identity, created_at)
 		VALUES ('malformed-repository', 'github.com/example/malformed-migration', 1);
 		INSERT INTO worker_repositories(
 			worker_id, display_key, repository_id, retained_count, advertised, updated_at
-		) VALUES ('worker-a', 'factory', 'legacy-repository', 0, 1, 1);
+		) VALUES ('worker-a', 'factory', 'legacy-repository', 0, 0, 1);
+		INSERT INTO worker_repositories(
+			worker_id, display_key, repository_id, retained_count, advertised, updated_at
+		) VALUES ('worker-a', 'factory-case-alias', 'case-alias-repository', 3, 1, 2);
 		INSERT INTO worker_repositories(
 			worker_id, display_key, repository_id, retained_count, advertised, updated_at
 		) VALUES ('worker-b', 'invalid', 'invalid-repository', 0, 1, 1);
@@ -232,6 +237,9 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 		INSERT INTO tasks(
 			id, request_key, title, description, repository_id, timeout_seconds, created_at
 		) VALUES ('historical-task', 'historical-task', 'historical', '', 'legacy-repository', 60, 1);
+		INSERT INTO tasks(
+			id, request_key, title, description, repository_id, timeout_seconds, created_at
+		) VALUES ('case-alias-task', 'case-alias-task', 'case alias', '', 'case-alias-repository', 60, 2);
 		INSERT INTO tasks(
 			id, request_key, title, description, repository_id, timeout_seconds, created_at
 		) VALUES (
@@ -246,6 +254,10 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 			id, task_id, assigned_worker_id, required_runtime, state,
 			cancellation_requested, created_at, updated_at
 		) VALUES ('historical-execution', 'historical-task', 'worker-a', 'codex', 'failed', 0, 1, 1);
+		INSERT INTO executions(
+			id, task_id, assigned_worker_id, required_runtime, state,
+			cancellation_requested, created_at, updated_at
+		) VALUES ('case-alias-execution', 'case-alias-task', 'worker-a', 'codex', 'queued', 0, 2, 2);
 		INSERT INTO executions(
 			id, task_id, assigned_worker_id, required_runtime, state,
 			cancellation_requested, created_at, updated_at
@@ -314,6 +326,79 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 	if runtime != protocol.RuntimeCodex || runtimeVersion != "legacy" {
 		t.Fatalf("migrated worker runtime = %q %q", runtime, runtimeVersion)
 	}
+	var enabled, updatedAt, acceptsManagedRepositories, dynamic int
+	if err := database.QueryRow(`
+		SELECT r.enabled, r.updated_at, w.accepts_managed_repositories, wr.dynamic
+		FROM repositories r
+		JOIN worker_repositories wr ON wr.repository_id = r.id
+		JOIN workers w ON w.id = wr.worker_id
+		WHERE r.id = 'legacy-repository' AND w.id = 'worker-a'
+	`).Scan(&enabled, &updatedAt, &acceptsManagedRepositories, &dynamic); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 1 || updatedAt != 1 || acceptsManagedRepositories != 0 || dynamic != 0 {
+		t.Fatalf(
+			"managed repository migration = enabled %d, updated %d, accepts %d, dynamic %d",
+			enabled, updatedAt, acceptsManagedRepositories, dynamic,
+		)
+	}
+	var canonicalCount, aliasMappings, canonicalTasks int
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM repositories
+		WHERE lower(remote_identity) = 'github.com/example/migration'
+	`).Scan(&canonicalCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM repository_aliases
+		WHERE alias_id = 'case-alias-repository' AND repository_id = 'legacy-repository'
+	`).Scan(&aliasMappings); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM tasks
+		WHERE id = 'case-alias-task' AND repository_id = 'legacy-repository'
+	`).Scan(&canonicalTasks); err != nil {
+		t.Fatal(err)
+	}
+	if canonicalCount != 1 || aliasMappings != 1 || canonicalTasks != 1 {
+		t.Fatalf(
+			"GitHub alias migration = repositories %d, aliases %d, tasks %d",
+			canonicalCount, aliasMappings, canonicalTasks,
+		)
+	}
+	claim := claimTestTask(t, store, workerA, "case-alias-claim", tokenB)
+	if claim.Task.ID != "case-alias-task" {
+		t.Fatalf("claim selected %q; want case-alias-task", claim.Task.ID)
+	}
+	if claim.Repository.Key != "factory-case-alias" ||
+		claim.Repository.RemoteIdentity != "github.com/Example/Migration" {
+		t.Fatalf("claim repository = %#v; want the currently advertised alias", claim.Repository)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenB, State: "failed", Error: "migration alias verified",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retainedAliasWorker := protocol.WorkerRegistration{
+		Name: "legacy", WorkerVersion: "upgraded", RuntimeVersion: "upgraded",
+		Capacity: 2, Health: "healthy",
+		Repositories: []protocol.RepositoryRegistration{
+			{Key: "factory", RemoteIdentity: "github.com/Example/Migration"},
+			{Key: "factory-case-alias", RemoteIdentity: "github.com/example/migration"},
+		},
+		RetainedWorktrees: []protocol.RetainedWorktree{{
+			AttemptID: "historical-attempt", RepositoryID: "case-alias-repository",
+		}},
+		CapacityHandoffVersion: 1,
+	}
+	registeredAliasWorker, err := store.RegisterWorker(context.Background(), workerA, retainedAliasWorker)
+	if err != nil {
+		t.Fatalf("register worker with historical repository alias: %v", err)
+	}
+	if len(registeredAliasWorker.Repositories) != 1 || registeredAliasWorker.Repositories[0].Key != "factory" {
+		t.Fatalf("coalesced historical repository aliases = %#v", registeredAliasWorker.Repositories)
+	}
 	foreignKeys, err := database.Query(`PRAGMA foreign_key_check`)
 	if err != nil {
 		t.Fatal(err)
@@ -325,9 +410,74 @@ func TestCapacityMigrationDerivesOnlyAttributableLegacyRetainedCounts(t *testing
 		t.Fatal(err)
 	}
 	createTestTask(t, store, "post-migration-task", workerA, "legacy-repository")
-	claim := claimTestTask(t, store, workerA, "post-migration-claim", tokenA)
-	if claim.Task.RequestKey != "post-migration-task" {
-		t.Fatalf("post-migration claim selected %q", claim.Task.RequestKey)
+	postMigrationClaim := claimTestTask(t, store, workerA, "post-migration-claim", tokenA)
+	if postMigrationClaim.Task.RequestKey != "post-migration-task" {
+		t.Fatalf("post-migration claim selected %q", postMigrationClaim.Task.RequestKey)
+	}
+}
+
+func TestManagedRepositoryMigrationPreservesLegacyClaimRemoteSpelling(t *testing.T) {
+	database, err := sql.Open("sqlite", t.TempDir()+"/legacy-remote.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	schema, err := migrations.Files.ReadFile("001_controlplane.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(string(schema)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 31, 12, 0, 0, 0, time.UTC)
+	if _, err := database.Exec(`
+		INSERT INTO schema_migrations(version, applied_at) VALUES (1, 1);
+		INSERT INTO workers(
+			id, name, worker_version, codex_version, capacity, active_count, health,
+			retained_worktrees_json, registered_at, last_heartbeat
+		) VALUES ('legacy-case-worker', 'legacy', 'legacy', 'legacy', 1, 0, 'healthy', '[]', ?, ?);
+		INSERT INTO repositories(id, remote_identity, created_at)
+		VALUES ('legacy-case-repository', 'github.com/Owner/Repository', 1);
+		INSERT INTO worker_repositories(
+			worker_id, display_key, repository_id, retained_count, advertised, updated_at
+		) VALUES ('legacy-case-worker', 'legacy', 'legacy-case-repository', 0, 1, 1);
+		INSERT INTO tasks(
+			id, request_key, title, description, repository_id, timeout_seconds, created_at
+		) VALUES ('legacy-case-task', 'legacy-case-task', 'legacy case', '', 'legacy-case-repository', 60, 1);
+		INSERT INTO executions(
+			id, task_id, assigned_worker_id, required_runtime, state,
+			cancellation_requested, created_at, updated_at
+		) VALUES (
+			'legacy-case-execution', 'legacy-case-task', 'legacy-case-worker',
+			'codex', 'queued', 0, 1, 1
+		);
+	`, now.UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{db: database, now: func() time.Time { return now }, sweepEvery: 5 * time.Second}
+	if err := store.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.Claim(context.Background(), "legacy-case-worker", protocol.ClaimRequest{
+		RequestID: "legacy-case-claim", LeaseToken: tokenA,
+	})
+	if err != nil || claim == nil {
+		t.Fatalf("legacy claim = %#v, err %v", claim, err)
+	}
+	if claim.Repository.RemoteIdentity != "github.com/Owner/Repository" {
+		t.Fatalf("legacy claim remote = %q", claim.Repository.RemoteIdentity)
+	}
+	detail, err := store.Task(context.Background(), "legacy-case-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Repository.RemoteIdentity != "github.com/owner/repository" {
+		t.Fatalf("canonical control-plane remote = %q", detail.Repository.RemoteIdentity)
 	}
 }
 
@@ -447,6 +597,24 @@ func registerTestWorker(t *testing.T, store *Store, id string, capacity int, rep
 		t.Fatal(err)
 	}
 	return worker
+}
+
+func createManagedTestRepository(t *testing.T, store *Store, remoteIdentity string) protocol.ManagedRepository {
+	t.Helper()
+	repository, _, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: remoteIdentity},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repository.Enabled {
+		repository, err = store.SetManagedRepositoryEnabled(context.Background(), repository.ID, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return repository
 }
 
 func TestWorkerRuntimeDeterminesExecutionAndCannotChange(t *testing.T) {
@@ -671,6 +839,7 @@ func TestRoutedTaskChoosesLeastLoadedEligibleWorkerAndFreezesAssignment(t *testi
 	repository := protocol.RepositoryRegistration{
 		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
 	}
+	createManagedTestRepository(t, store, repository.RemoteIdentity)
 	access := []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}}
 	for _, workerID := range []string{workerA, workerB} {
 		if _, err := store.RegisterWorker(context.Background(), workerID, protocol.WorkerRegistration{
@@ -751,6 +920,9 @@ func TestRoutedTaskRequiresRepositoryAndSourceAccessOnHealthyOnlineWorker(t *tes
 		TimeoutSeconds: 60,
 	}
 	_, _, err := store.CreateTask(context.Background(), request)
+	assertErrorCode(t, err, "repository_not_managed")
+	createManagedTestRepository(t, store, repository.RemoteIdentity)
+	_, _, err = store.CreateTask(context.Background(), request)
 	assertErrorCode(t, err, "no_eligible_worker")
 
 	if _, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
@@ -763,7 +935,359 @@ func TestRoutedTaskRequiresRepositoryAndSourceAccessOnHealthyOnlineWorker(t *tes
 	request.RequestKey = "route-wrong-repository"
 	request.Route.RepositoryRemoteIdentity = "github.com/owainlewis/other"
 	_, _, err = store.CreateTask(context.Background(), request)
+	assertErrorCode(t, err, "repository_not_managed")
+
+	request.RequestKey = "route-unsafe-repository"
+	request.Route.RepositoryRemoteIdentity = "https://github.com/owainlewis/factory"
+	_, _, err = store.CreateTask(context.Background(), request)
+	assertErrorCode(t, err, "invalid_route")
+}
+
+func TestManagedRepositoryCatalogIsCanonicalIdempotentAndDisableable(t *testing.T) {
+	store := newTestStore(t)
+	createdRepository, created, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: " GitHub.com/OwainLewis/Factory.git "},
+	)
+	if err != nil || !created {
+		t.Fatalf("create managed repository: created %t, err %v", created, err)
+	}
+	if createdRepository.RemoteIdentity != "github.com/owainlewis/factory" || !createdRepository.Enabled {
+		t.Fatalf("created managed repository = %#v", createdRepository)
+	}
+	replayed, created, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: "github.com/owainlewis/factory"},
+	)
+	if err != nil || created || replayed.ID != createdRepository.ID {
+		t.Fatalf("replayed managed repository = %#v, created %t, err %v", replayed, created, err)
+	}
+	repositories, err := store.ManagedRepositories(context.Background())
+	if err != nil || len(repositories) != 1 || repositories[0].ID != createdRepository.ID {
+		t.Fatalf("managed repositories = %#v, err %v", repositories, err)
+	}
+	disabled, err := store.SetManagedRepositoryEnabled(context.Background(), createdRepository.ID, false)
+	if err != nil || disabled.Enabled || disabled.UpdatedAt.Before(disabled.CreatedAt) {
+		t.Fatalf("disabled managed repository = %#v, err %v", disabled, err)
+	}
+	if _, _, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: "https://github.com/owainlewis/factory"},
+	); err == nil {
+		t.Fatal("URL-shaped managed repository identity was accepted")
+	} else {
+		assertErrorCode(t, err, "invalid_repository")
+	}
+}
+
+func TestManagedRepositoryCatalogPromotesOnlyWorkerDiscoveredRows(t *testing.T) {
+	store := newTestStore(t)
+	remoteIdentity := "github.com/example/discovered"
+	worker := registerTestWorker(t, store, workerA, 1, protocol.RepositoryRegistration{
+		Key: "discovered", RemoteIdentity: remoteIdentity,
+	})
+	if len(worker.Repositories) != 1 {
+		t.Fatalf("worker repositories = %#v", worker.Repositories)
+	}
+	discovered, err := store.ManagedRepository(context.Background(), worker.Repositories[0].ID)
+	if err != nil || discovered.Enabled {
+		t.Fatalf("worker-discovered repository = %#v, err %v", discovered, err)
+	}
+	promoted, created, err := store.CreateManagedRepository(
+		context.Background(), protocol.CreateManagedRepositoryRequest{RemoteIdentity: remoteIdentity},
+	)
+	if err != nil || created || !promoted.Enabled || promoted.ID != discovered.ID {
+		t.Fatalf("promoted repository = %#v, created %t, err %v", promoted, created, err)
+	}
+	disabled, err := store.SetManagedRepositoryEnabled(context.Background(), promoted.ID, false)
+	if err != nil || disabled.Enabled {
+		t.Fatalf("disable promoted repository = %#v, err %v", disabled, err)
+	}
+	replayed, created, err := store.CreateManagedRepository(
+		context.Background(), protocol.CreateManagedRepositoryRequest{RemoteIdentity: remoteIdentity},
+	)
+	if err != nil || created || replayed.Enabled {
+		t.Fatalf("replayed explicitly disabled repository = %#v, created %t, err %v", replayed, created, err)
+	}
+}
+
+func TestManagedRepositoryCatalogEnforcesItsHardLimit(t *testing.T) {
+	store := newTestStore(t)
+	for index := 0; index < protocol.MaxManagedRepositories; index++ {
+		if _, err := store.db.Exec(`
+			INSERT INTO repositories(id, remote_identity, enabled, created_at, updated_at)
+			VALUES (?, ?, 1, 1, 1)
+		`, fmt.Sprintf("repository-%04d", index), fmt.Sprintf("github.com/example/repository-%04d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: "github.com/example/over-limit"},
+	)
+	assertErrorCode(t, err, "repository_limit_reached")
+	_, err = store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", RuntimeVersion: "test",
+		Capacity: 1, Health: "healthy",
+		Repositories: []protocol.RepositoryRegistration{{
+			Key: "over-limit", RemoteIdentity: "github.com/example/worker-over-limit",
+		}},
+	})
+	assertErrorCode(t, err, "repository_limit_reached")
+	var repositoryCount, workerCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM repositories`).Scan(&repositoryCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM workers WHERE id = ?`, workerA).Scan(&workerCount); err != nil {
+		t.Fatal(err)
+	}
+	if repositoryCount != protocol.MaxManagedRepositories || workerCount != 0 {
+		t.Fatalf("limit rollback repositories=%d workers=%d", repositoryCount, workerCount)
+	}
+}
+
+func TestRoutedTaskCanFreezeAZeroRepositoryCattleWorker(t *testing.T) {
+	store := newTestStore(t)
+	repository, _, err := store.CreateManagedRepository(
+		context.Background(),
+		protocol.CreateManagedRepositoryRequest{RemoteIdentity: "github.com/owainlewis/factory"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", RuntimeVersion: "codex-test",
+		Capacity: 1, Health: "healthy",
+		SourceAccess:               []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+		AcceptsManagedRepositories: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.Repositories) != 0 || !worker.AcceptsManagedRepositories {
+		t.Fatalf("initial cattle worker = %#v", worker)
+	}
+	detail, created, err := store.CreateTask(context.Background(), protocol.CreateTaskRequest{
+		RequestKey: "cattle-route", Title: "Cattle route", Description: "Fetch the live issue.",
+		Route: &protocol.TaskRoute{
+			RepositoryRemoteIdentity: repository.RemoteIdentity,
+			SourceAccess:             protocol.SourceAccess{Provider: "github", Hostname: "github.com"},
+		},
+		TimeoutSeconds: 60,
+	})
+	if err != nil || !created {
+		t.Fatalf("create cattle task: created %t, err %v", created, err)
+	}
+	if detail.Execution.AssignedWorkerID != workerA || detail.Repository.ID != repository.ID {
+		t.Fatalf("cattle route detail = %#v", detail)
+	}
+	worker, err = store.Worker(context.Background(), workerA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(worker.Repositories) != 1 || worker.Repositories[0].ID != repository.ID ||
+		worker.Repositories[0].Key != repository.RemoteIdentity {
+		t.Fatalf("frozen dynamic repository = %#v", worker.Repositories)
+	}
+
+	if _, err := store.SetManagedRepositoryEnabled(context.Background(), repository.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = store.CreateTask(context.Background(), protocol.CreateTaskRequest{
+		RequestKey: "disabled-cattle-route", Title: "Disabled route", Description: "Do not run.",
+		Route: &protocol.TaskRoute{
+			RepositoryRemoteIdentity: repository.RemoteIdentity,
+			SourceAccess:             protocol.SourceAccess{Provider: "github", Hostname: "github.com"},
+		},
+		TimeoutSeconds: 60,
+	})
+	assertErrorCode(t, err, "repository_not_managed")
+}
+
+func TestRoutedTaskSkipsWorkerWithConflictingDynamicDisplayKey(t *testing.T) {
+	store := newTestStore(t)
+	target := createManagedTestRepository(t, store, "github.com/example/target")
+	common := protocol.WorkerRegistration{
+		WorkerVersion: "test", RuntimeVersion: "test", Capacity: 1, Health: "healthy",
+		SourceAccess:               []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+		AcceptsManagedRepositories: true,
+	}
+	workerARegistration := common
+	workerARegistration.Name = workerA
+	workerARegistration.Repositories = []protocol.RepositoryRegistration{{
+		Key: target.RemoteIdentity, RemoteIdentity: "github.com/example/different",
+	}}
+	if _, err := store.RegisterWorker(context.Background(), workerA, workerARegistration); err != nil {
+		t.Fatal(err)
+	}
+	workerBRegistration := common
+	workerBRegistration.Name = workerB
+	if _, err := store.RegisterWorker(context.Background(), workerB, workerBRegistration); err != nil {
+		t.Fatal(err)
+	}
+	detail, created, err := store.CreateTask(context.Background(), protocol.CreateTaskRequest{
+		RequestKey: "display-key-collision", Title: "Display key collision",
+		Description: "Route around the collision.",
+		Route: &protocol.TaskRoute{
+			RepositoryRemoteIdentity: target.RemoteIdentity,
+			SourceAccess:             protocol.SourceAccess{Provider: "github", Hostname: "github.com"},
+		},
+		TimeoutSeconds: 60,
+	})
+	if err != nil || !created {
+		t.Fatalf("route around display key collision: created %t, err %v", created, err)
+	}
+	if detail.Execution.AssignedWorkerID != workerB {
+		t.Fatalf("collision route assigned worker %q; want %q", detail.Execution.AssignedWorkerID, workerB)
+	}
+}
+
+func TestRoutedTaskReservesManagedRepositoryCacheHeadroom(t *testing.T) {
+	store := newTestStore(t)
+	firstRepository := createManagedTestRepository(t, store, "github.com/example/first")
+	secondRepository := createManagedTestRepository(t, store, "github.com/example/second")
+	cachedRepositoryIDs := make([]string, 0, protocol.MaxRepositoryCacheEntries-1)
+	for index := 0; index < protocol.MaxRepositoryCacheEntries-1; index++ {
+		cachedRepositoryIDs = append(cachedRepositoryIDs, fmt.Sprintf(
+			"%08x-0000-4000-8000-%012x", index+1, index+1,
+		))
+	}
+	registration := protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", RuntimeVersion: "test",
+		Capacity: 1, Health: "healthy",
+		SourceAccess:               []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+		AcceptsManagedRepositories: true,
+		ManagedRepositoryIDs:       cachedRepositoryIDs,
+	}
+	if _, err := store.RegisterWorker(context.Background(), workerA, registration); err != nil {
+		t.Fatal(err)
+	}
+	createRouted := func(requestKey string, repository protocol.ManagedRepository) (protocol.TaskDetail, error) {
+		detail, _, err := store.CreateTask(context.Background(), protocol.CreateTaskRequest{
+			RequestKey: requestKey, Title: requestKey, Description: "Exercise cache routing.",
+			Route: &protocol.TaskRoute{
+				RepositoryRemoteIdentity: repository.RemoteIdentity,
+				SourceAccess:             protocol.SourceAccess{Provider: "github", Hostname: "github.com"},
+			},
+			TimeoutSeconds: 60,
+		})
+		return detail, err
+	}
+	first, err := createRouted("cache-reservation-first", firstRepository)
+	if err != nil || first.Execution.AssignedWorkerID != workerA {
+		t.Fatalf("first cache reservation = %#v, err %v", first, err)
+	}
+	_, err = createRouted("cache-reservation-blocked", secondRepository)
 	assertErrorCode(t, err, "no_eligible_worker")
+
+	registration.ManagedRepositoryIDs = append(registration.ManagedRepositoryIDs, firstRepository.ID)
+	if _, err := store.RegisterWorker(context.Background(), workerA, registration); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createRouted("cache-reservation-reuse", firstRepository); err != nil {
+		t.Fatalf("route to cached repository: %v", err)
+	}
+	_, err = createRouted("cache-reservation-full", secondRepository)
+	assertErrorCode(t, err, "no_eligible_worker")
+}
+
+func TestRegistrationReleasesFailedUncachedRepositoryReservation(t *testing.T) {
+	store := newTestStore(t)
+	failedRepository := createManagedTestRepository(t, store, "github.com/example/failed-clone")
+	nextRepository := createManagedTestRepository(t, store, "github.com/example/next-clone")
+	cachedRepositoryIDs := make([]string, 0, protocol.MaxRepositoryCacheEntries-1)
+	for index := 0; index < protocol.MaxRepositoryCacheEntries-1; index++ {
+		cachedRepositoryIDs = append(cachedRepositoryIDs, fmt.Sprintf(
+			"%08x-0000-4000-8000-%012x", index+1, index+1,
+		))
+	}
+	registration := protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", RuntimeVersion: "test",
+		Capacity: 1, Health: "healthy",
+		SourceAccess:               []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+		AcceptsManagedRepositories: true,
+		ManagedRepositoryIDs:       cachedRepositoryIDs,
+	}
+	if _, err := store.RegisterWorker(context.Background(), workerA, registration); err != nil {
+		t.Fatal(err)
+	}
+	createRouted := func(requestKey string, repository protocol.ManagedRepository) (protocol.TaskDetail, error) {
+		detail, _, err := store.CreateTask(context.Background(), protocol.CreateTaskRequest{
+			RequestKey: requestKey, Title: requestKey, Description: "Exercise failed acquisition recovery.",
+			Route: &protocol.TaskRoute{
+				RepositoryRemoteIdentity: repository.RemoteIdentity,
+				SourceAccess:             protocol.SourceAccess{Provider: "github", Hostname: "github.com"},
+			},
+			TimeoutSeconds: 60,
+		})
+		return detail, err
+	}
+	failed, err := createRouted("failed-cache-reservation", failedRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createRouted("blocked-by-failed-reservation", nextRepository); err == nil {
+		t.Fatal("cache headroom ignored the outstanding acquisition reservation")
+	} else {
+		assertErrorCode(t, err, "no_eligible_worker")
+	}
+	claim := claimTestTask(t, store, workerA, "failed-cache-claim", tokenA)
+	if claim.Task.ID != failed.Task.ID {
+		t.Fatalf("claimed task = %s; want %s", claim.Task.ID, failed.Task.ID)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "failed", Error: "clone failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RegisterWorker(context.Background(), workerA, registration); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := store.Task(context.Background(), failed.Task.ID)
+	if err != nil || detail.Repository.ID != failedRepository.ID || detail.RepositoryAvailable {
+		t.Fatalf("failed task after reservation release = %#v, err %v", detail, err)
+	}
+	next, err := createRouted("route-after-failed-reservation", nextRepository)
+	if err != nil {
+		t.Fatalf("failed reservation still consumes cache headroom: %v", err)
+	}
+	var remaining, advertised int
+	if err := store.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(advertised), 0)
+		FROM worker_repositories
+		WHERE worker_id = ? AND repository_id = ? AND dynamic = 1
+	`, workerA, failedRepository.ID).Scan(&remaining, &advertised); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 || advertised != 0 {
+		t.Fatalf("released historical association count = %d, advertised = %d", remaining, advertised)
+	}
+	if _, err := store.RetryExecution(context.Background(), failed.Execution.ID); err == nil {
+		t.Fatal("retry ignored managed repository cache headroom")
+	} else {
+		assertErrorCode(t, err, "retry_repository_unavailable")
+	}
+	failedAfterBlockedRetry, err := store.Task(context.Background(), failed.Task.ID)
+	if err != nil || failedAfterBlockedRetry.Execution.State != "failed" || failedAfterBlockedRetry.RepositoryAvailable {
+		t.Fatalf("blocked retry changed failed execution = %#v, err %v", failedAfterBlockedRetry, err)
+	}
+	if _, err := store.CancelTask(context.Background(), next.Task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RegisterWorker(context.Background(), workerA, registration); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RetryExecution(context.Background(), failed.Execution.ID)
+	if err != nil {
+		t.Fatalf("retry released failed acquisition: %v", err)
+	}
+	if retried.Execution.State != "queued" || !retried.RepositoryAvailable {
+		t.Fatalf("retried failed acquisition = %#v", retried)
+	}
+	retryClaim := claimTestTask(t, store, workerA, "failed-cache-retry-claim", tokenB)
+	if retryClaim.Task.ID != failed.Task.ID || retryClaim.Attempt.AttemptNumber != 2 {
+		t.Fatalf("retry claim = %#v", retryClaim)
+	}
 }
 
 func TestRoutedTaskMatchesGitHubRepositoryIdentityWithoutCaseSensitivity(t *testing.T) {
@@ -771,6 +1295,7 @@ func TestRoutedTaskMatchesGitHubRepositoryIdentityWithoutCaseSensitivity(t *test
 	repository := protocol.RepositoryRegistration{
 		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
 	}
+	createManagedTestRepository(t, store, repository.RemoteIdentity)
 	if _, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
 		Name: workerA, WorkerVersion: "test", RuntimeVersion: "test",
 		Capacity: 1, Health: "healthy", Repositories: []protocol.RepositoryRegistration{repository},
@@ -801,6 +1326,7 @@ func TestRoutedTaskExcludesWorkersWithoutRepositoryCapacity(t *testing.T) {
 				Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
 				RetainedCount: protocol.MaxRetainedPerRepo - 1,
 			}
+			createManagedTestRepository(t, store, repository.RemoteIdentity)
 			if capacityTerm == "retained" {
 				repository.RetainedCount = protocol.MaxRetainedPerRepo
 			}
