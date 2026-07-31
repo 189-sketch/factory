@@ -1,0 +1,440 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { App } from "./App";
+import { mockControlPlane } from "./test/fixtures";
+
+function renderApp() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return {
+    ...render(
+    <QueryClientProvider client={client}>
+      <App />
+    </QueryClientProvider>,
+    ),
+    client,
+  };
+}
+
+describe("App", () => {
+  it("renders every task status in the operational board", async () => {
+    mockControlPlane();
+    renderApp();
+
+    for (const state of ["Queued", "Running", "Succeeded", "Failed", "Cancelled"]) {
+      const column = await screen.findByRole("region", { name: new RegExp(`^${state}`) });
+      expect(within(column).getByText(`${state.toLowerCase()} task`)).toBeVisible();
+      expect(within(column).getByText(state, { selector: ".status-badge" })).toBeVisible();
+    }
+  });
+
+  it("loads another bounded task page without duplicating existing work", async () => {
+    mockControlPlane({ paginatedTasks: true });
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByText("queued task")).toBeVisible();
+    expect(screen.queryByText("running task")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load more work" }));
+
+    expect(await screen.findByText("running task")).toBeVisible();
+    expect(screen.getAllByText("queued task")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load more work" })).not.toBeInTheDocument();
+  });
+
+  it("polls only the live head page after older work is loaded", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fetch = mockControlPlane({ paginatedTasks: true });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderApp();
+      await user.click(await screen.findByRole("button", { name: "Load more work" }));
+      expect(await screen.findByText("running task")).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      const taskPaths = fetch.mock.calls
+        .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+        .filter((path) => path.startsWith("/api/v1/tasks?"));
+      expect(taskPaths.filter((path) => path === "/api/v1/tasks?limit=50")).toHaveLength(2);
+      expect(
+        taskPaths.filter((path) => path === "/api/v1/tasks?limit=50&cursor=next-page"),
+      ).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retain tasks shifted out of the live head without loading history", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockControlPlane({ boundedLiveHead: true });
+      renderApp();
+      expect(await screen.findByText("queued task")).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(screen.getByText("new head task")).toBeVisible();
+      expect(screen.queryByText("queued task")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("exposes a new history cursor when the live head grows beyond one page", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockControlPlane({ growingTaskHistory: true });
+      renderApp();
+      expect(await screen.findByText("queued task")).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Load more work" })).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(screen.getByRole("button", { name: "Load more work" })).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reopens exhausted history from a changed live-head boundary without duplicates", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fetch = mockControlPlane({ shiftingTaskBoundary: true });
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      renderApp();
+
+      await user.click(await screen.findByRole("button", { name: "Load more work" }));
+      expect(await screen.findByText("running task")).toBeVisible();
+      expect(screen.queryByText("succeeded task")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Load more work" })).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(screen.getByText("new head task")).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "Load more work" }));
+
+      expect(await screen.findByText("succeeded task")).toBeVisible();
+      expect(screen.getAllByText("running task")).toHaveLength(1);
+      const refreshedTask = screen.getByText("running task").closest("button");
+      expect(refreshedTask).not.toBeNull();
+      expect(
+        within(refreshedTask!).getByText("Succeeded", { selector: ".status-badge" }),
+      ).toBeVisible();
+      const taskPaths = fetch.mock.calls
+        .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+        .filter((path) => path.startsWith("/api/v1/tasks?"));
+      expect(taskPaths).toEqual([
+        "/api/v1/tasks?limit=50",
+        "/api/v1/tasks?limit=50&cursor=old-boundary",
+        "/api/v1/tasks?limit=50",
+        "/api/v1/tasks?limit=50&cursor=new-boundary",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restricts repositories to the selected worker and warns for offline work", async () => {
+    mockControlPlane();
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Delegate task" }));
+    const dialog = screen.getByRole("dialog", { name: "Delegate task" });
+    await user.selectOptions(within(dialog).getByLabelText("Worker"), "worker-online");
+    const repository = within(dialog).getByLabelText("Repository");
+    expect(within(repository).getByRole("option", { name: /factory/ })).toBeInTheDocument();
+    expect(within(repository).queryByRole("option", { name: /archive/ })).not.toBeInTheDocument();
+
+    await user.selectOptions(within(dialog).getByLabelText("Worker"), "worker-offline");
+    expect(within(dialog).getByText(/task will queue until it returns/i)).toBeVisible();
+    expect(within(repository).getByRole("option", { name: /archive/ })).toBeInTheDocument();
+    expect(within(repository).queryByRole("option", { name: /factory/ })).not.toBeInTheDocument();
+  });
+
+  it("confirms permanent deletion only for terminal task history", async () => {
+    window.history.replaceState({}, "", "/tasks/task-succeeded");
+    const fetch = mockControlPlane();
+    const user = userEvent.setup();
+    const { client } = renderApp();
+
+    expect(await screen.findByRole("heading", { name: "succeeded task" })).toBeVisible();
+    expect(await screen.findByText("Terminal event")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Delete history" }));
+    expect(screen.getByText(/Permanently delete this task, prompt, attempts, and events/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Keep history" }));
+    expect(screen.queryByRole("button", { name: "Confirm delete" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete history" }));
+    await user.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    expect(await screen.findByText("queued task")).toBeVisible();
+    expect(screen.queryByText("succeeded task")).not.toBeInTheDocument();
+    const deleteCall = fetch.mock.calls.find(([, init]) => init?.method === "DELETE");
+    expect(deleteCall?.[0]).toBe("/api/v1/tasks/task-succeeded");
+    expect(deleteCall?.[1]?.body).toBe("{}");
+    expect(client.getQueryData(["task", "task-succeeded"])).toBeUndefined();
+    expect(client.getQueryData(["events", "attempt-succeeded"])).toBeUndefined();
+    expect(
+      client
+        .getQueryData<{ tasks: Array<{ id: string }> }>(["tasks", "head"])
+        ?.tasks.some((task) => task.id === "task-succeeded"),
+    ).toBe(false);
+  });
+
+  it("does not offer history deletion for active work", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    mockControlPlane();
+    renderApp();
+    expect(await screen.findByRole("heading", { name: "running task" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Delete history" })).not.toBeInTheDocument();
+  });
+
+  it("does not restore deleted work when an older history request finishes late", async () => {
+    const fetch = mockControlPlane({ staleHistoryAfterDelete: true });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Load more work" }));
+    await user.click(screen.getByText("succeeded task"));
+    expect(await screen.findByRole("heading", { name: "succeeded task" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Delete history" }));
+    await user.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    expect(await screen.findByText("queued task")).toBeVisible();
+    await vi.waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Load more work" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("succeeded task")).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([input]) => {
+      const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return path === "/api/v1/tasks?limit=50&cursor=stale-page";
+    })).toBe(true);
+  });
+
+  it("validates the delegate form and creates a normalized task", async () => {
+    const fetch = mockControlPlane();
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Delegate task" }));
+    const dialog = screen.getByRole("dialog", { name: "Delegate task" });
+    await user.click(within(dialog).getByRole("button", { name: "Delegate task" }));
+    expect(within(dialog).getByText("Enter a task title.")).toBeVisible();
+    expect(within(dialog).getByText("Enter a task description.")).toBeVisible();
+
+    await user.type(within(dialog).getByLabelText("Title"), "Ship the UI");
+    await user.type(within(dialog).getByLabelText("Description"), "Build and verify the real interface.");
+    await user.selectOptions(within(dialog).getByLabelText("Worker"), "worker-online");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-factory");
+    await user.click(within(dialog).getByRole("button", { name: "Delegate task" }));
+
+    expect(await screen.findByRole("heading", { name: "Ship the UI" })).toBeVisible();
+    expect(screen.getByText("Progress will appear when the worker starts this task.")).toBeVisible();
+    const createCall = fetch.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(createCall).toBeDefined();
+    expect(JSON.parse(String(createCall?.[1]?.body))).toMatchObject({
+      title: "Ship the UI",
+      description: "Build and verify the real interface.",
+      worker_id: "worker-online",
+      repository_id: "repo-factory",
+      timeout_seconds: 7200,
+    });
+  });
+
+  it("closes the keyboard-accessible drawer with Escape", async () => {
+    mockControlPlane();
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(await screen.findByRole("button", { name: "Delegate task" }));
+    expect(screen.getByRole("dialog")).toBeVisible();
+    expect(screen.getByLabelText("Title")).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Delegate task" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("reuses the request key after an ambiguous create failure and accepts 200 Unicode characters", async () => {
+    const fetch = mockControlPlane({ createFailures: 1 });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: "Delegate task" }));
+    const dialog = screen.getByRole("dialog", { name: "Delegate task" });
+    const validUnicodeTitle = "😀".repeat(200);
+    fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: validUnicodeTitle } });
+    await user.type(within(dialog).getByLabelText("Description"), "Prove idempotent browser retries.");
+    await user.selectOptions(within(dialog).getByLabelText("Worker"), "worker-online");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-factory");
+
+    await user.click(within(dialog).getByRole("button", { name: "Delegate task" }));
+    expect(await within(dialog).findByText(/connection lost after submit/i)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Delegate task" }));
+    expect(await screen.findByRole("heading", { name: validUnicodeTitle })).toBeVisible();
+
+    const createBodies = fetch.mock.calls
+      .filter(([, init]) => init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)) as { request_key: string; title: string });
+    expect(createBodies).toHaveLength(2);
+    expect(createBodies[0].request_key).toBe(createBodies[1].request_key);
+    expect(createBodies[1].title).toBe(validUnicodeTitle);
+  });
+
+  it("rejects a title over the server's 200-code-point limit", async () => {
+    mockControlPlane();
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(await screen.findByRole("button", { name: "Delegate task" }));
+    const dialog = screen.getByRole("dialog", { name: "Delegate task" });
+    fireEvent.change(within(dialog).getByLabelText("Title"), { target: { value: "😀".repeat(201) } });
+    await user.type(within(dialog).getByLabelText("Description"), "This should not submit.");
+    await user.selectOptions(within(dialog).getByLabelText("Worker"), "worker-online");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-factory");
+    await user.click(within(dialog).getByRole("button", { name: "Delegate task" }));
+    expect(within(dialog).getByText("Keep the title to 200 characters.")).toBeVisible();
+  });
+
+  it("keeps cached task detail visible after a background refresh fails", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    mockControlPlane({ taskDetailFailuresAfter: 1 });
+    const { client } = renderApp();
+    expect(await screen.findByRole("heading", { name: "running task" })).toBeVisible();
+
+    await client.refetchQueries({ queryKey: ["task", "task-running"] });
+
+    expect(screen.getByRole("heading", { name: "running task" })).toBeVisible();
+    expect(await screen.findByText(/Showing the last available data/)).toBeVisible();
+    expect(screen.getByText(/temporary read failure/)).toBeVisible();
+  });
+
+  it("keeps cached ordered progress visible after an events refresh fails", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    mockControlPlane({ eventFailuresAfter: 1 });
+    const { client } = renderApp();
+    expect(await screen.findByText("Cached ordered progress")).toBeVisible();
+
+    await client.refetchQueries({ queryKey: ["events", "attempt-running"] });
+
+    expect(screen.getByText("Cached ordered progress")).toBeVisible();
+    expect(await screen.findByText(/progress refresh failed/)).toBeVisible();
+  });
+
+  it("drains bounded event pages and later polls after the last cached sequence", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    const fetch = mockControlPlane({ incrementalEvents: true });
+    const { client } = renderApp();
+
+    expect(await screen.findByText("Incremental event 0")).toBeVisible();
+    expect(await screen.findByText("Incremental event 1")).toBeVisible();
+    await client.refetchQueries({ queryKey: ["events", "attempt-running"] });
+    expect(await screen.findByText("Incremental event 2")).toBeVisible();
+
+    const eventPaths = fetch.mock.calls
+      .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+      .filter((path) => path.includes("/events?"));
+    expect(eventPaths).toEqual([
+      "/api/v1/attempts/attempt-running/events?after=-1&limit=100",
+      "/api/v1/attempts/attempt-running/events?after=0&limit=100",
+      "/api/v1/attempts/attempt-running/events?after=1&limit=100",
+    ]);
+    expect(screen.getAllByText(/Incremental event/)).toHaveLength(3);
+  });
+
+  it("starts a distinct empty event cache when the latest attempt changes", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    const fetch = mockControlPlane({ switchAttemptAfter: 1 });
+    const { client } = renderApp();
+    expect(await screen.findByText("Cached ordered progress")).toBeVisible();
+
+    await client.refetchQueries({ queryKey: ["task", "task-running"] });
+
+    expect(await screen.findByText("New attempt starts with an empty event cache")).toBeVisible();
+    expect(screen.queryByText("Cached ordered progress")).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([input]) => {
+      const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return path === "/api/v1/attempts/attempt-next/events?after=-1&limit=100";
+    })).toBe(true);
+  });
+
+  it("performs one final incremental event fetch when active work becomes terminal", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    const fetch = mockControlPlane({ terminalTaskAfter: 1 });
+    const { client } = renderApp();
+    expect(await screen.findByText("Progress before completion")).toBeVisible();
+
+    await client.refetchQueries({ queryKey: ["task", "task-running"] });
+
+    expect(await screen.findByText("Final terminal progress")).toBeVisible();
+    const eventPaths = fetch.mock.calls
+      .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+      .filter((path) => path.includes("/events?"));
+    expect(eventPaths).toEqual([
+      "/api/v1/attempts/attempt-running/events?after=-1&limit=100",
+      "/api/v1/attempts/attempt-running/events?after=0&limit=100",
+    ]);
+  });
+
+  it("does not add a catch-up request when task detail is initially terminal", async () => {
+    window.history.replaceState({}, "", "/tasks/task-running");
+    const fetch = mockControlPlane({ terminalTaskAfter: 0 });
+    renderApp();
+    expect(await screen.findByText("Progress before completion")).toBeVisible();
+
+    const eventPaths = fetch.mock.calls
+      .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+      .filter((path) => path.includes("/events?"));
+    expect(eventPaths).toEqual([
+      "/api/v1/attempts/attempt-running/events?after=-1&limit=100",
+    ]);
+  });
+
+  it("retries a failed terminal catch-up until one read succeeds, then stops", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.history.replaceState({}, "", "/tasks/task-running");
+      const fetch = mockControlPlane({ terminalTaskAfter: 1, terminalEventFailures: 1 });
+      const { client } = renderApp();
+      expect(await screen.findByText("Progress before completion")).toBeVisible();
+
+      await client.refetchQueries({ queryKey: ["task", "task-running"] });
+      await vi.waitFor(() => {
+        const eventCalls = fetch.mock.calls.filter(([input]) => {
+          const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+          return path.includes("/events?");
+        });
+        expect(eventCalls).toHaveLength(2);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(screen.getByText("Final terminal progress")).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+      const eventPaths = fetch.mock.calls
+        .map(([input]) => typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url)
+        .filter((path) => path.includes("/events?"));
+      expect(eventPaths).toEqual([
+        "/api/v1/attempts/attempt-running/events?after=-1&limit=100",
+        "/api/v1/attempts/attempt-running/events?after=0&limit=100",
+        "/api/v1/attempts/attempt-running/events?after=0&limit=100",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

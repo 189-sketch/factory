@@ -1,6 +1,11 @@
 /target/
+.factory-v2/
 *.db
 *.db-shm
 *.db-wal
 .DS_Store
 .omc/
+
+# factory-server embeds the reviewed production UI from this directory.
+!/web/dist/
+!/web/dist/**

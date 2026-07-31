@@ -137,6 +137,35 @@ contract (`docker/Dockerfile.base`):
   `.factory/` idempotently, then the control plane and the polling loop run
   concurrently in one process. Any failed step exits non-zero with sanitized
   output.
+## V2 control plane and local worker
+
+The local V2 server includes its web interface in the Go binary, and the Unix
+worker runs assigned Codex tasks in separate managed Git worktrees. Normal
+builds use the committed embedded UI and do not need Node.js:
+
+```sh
+./scripts/build-v2.sh
+```
+
+Create an ignored local configuration from the two-repository sample, edit its
+repository paths, then start the complete local control plane:
+
+```sh
+mkdir -p .factory-v2
+cp examples/v2-worker.toml .factory-v2/worker.toml
+$EDITOR .factory-v2/worker.toml
+./scripts/run-v2-local.sh .factory-v2/worker.toml
+```
+
+Open `http://127.0.0.1:7337/` to inspect the registered worker, delegate work,
+and follow durable task state. The server remains loopback-only and V2 state and
+worktrees remain separate from V1. The
+[complete local V2 guide](docs/v2-local.md) covers fresh-checkout setup,
+delegation, polling, results, cancellation, retry, restart, cleanup, automated
+browser proof, and a bounded authenticated Codex smoke test. The
+[V2 worker guide](docs/v2-worker.md) covers lower-level execution and retained
+worktrees. See the [V2 MVP architecture](docs/v2-architecture/design.md) for
+the API, trust boundary, and unimplemented later ingest model.
 
 ## V1 scope
 
@@ -160,6 +189,8 @@ Jira is not part of the supported V1 scope.
 - [Labels and ticket status](docs/labels.md)
 - [Setup, configuration, and first run](docs/local-v1.md)
 - [Operations and recovery](docs/operations.md)
+- [V2 local worker](docs/v2-worker.md)
+- [V2 complete local workflow](docs/v2-local.md)
 - [Jira source adapter](docs/jira.md)
 - [Docker Sandbox development environment](docs/docker-sandbox-template.md)
 - [Contributing](CONTRIBUTING.md)
