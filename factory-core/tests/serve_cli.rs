@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
+const TOKEN: &str = "w2-test-token";
+
 struct Fixture {
     _temp: tempfile::TempDir,
     home: PathBuf,
@@ -45,6 +47,7 @@ impl Fixture {
             .env("HOME", &self.home)
             .env("FACTORY_DATA_HOME", &self.data_home)
             .env("FACTORY_PORT", port.to_string())
+            .env("FACTORY_API_TOKEN", TOKEN)
             .arg("serve")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -81,41 +84,74 @@ fn free_port() -> u16 {
         .port()
 }
 
+#[derive(Debug)]
 struct HttpResponse {
     status: u16,
-    content_type: String,
+    headers: Vec<(String, String)>,
     body: String,
 }
 
-fn http_get(port: u16, path: &str) -> HttpResponse {
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|error| panic!("response body is not JSON ({error}): {}", self.body))
+    }
+}
+
+/// Send one raw HTTP request and read the full response (connection-close).
+fn http_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> HttpResponse {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
     stream.flush().unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
-    let raw = String::from_utf8(raw).unwrap();
+    parse_response(&raw)
+}
+
+fn http_get(port: u16, path: &str) -> HttpResponse {
+    http_request(port, "GET", path, &[])
+}
+
+fn http_get_token(port: u16, path: &str, token: &str) -> HttpResponse {
+    http_request(port, "GET", path, &[("Authorization", &format!("Bearer {token}"))])
+}
+
+fn parse_response(raw: &[u8]) -> HttpResponse {
+    let raw = String::from_utf8(raw.to_vec()).unwrap();
     let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-    let status = head
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .unwrap()
         .split_whitespace()
         .nth(1)
         .unwrap()
         .parse::<u16>()
         .unwrap();
-    let content_type = head
-        .lines()
-        .find_map(|line| line.strip_prefix("content-type: "))
-        .unwrap_or("")
-        .to_owned();
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect();
     HttpResponse {
         status,
-        content_type,
+        headers,
         body: body.to_owned(),
     }
 }
@@ -133,37 +169,10 @@ fn wait_for_health(child: &mut Child, port: u16) -> HttpResponse {
                 .unwrap();
             panic!("factory serve exited early with {status}: {stderr}");
         }
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            if write!(
-                stream,
-                "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-            )
-            .is_ok()
-            {
-                let mut raw = Vec::new();
-                if stream.read_to_end(&mut raw).is_ok() && !raw.is_empty() {
-                    let raw = String::from_utf8(raw).unwrap();
-                    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
-                    let status = head
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap()
-                        .parse::<u16>()
-                        .unwrap();
-                    let content_type = head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-type: "))
-                        .unwrap_or("")
-                        .to_owned();
-                    return HttpResponse {
-                        status,
-                        content_type,
-                        body: body.to_owned(),
-                    };
-                }
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            let response = http_get(port, "/api/v1/health");
+            if response.status == 200 {
+                return response;
             }
         }
         assert!(Instant::now() < deadline, "factory serve did not come up");
@@ -172,18 +181,90 @@ fn wait_for_health(child: &mut Child, port: u16) -> HttpResponse {
 }
 
 #[test]
-fn serve_reports_health_with_repository_identity() {
+fn serve_reports_health_anonymously() {
     let fixture = Fixture::new();
     let port = free_port();
     let mut child = fixture.spawn_serve(port);
 
     let response = wait_for_health(&mut child, port);
     assert_eq!(response.status, 200);
-    assert_eq!(response.content_type, "application/json");
-    let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(response.header("content-type"), Some("application/json"));
+    assert_eq!(response.header("cache-control"), Some("no-cache"));
+    let body = response.json();
     assert_eq!(body["status"], "ok");
     assert_eq!(body["repository"], "example/repository");
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn serve_refuses_to_start_without_an_api_token() {
+    let fixture = Fixture::new();
+    let binary = assert_cmd::cargo::cargo_bin("factory");
+    let output = ProcessCommand::new(binary)
+        .current_dir(&fixture.repository)
+        .env("HOME", &fixture.home)
+        .env("FACTORY_DATA_HOME", &fixture.data_home)
+        .env("FACTORY_PORT", free_port().to_string())
+        .env_remove("FACTORY_API_TOKEN")
+        .arg("serve")
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "serve must fail without FACTORY_API_TOKEN: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FACTORY_API_TOKEN"),
+        "error should name the missing token, got: {stderr}"
+    );
+}
+
+#[test]
+fn serve_rejects_protected_routes_without_a_token() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // No token at all.
+    let response = http_get(port, "/api/v1/tasks");
+    assert_eq!(response.status, 401);
+    assert_eq!(response.header("cache-control"), Some("no-cache"));
+    let body = response.json();
+    assert_eq!(body["error"]["code"], "unauthorized");
+    assert!(body["error"]["message"].is_string());
+
+    // Wrong token.
+    let response = http_get_token(port, "/api/v1/tasks", "not-the-token");
+    assert_eq!(response.status, 401);
+    assert_eq!(response.json()["error"]["code"], "unauthorized");
+
+    // /events also rejects without a token (header or query).
+    let response = http_get(port, "/events");
+    assert_eq!(response.status, 401);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn serve_accepts_bearer_header_and_query_token_on_events() {
+    let fixture = Fixture::new();
+    let port = free_port();
+    let mut child = fixture.spawn_serve(port);
+    wait_for_health(&mut child, port);
+
+    // Authorization header passes the auth gate (handler is a stub for now).
+    let response = http_get_token(port, "/events", TOKEN);
+    assert_ne!(response.status, 401, "bearer header must authenticate");
+
+    // ?token= query passes for EventSource, which cannot set headers.
+    let response = http_get(port, &format!("/events?token={TOKEN}"));
+    assert_ne!(response.status, 401, "?token= must authenticate on /events");
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -196,8 +277,9 @@ fn serve_returns_404_for_unknown_paths() {
     let mut child = fixture.spawn_serve(port);
     wait_for_health(&mut child, port);
 
-    let response = http_get(port, "/api/v1/tasks");
+    let response = http_get_token(port, "/api/v1/does-not-exist", TOKEN);
     assert_eq!(response.status, 404);
+    assert_eq!(response.json()["error"]["code"], "not_found");
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -214,6 +296,7 @@ fn serve_requires_initialized_repository() {
         .env("HOME", &home)
         .env("FACTORY_DATA_HOME", temp.path().join("data"))
         .env("FACTORY_PORT", free_port().to_string())
+        .env("FACTORY_API_TOKEN", TOKEN)
         .arg("serve")
         .assert()
         .failure();
