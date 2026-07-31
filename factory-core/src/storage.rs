@@ -1034,9 +1034,22 @@ impl Ledger {
             == 1;
         let task = query_task_by_key(&transaction, &identity.key())?
             .context("task disappeared during enqueue transaction")?;
+        if inserted {
+            append_event_in(
+                &transaction,
+                EventType::TaskState,
+                &task.repository,
+                Some(task.id),
+                None,
+                task_state_payload(None, TaskState::Queued, &task.workflow, task.source_item.as_deref()),
+            )?;
+        }
         transaction
             .commit()
             .context("failed to commit task enqueue transaction")?;
+        if inserted {
+            self.notify_events();
+        }
         Ok(EnqueuedTask {
             task,
             created: inserted,
@@ -2097,8 +2110,7 @@ impl Ledger {
         transaction
             .commit()
             .context("failed to commit atomic task and run claim")?;
-        let latest = latest_event_id(&self.connection)?;
-        self.event_notifier.send_replace(latest);
+        self.notify_events();
         Ok(Some(ClaimedRun { task, run }))
     }
 
@@ -2244,6 +2256,14 @@ impl Ledger {
         self.event_notifier.subscribe()
     }
 
+    /// Fire the committed-event notifier with the current durable watermark.
+    /// Called after every transaction that appends events commits.
+    fn notify_events(&self) {
+        if let Ok(latest) = latest_event_id(&self.connection) {
+            self.event_notifier.send_replace(latest);
+        }
+    }
+
     pub fn start_run(&mut self, task_id: i64, runtime: &str) -> Result<Run> {
         if runtime.trim().is_empty() {
             bail!("run runtime must not be empty");
@@ -2345,9 +2365,39 @@ impl Ledger {
             bail!("task {task_id} changed during prelaunch recovery");
         }
         let run = query_run(&transaction, id)?.context("failed prelaunch run disappeared")?;
+        let recovered = recovery_attempt < MAX_RECOVERY_ATTEMPTS;
+        let error_text = run.error.clone();
+        append_event_in(
+            &transaction,
+            EventType::RunOutcome,
+            &run.repository,
+            Some(task_id),
+            Some(id),
+            run_outcome_payload(
+                RunOutcome::Failed,
+                None,
+                error_text.as_deref(),
+                None,
+                recovery_attempt,
+            ),
+        )?;
+        append_event_in(
+            &transaction,
+            EventType::TaskState,
+            &run.repository,
+            Some(task_id),
+            Some(id),
+            task_state_payload(
+                Some(TaskState::Running),
+                if recovered { TaskState::Queued } else { TaskState::Failed },
+                &run.workflow,
+                run.source_item.as_deref(),
+            ),
+        )?;
         transaction
             .commit()
             .context("failed to commit prelaunch recovery")?;
+        self.notify_events();
         Ok(run)
     }
 
@@ -2452,9 +2502,40 @@ impl Ledger {
             bail!("task {task_id} is not running; run completion was not recorded");
         }
         let run = query_run(&transaction, id)?.context("completed run disappeared")?;
+        // run.outcome for the terminal result, then task.state for the task
+        // transition (queued again on recovery, terminal otherwise).
+        append_event_in(
+            &transaction,
+            EventType::RunOutcome,
+            &run.repository,
+            Some(task_id),
+            Some(id),
+            run_outcome_payload(
+                outcome,
+                result.as_deref(),
+                error.as_deref(),
+                run.pull_request.as_deref(),
+                recovery_attempt,
+            ),
+        )?;
+        let new_task_state = if retry_recovery { TaskState::Queued } else { task_state };
+        append_event_in(
+            &transaction,
+            EventType::TaskState,
+            &run.repository,
+            Some(task_id),
+            Some(id),
+            task_state_payload(
+                Some(TaskState::Running),
+                new_task_state,
+                &run.workflow,
+                run.source_item.as_deref(),
+            ),
+        )?;
         transaction
             .commit()
             .context("failed to commit run completion")?;
+        self.notify_events();
         Ok(run)
     }
 
@@ -2888,6 +2969,25 @@ impl Ledger {
                     params![outcome, now, error, run.id],
                 )
                 .context("failed to close orphaned run")?;
+            let terminal_outcome = if cancellation_requested {
+                RunOutcome::Cancelled
+            } else {
+                RunOutcome::Failed
+            };
+            append_event_in(
+                &transaction,
+                EventType::RunOutcome,
+                &run.repository,
+                Some(run.task_id),
+                Some(run.id),
+                run_outcome_payload(
+                    terminal_outcome,
+                    None,
+                    Some(error),
+                    run.pull_request.as_deref(),
+                    run.recovery_attempt,
+                ),
+            )?;
             if cancellation_requested {
                 transaction
                     .execute(
@@ -2896,6 +2996,19 @@ impl Ledger {
                         params![now, run.task_id],
                     )
                     .context("failed to complete orphaned run cancellation")?;
+                append_event_in(
+                    &transaction,
+                    EventType::TaskState,
+                    &run.repository,
+                    Some(run.task_id),
+                    Some(run.id),
+                    task_state_payload(
+                        Some(TaskState::Running),
+                        TaskState::Cancelled,
+                        &run.workflow,
+                        run.source_item.as_deref(),
+                    ),
+                )?;
                 continue;
             }
             if run.recovery_attempt < MAX_RECOVERY_ATTEMPTS {
@@ -2904,6 +3017,19 @@ impl Ledger {
                      WHERE id = ?3 AND state = 'running'",
                     params![now, run.id, run.task_id],
                 ).context("failed to queue orphan recovery")?;
+                append_event_in(
+                    &transaction,
+                    EventType::TaskState,
+                    &run.repository,
+                    Some(run.task_id),
+                    Some(run.id),
+                    task_state_payload(
+                        Some(TaskState::Running),
+                        TaskState::Queued,
+                        &run.workflow,
+                        run.source_item.as_deref(),
+                    ),
+                )?;
                 recovered_run_ids.push(run.id);
             } else {
                 transaction
@@ -2913,12 +3039,26 @@ impl Ledger {
                         params![now, run.task_id],
                     )
                     .context("failed to exhaust orphan recovery")?;
+                append_event_in(
+                    &transaction,
+                    EventType::TaskState,
+                    &run.repository,
+                    Some(run.task_id),
+                    Some(run.id),
+                    task_state_payload(
+                        Some(TaskState::Running),
+                        TaskState::Failed,
+                        &run.workflow,
+                        run.source_item.as_deref(),
+                    ),
+                )?;
                 exhausted_run_ids.push(run.id);
             }
         }
         transaction
             .commit()
             .context("failed to commit orphan recovery")?;
+        self.notify_events();
         Ok(RepositoryRecoveryReport {
             recovery: RecoveryReport {
                 recovered_run_ids,
@@ -3696,6 +3836,30 @@ fn task_state_payload(
             "title": null,
             "url": null,
         },
+    })
+}
+
+/// Build the schema/events/run-outcome.json payload for a terminal run. The
+/// `attempt` is 1-based (recovery attempts increment it).
+fn run_outcome_payload(
+    outcome: RunOutcome,
+    result: Option<&str>,
+    error: Option<&str>,
+    pull_request: Option<&str>,
+    recovery_attempt: u32,
+) -> serde_json::Value {
+    let outcome = match outcome {
+        RunOutcome::Succeeded => "succeeded",
+        RunOutcome::Failed => "failed",
+        RunOutcome::Cancelled => "cancelled",
+        RunOutcome::Running => "succeeded", // unreachable; terminal callers only
+    };
+    serde_json::json!({
+        "outcome": outcome,
+        "result": result,
+        "error": error,
+        "pull_request": pull_request,
+        "attempt": recovery_attempt + 1,
     })
 }
 

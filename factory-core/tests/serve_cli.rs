@@ -259,7 +259,7 @@ fn serve_accepts_bearer_header_and_query_token_on_events() {
     wait_for_health(&mut child, port);
 
     // A correct bearer token upgrades to an SSE stream (never a 401).
-    assert_eq!(events_auth_status(port, &format!("/events"), Some(TOKEN)), 200);
+    assert_eq!(events_auth_status(port, "/events", Some(TOKEN)), 200);
     // The ?token= query also authenticates (EventSource cannot set headers).
     assert_eq!(events_auth_status(port, &format!("/events?token={TOKEN}"), None), 200);
     // No token and a wrong token are rejected.
