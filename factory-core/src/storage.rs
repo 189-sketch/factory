@@ -2845,6 +2845,39 @@ impl Ledger {
         Ok(())
     }
 
+    /// Append a run.activity event for a committed observation. The activity
+    /// is sanitized and bounded to 64KiB (truncating the tail, keeping the
+    /// most recent output); `truncated` reports whether the bound cut it.
+    /// `sequence` is the per-run monotonic RuntimeObservation sequence.
+    pub fn record_run_activity_event(
+        &mut self,
+        run: &Run,
+        sequence: u64,
+        activity: Option<&str>,
+    ) -> Result<LedgerEvent> {
+        let sanitized = activity.map(crate::inspection::sanitize_for_storage);
+        let truncated = sanitized
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_ACTIVITY_BYTES);
+        let activity = sanitized
+            .as_deref()
+            .map(|value| truncate_tail_utf8(value, MAX_ACTIVITY_BYTES));
+        self.append_event(
+            EventType::RunActivity,
+            &run.repository,
+            Some(run.task_id),
+            Some(run.id),
+            serde_json::json!({
+                "sequence": sequence,
+                "activity": activity,
+                "process_id": run.process_id,
+                "session_id": run.session_id,
+                "pull_request": run.pull_request,
+                "truncated": truncated,
+            }),
+        )
+    }
+
     pub fn reset_run_runtime_observation(&mut self, id: i64) -> Result<()> {
         let changed = self
             .connection

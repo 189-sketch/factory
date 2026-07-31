@@ -3416,6 +3416,14 @@ async fn monitor_run(
                     observation.pull_request.as_deref(),
                     observation.activity.as_deref(),
                 )?;
+                // After persistence, fan the observation out as a run.activity
+                // event so the SSE activity stream renders it in order.
+                if let Some(run) = ledger.run(run_id)?
+                    && let Err(error) =
+                        ledger.record_run_activity_event(&run, observation.sequence, observation.activity.as_deref())
+                {
+                    eprintln!("Factory failed to append a run.activity event for run {run_id}: {error:#}");
+                }
                 if let Some(activity) = latest_worker_progress(observation.activity.as_deref())
                     && last_reported_activity.as_deref() != Some(activity)
                 {
