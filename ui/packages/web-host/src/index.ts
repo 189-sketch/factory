@@ -26,7 +26,7 @@ const registry = RepositoryRegistry.open(dbPath);
 const driver = new DockerDriver();
 const bus = new UiEventBus();
 const pipeline = new OnboardingPipeline(registry, driver, bus);
-const app = createApp(registry, { pipeline, bus });
+const app = createApp(registry, { pipeline, bus, driver });
 
 const server = app.listen(port, address, () => {
   const bound = server.address();

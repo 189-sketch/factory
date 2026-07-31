@@ -88,7 +88,7 @@ describe("GET /ui/events", () => {
                 .send({ git_url: "git@github.com:Owner/Repo.git", provider: "codex" })
                 .then(() => {
                   // Give frames a tick to flush, then end the response cleanly.
-                  setTimeout(() => res.destroy(), 100);
+                  setTimeout(() => (res as unknown as import("node:http").IncomingMessage).destroy(), 100);
                 })
                 .catch(reject);
             }

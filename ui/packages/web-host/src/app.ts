@@ -1,6 +1,9 @@
 import express, { type Express, type Request, type Response } from "express";
 import { ZodError, z } from "zod";
+import { applyBatch } from "./batch.js";
+import type { BackendDriver } from "./driver.js";
 import type { UiEventBus } from "./events.js";
+import { importFleet } from "./fleet-import.js";
 import { NormalizationError } from "./identity.js";
 import type { OnboardingPipeline } from "./onboard.js";
 import {
@@ -76,9 +79,19 @@ const onboardBodySchema = z.object({
   credential_ref: z.string().nullable().optional(),
 });
 
+const batchBodySchema = z.object({
+  action: z.enum(["pause", "resume", "destroy"]),
+  repositories: z.array(z.string().min(1)).min(1, "repositories must be non-empty"),
+});
+
+const importFleetBodySchema = z.object({
+  content: z.string().min(1, "content is required"),
+});
+
 export interface AppDeps {
   pipeline?: OnboardingPipeline;
   bus?: UiEventBus;
+  driver?: BackendDriver;
 }
 
 export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Express {
@@ -119,6 +132,38 @@ export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Exp
         return;
       }
       res.status(result.idempotent ? 200 : 201).json(toDto(result.repository));
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  // Batch management: apply pause/resume/destroy across many repositories,
+  // isolating per-repo failures and returning per-repo outcomes.
+  app.post("/ui/api/repos/batch", async (req: Request, res: Response) => {
+    if (!deps.driver) {
+      sendError(res, 503, "unavailable", "backend driver not configured");
+      return;
+    }
+    try {
+      const body = batchBodySchema.parse(req.body ?? {});
+      const result = await applyBatch(registry, deps.driver, body.action, body.repositories);
+      res.status(200).json(result);
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  // fleet.toml one-shot import: parse [[repository]] blocks, register and
+  // onboard each (idempotent for already-running repositories).
+  app.post("/ui/api/import-fleet", async (req: Request, res: Response) => {
+    if (!deps.pipeline) {
+      sendError(res, 503, "unavailable", "onboarding pipeline not configured");
+      return;
+    }
+    try {
+      const body = importFleetBodySchema.parse(req.body ?? {});
+      const result = await importFleet(body.content, registry, deps.pipeline);
+      res.status(200).json(result);
     } catch (error) {
       handleRouteError(res, error);
     }
