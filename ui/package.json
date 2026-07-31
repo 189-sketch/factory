@@ -1,0 +1,12 @@
+{
+  "name": "factory-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Factory UI workspace: orchestration backend (web-host) and, later, renderer + desktop shell.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -4,3 +4,8 @@
 *.db-wal
 .DS_Store
 .omc/
+
+# Node / ui workspace
+node_modules/
+dist/
+*.tsbuildinfo
