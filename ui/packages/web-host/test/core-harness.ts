@@ -138,15 +138,15 @@ function git(cwd: string, args: string[]): void {
 }
 
 /** Start a real core serving a fresh "owner/repo" workspace. */
-export async function startCore(options: { repository?: string } = {}): Promise<CoreHandle> {
+export async function startCore(options: { repository?: string; port?: number; token?: string } = {}): Promise<CoreHandle> {
   const repository = options.repository ?? "example/widget";
   const binary = findCoreBinary();
   const workdir = mkdtempSync(join(tmpdir(), "factory-core-harness-"));
   const home = join(workdir, "home");
   const dataHome = join(workdir, "data");
   const repoDir = join(workdir, "repo");
-  const token = `harness-token-${Math.floor(Math.random() * 1e9)}`;
-  const port = await freePort();
+  const token = options.token ?? `harness-token-${Math.floor(Math.random() * 1e9)}`;
+  const port = options.port ?? (await freePort());
 
   // Minimal git workspace the core can discover (needs an origin remote).
   git(workdir, ["init", "--quiet", repoDir]);
