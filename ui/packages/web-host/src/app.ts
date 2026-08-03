@@ -5,6 +5,7 @@ import type { BackendDriver } from "./driver.js";
 import type { UiEventBus } from "./events.js";
 import { importFleet } from "./fleet-import.js";
 import { NormalizationError } from "./identity.js";
+import type { ControlPlaneRouter } from "./controlplane.js";
 import type { EventHub, HubFrame } from "./hub.js";
 import type { OnboardingPipeline } from "./onboard.js";
 import {
@@ -152,6 +153,9 @@ export interface AppDeps {
   /** Aggregation hub (W4.3/W4.4); when present, /ui/events serves the
    * normalized multi-container stream with per-frontend cursors. */
   hub?: EventHub;
+  /** Control-plane router (W4.5); when present, /ui/api/{repository}/*
+   * forwards to the container's core /api/v1/*. */
+  controlPlane?: ControlPlaneRouter;
 }
 
 export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Express {
@@ -328,6 +332,38 @@ export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Exp
         return;
       }
       res.status(204).end();
+    } catch (error) {
+      handleRouteError(res, error);
+    }
+  });
+
+  // Control-plane routing (W4.5): forward to a container's core /api/v1/*.
+  // The path after the `control/` prefix is `<owner>/<repo>/<core-subpath>`;
+  // the repository is the routing key. Writes are single-flighted and the
+  // caller's client_request_id is passed through for core-side idempotency.
+  app.all("/ui/api/control/*splat", async (req: Request, res: Response) => {
+    if (!deps.controlPlane) {
+      sendError(res, 503, "unavailable", "control-plane router not configured");
+      return;
+    }
+    try {
+      const segments = paramString(req.params.splat).split("/").filter(Boolean);
+      if (segments.length < 3) {
+        sendError(
+          res,
+          400,
+          "invalid_request",
+          "expected /ui/api/control/{owner}/{repo}/{subpath}",
+        );
+        return;
+      }
+      const repository = `${segments[0]}/${segments[1]}`;
+      const subpath = `/${segments.slice(2).join("/")}`;
+      const result = await deps.controlPlane.forward(repository, subpath, {
+        method: req.method,
+        body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+      });
+      res.status(result.status).json(result.body);
     } catch (error) {
       handleRouteError(res, error);
     }
