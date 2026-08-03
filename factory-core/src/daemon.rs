@@ -2554,8 +2554,7 @@ async fn prepare_task_workspace(
     github_token_env: Option<&str>,
     cancellation: &CancellationToken,
 ) -> Result<RepositoryTarget> {
-    let workspace_root = workspace_root
-        .canonicalize()
+    let workspace_root = crate::platform::canonicalize(workspace_root)
         .context("failed to canonicalize Factory workspace root")?;
     let existing = ledger.task_workspace(task.id)?;
     if task.repository != repository_identity {
@@ -4271,6 +4270,9 @@ mod tests {
         assert!(ledger.tasks().unwrap().is_empty());
     }
 
+    // Unix-only (W4.0, #38): relies on `process_is_alive` PID-liveness semantics,
+    // which is a stub (always false) on Windows, changing owner-lease behaviour.
+    #[cfg(unix)]
     #[test]
     fn conflicting_schedule_initialization_retries_after_owner_exits() {
         let temp = tempfile::tempdir().unwrap();
@@ -4316,6 +4318,8 @@ mod tests {
         assert_eq!(new.tasks().unwrap().len(), 1);
     }
 
+    // Unix-only (W4.0, #38): same `process_is_alive` owner-lease dependency.
+    #[cfg(unix)]
     #[test]
     fn workflow_definition_changes_block_overlapping_daemons() {
         let temp = tempfile::tempdir().unwrap();
@@ -4386,6 +4390,9 @@ mod tests {
         );
     }
 
+    // Unix-only (W4.0, #38): depends on git worktree + owner-liveness semantics
+    // that differ on Windows (`process_is_alive` is a stub there).
+    #[cfg(unix)]
     #[test]
     fn recovery_prompt_includes_discovered_worktrees_pr_and_all_nonempty_evidence() {
         let temp = tempfile::tempdir().unwrap();
@@ -4524,8 +4531,8 @@ mod tests {
             &repository,
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
-        let repository = repository.canonicalize().unwrap();
-        let workspace_root = workspace_root.canonicalize().unwrap();
+        let repository = crate::platform::canonicalize(&repository).unwrap();
+        let workspace_root = crate::platform::canonicalize(&workspace_root).unwrap();
         let manager = WorkspaceManager::new(&repository, &workspace_root).unwrap();
         let base_sha = manager.fetch_default_branch("main").unwrap();
         let mut ledger = Ledger::open(&temp.path().join("ledger.db")).unwrap();
@@ -4637,8 +4644,8 @@ mod tests {
             &repository,
             &["remote", "add", "origin", remote.to_str().unwrap()],
         );
-        let repository = repository.canonicalize().unwrap();
-        let workspace_root = workspace_root.canonicalize().unwrap();
+        let repository = crate::platform::canonicalize(&repository).unwrap();
+        let workspace_root = crate::platform::canonicalize(&workspace_root).unwrap();
         let manager = WorkspaceManager::new(&repository, &workspace_root).unwrap();
         let base_sha = manager.fetch_default_branch("main").unwrap();
         let prepared = manager
@@ -4891,8 +4898,8 @@ mod tests {
                 &["remote", "add", "origin", remote.to_str().unwrap()],
             );
             (
-                repository.canonicalize().unwrap(),
-                workspace_root.canonicalize().unwrap(),
+                crate::platform::canonicalize(&repository).unwrap(),
+                crate::platform::canonicalize(&workspace_root).unwrap(),
             )
         }
 
@@ -5169,8 +5176,8 @@ mod tests {
             git(&repository, &["add", "README.md"]);
             git(&repository, &["commit", "-m", "fixture"]);
             (
-                repository.canonicalize().unwrap(),
-                workspace_root.canonicalize().unwrap(),
+                crate::platform::canonicalize(&repository).unwrap(),
+                crate::platform::canonicalize(&workspace_root).unwrap(),
             )
         }
 

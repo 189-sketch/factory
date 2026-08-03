@@ -283,8 +283,7 @@ fn skipped_resource(resource: String, reason: &str) -> ResourceResult {
 }
 
 pub fn discover_repository(requested: &Path) -> Result<PathBuf> {
-    let requested = requested
-        .canonicalize()
+    let requested = crate::platform::canonicalize(requested)
         .with_context(|| format!("repository path does not exist: {}", requested.display()))?;
     if !requested.is_dir() {
         bail!(
@@ -294,8 +293,7 @@ pub fn discover_repository(requested: &Path) -> Result<PathBuf> {
     }
     let root = git_output(&requested, &["rev-parse", "--show-toplevel"])
         .context("target is not a Git repository")?;
-    let repository = PathBuf::from(root.trim())
-        .canonicalize()
+    let repository = crate::platform::canonicalize(PathBuf::from(root.trim()).as_path())
         .context("failed to resolve Git repository root")?;
     let origin = git_output(&repository, &["config", "--get", "remote.origin.url"])
         .context("target repository has no origin remote")?;
@@ -702,11 +700,16 @@ fn apply_file(plan: &FilePlan) -> Result<()> {
         .sync_all()
         .with_context(|| format!("failed to sync {}", plan.path.display()))?;
     if plan.executable {
-        use std::os::unix::fs::PermissionsExt;
-        temporary
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("failed to make {} executable", plan.path.display()))?;
+        // Executable bits are a Unix permission concept; on Windows the file is
+        // already runnable by extension, so there is nothing to set.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("failed to make {} executable", plan.path.display()))?;
+        }
     }
     temporary
         .persist_noclobber(&plan.path)

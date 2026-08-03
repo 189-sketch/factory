@@ -355,6 +355,10 @@ impl SourceClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Group the source process so a timeout/cancel kills the whole tree.
+        // `process_group` is Unix-only; on Windows `kill_on_drop` already
+        // terminates the direct child, and there is no portable group kill.
+        #[cfg(unix)]
         command.process_group(0);
         for label in labels {
             command.arg("--label").arg(label);
@@ -418,6 +422,7 @@ impl SourceClient {
     }
 }
 
+#[cfg(unix)]
 fn kill_source_process_group(process_group_id: Option<u32>) {
     if let Some(process_id) = process_group_id
         && let Ok(process_id) = i32::try_from(process_id)
@@ -428,6 +433,12 @@ fn kill_source_process_group(process_group_id: Option<u32>) {
         );
     }
 }
+
+/// Windows has no process-group kill; the caller already follows up with
+/// `child.start_kill()`, which terminates the direct child. Grandchildren are
+/// reaped by `kill_on_drop`.
+#[cfg(not(unix))]
+fn kill_source_process_group(_process_group_id: Option<u32>) {}
 
 struct BoundedBytes {
     bytes: Vec<u8>,

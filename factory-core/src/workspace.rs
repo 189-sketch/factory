@@ -73,8 +73,7 @@ impl WorkspaceManager {
             repository,
             workspace_root,
         };
-        let actual = PathBuf::from(manager.git(["rev-parse", "--show-toplevel"])?.trim())
-            .canonicalize()
+        let actual = crate::platform::canonicalize(PathBuf::from(manager.git(["rev-parse", "--show-toplevel"])?.trim()).as_path())
             .context("failed to canonicalize Git repository root")?;
         if actual != manager.repository {
             bail!(
@@ -555,7 +554,7 @@ fn canonical_directory(name: &str, path: &Path) -> Result<PathBuf> {
             path.display()
         );
     }
-    path.canonicalize()
+    crate::platform::canonicalize(path)
         .with_context(|| format!("failed to canonicalize {name} {}", path.display()))
 }
 

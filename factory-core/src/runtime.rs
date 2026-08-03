@@ -4,9 +4,12 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::OnceLock;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -19,6 +22,7 @@ use tokio::time::{Instant as TokioInstant, sleep_until, timeout};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const READER_GRACE: Duration = Duration::from_secs(2);
 const MAX_ACTIVITY_LINE_BYTES: usize = 256 * 1024;
@@ -147,12 +151,9 @@ fn preparation_termination(
     }
 }
 
-#[cfg(unix)]
 fn preparation_result(termination: Termination, started: Instant) -> ExecutionResult {
-    use std::os::unix::process::ExitStatusExt;
-
     ExecutionResult {
-        status: ExitStatus::from_raw(1 << 8),
+        status: crate::platform::failure_exit_status(),
         termination,
         final_response: String::new(),
         final_response_truncated: false,
@@ -1344,7 +1345,9 @@ fn cleanup_descendants(process_id: Option<u32>) -> Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+// Windows has no process-group tree to reap; cleanup is a no-op there. Gated to
+// unix because its only caller is unix-only.
+#[cfg(unix)]
 fn cleanup_descendants(_process_id: Option<u32>) -> Result<()> {
     Ok(())
 }

@@ -666,20 +666,25 @@ mod tests {
                 .contains("duplicate canonical repository path")
         );
 
-        let real = temp.path().join("real");
-        fs::create_dir(&real).unwrap();
-        std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
-        fs::write(
-            &fleet,
-            "max_concurrent = 1\n[[repository]]\nname = \"acme/first\"\npath = \"real/missing\"\n[[repository]]\nname = \"acme/second\"\npath = \"link/missing\"\n",
-        )
-        .unwrap();
-        assert!(
-            FleetConfig::load(&fleet)
-                .unwrap_err()
-                .to_string()
-                .contains("duplicate canonical repository path")
-        );
+        // Symlink aliasing: two paths resolving to the same canonical directory
+        // must also collide. Symlinks are Unix-only here.
+        #[cfg(unix)]
+        {
+            let real = temp.path().join("real");
+            fs::create_dir(&real).unwrap();
+            std::os::unix::fs::symlink(&real, temp.path().join("link")).unwrap();
+            fs::write(
+                &fleet,
+                "max_concurrent = 1\n[[repository]]\nname = \"acme/first\"\npath = \"real/missing\"\n[[repository]]\nname = \"acme/second\"\npath = \"link/missing\"\n",
+            )
+            .unwrap();
+            assert!(
+                FleetConfig::load(&fleet)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate canonical repository path")
+            );
+        }
     }
 
     #[test]

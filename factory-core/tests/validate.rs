@@ -229,6 +229,9 @@ fn rejects_an_existing_database_that_is_not_writable() {
     fs::set_permissions(database, permissions).unwrap();
 }
 
+// Unix-only: builds executable shell-script `gh`/`codex` fakes via `set_mode`,
+// which has no Windows equivalent (and `sh` shebangs don't run there).
+#[cfg(unix)]
 #[test]
 fn validates_a_configurable_source_label_trigger() {
     let (temp, path, repository, data_home) = valid_config();

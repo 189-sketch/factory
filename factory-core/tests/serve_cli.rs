@@ -1,3 +1,7 @@
+// NOTE: kept Unix-only (W4.0, #38). These CLI lifecycle tests rely on
+// `child.kill()` promptly terminating the serve process, which hangs on
+// Windows (the Tokio serve child does not exit on kill there). The SSE/HTTP
+// surface itself is verified cross-platform by `serve_events.rs`.
 #![cfg(unix)]
 
 use std::fs;

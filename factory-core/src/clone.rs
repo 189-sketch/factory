@@ -23,8 +23,7 @@ pub struct CloneManager {
 
 impl CloneManager {
     pub fn new(root: &Path) -> Result<Self> {
-        let root = root
-            .canonicalize()
+        let root = crate::platform::canonicalize(root)
             .with_context(|| format!("failed to resolve clone root {}", root.display()))?;
         if !root.is_dir() {
             bail!("clone root {} is not a directory", root.display());

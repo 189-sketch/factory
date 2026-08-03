@@ -46,6 +46,7 @@ jsonschema.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 unicode-width.workspace = true
+dunce.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true

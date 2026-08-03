@@ -1,7 +1,8 @@
-#![cfg(unix)]
-
 //! Integration tests for the SSE `/events` surface: live fanout, Last-Event-ID
 //! backfill across a serve restart, the `?v=` handshake, and heartbeat frames.
+//!
+//! Cross-platform (W4.0, #38): drives the real `factory serve` binary over
+//! std::process + assert_cmd, with no Unix-only APIs.
 
 use std::fs;
 use std::io::{Read, Write};

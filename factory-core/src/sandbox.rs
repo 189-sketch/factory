@@ -765,10 +765,9 @@ fn truncate_head(value: &str, maximum: usize) -> String {
     value[..end].to_owned()
 }
 
-#[cfg(unix)]
-fn exit_status(code: i32) -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    ExitStatus::from_raw(code << 8)
+fn exit_status(_code: i32) -> ExitStatus {
+    // The sandbox only ever synthesises a generic failure status (code 1).
+    crate::platform::failure_exit_status()
 }
 
 #[cfg(all(test, unix))]

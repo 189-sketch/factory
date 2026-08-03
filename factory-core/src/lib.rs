@@ -1,6 +1,6 @@
-#[cfg(not(unix))]
-compile_error!("Factory v1 supports Unix-like operating systems only");
-
+// Cross-platform: historically Unix-only. W4.0 (#38) ports the HTTP/SSE serve
+// path to Windows; remaining Unix-specific behaviours are gated `cfg(unix)` and
+// degrade gracefully (or are unsupported) on Windows.
 pub mod approval;
 pub mod clone;
 pub mod config;
@@ -13,6 +13,7 @@ pub mod github;
 mod hash;
 pub mod init;
 pub mod inspection;
+mod platform;
 pub mod runtime;
 pub mod sandbox;
 pub mod serve;
