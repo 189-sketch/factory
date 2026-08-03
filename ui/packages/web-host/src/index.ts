@@ -1,3 +1,4 @@
+import { createAggregation } from "./aggregation.js";
 import { createApp } from "./app.js";
 import { DockerDriver } from "./docker-driver.js";
 import { UiEventBus } from "./events.js";
@@ -26,7 +27,17 @@ const registry = RepositoryRegistry.open(dbPath);
 const driver = new DockerDriver();
 const bus = new UiEventBus();
 const pipeline = new OnboardingPipeline(registry, driver, bus);
-const app = createApp(registry, { pipeline, bus, driver });
+// W4 aggregation: connection manager + hub + control plane + degradation,
+// assembled over the shared registry. The hub serves /ui/events; the router
+// serves /ui/api/control/*.
+const aggregation = createAggregation(registry);
+const app = createApp(registry, {
+  pipeline,
+  bus,
+  driver,
+  hub: aggregation.hub,
+  controlPlane: aggregation.controlPlane,
+});
 
 const server = app.listen(port, address, () => {
   const bound = server.address();
@@ -38,9 +49,11 @@ const server = app.listen(port, address, () => {
 function shutdown(signal: string): void {
   // eslint-disable-next-line no-console
   console.log(`received ${signal}, shutting down`);
-  server.close(() => {
-    registry.close();
-    process.exit(0);
+  void aggregation.stop().finally(() => {
+    server.close(() => {
+      registry.close();
+      process.exit(0);
+    });
   });
 }
 
