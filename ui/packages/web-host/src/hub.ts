@@ -60,6 +60,11 @@ export class EventHub {
     this.aggregator.ingest(repository, frame);
   }
 
+  /** Number of live frontend subscribers (diagnostic / test seam). */
+  subscriberCount(): number {
+    return this.subscribers.size;
+  }
+
   /** Flush pending run.activity batches (e.g. before shutdown). */
   flush(): void {
     this.aggregator.flush();

@@ -5,6 +5,7 @@ import type { BackendDriver } from "./driver.js";
 import type { UiEventBus } from "./events.js";
 import { importFleet } from "./fleet-import.js";
 import { NormalizationError } from "./identity.js";
+import type { EventHub, HubFrame } from "./hub.js";
 import type { OnboardingPipeline } from "./onboard.js";
 import {
   RepositoryConflictError,
@@ -69,6 +70,62 @@ function sendError(res: Response, status: number, code: string, message: string)
   res.status(status).json(errorBody(code, message));
 }
 
+/**
+ * Serve the aggregated `/ui/events` stream from the hub (W4.4). Each frame is
+ * written with `id: <ui-seq>` so a frontend EventSource tracks its own cursor.
+ * On reconnect the frontend sends `Last-Event-ID` (or `?last_id=`); the hub
+ * backfills the missed frames, or — when the cursor has fallen outside the ring
+ * buffer — the server first emits a synthetic `resync` event telling the
+ * frontend to re-pull each repo's `/api/v1/status` rather than trust a gap.
+ */
+function serveHubEvents(req: Request, res: Response, hub: EventHub): void {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(`retry: 3000\n\n`);
+
+  const lastSeen = parseLastEventId(req);
+  const writeFrame = (frame: HubFrame) => {
+    res.write(`id: ${frame.seq}\n`);
+    res.write(`event: ${frame.type}\n`);
+    res.write(`data: ${JSON.stringify(frame.envelope)}\n\n`);
+  };
+
+  const subscription = hub.subscribe(writeFrame, lastSeen);
+
+  // A cursor beyond the buffer means a permanent gap: tell the frontend to
+  // resync before streaming anything live.
+  if (subscription.resyncRequired) {
+    res.write(`event: resync\n`);
+    res.write(`data: ${JSON.stringify({ reason: "cursor_out_of_buffer" })}\n\n`);
+  } else {
+    // Backfill the missed frames (in order) before live ones arrive.
+    for (const frame of subscription.missed) {
+      writeFrame(frame);
+    }
+  }
+
+  req.on("close", () => subscription.close());
+}
+
+/** Resolve the frontend's cursor from the Last-Event-ID header or ?last_id=. */
+function parseLastEventId(req: Request): number | undefined {
+  const header = req.headers["last-event-id"];
+  const headerValue = Array.isArray(header) ? header[0] : header;
+  const fromHeader = headerValue !== undefined ? Number.parseInt(headerValue, 10) : NaN;
+  if (Number.isFinite(fromHeader)) return fromHeader;
+  const queryValue = req.query.last_id;
+  const raw = Array.isArray(queryValue) ? queryValue[0] : queryValue;
+  if (typeof raw === "string") {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 const onboardBodySchema = z.object({
   git_url: z.string().min(1, "git_url is required"),
   provider: z.string().min(1, "provider is required"),
@@ -92,6 +149,9 @@ export interface AppDeps {
   pipeline?: OnboardingPipeline;
   bus?: UiEventBus;
   driver?: BackendDriver;
+  /** Aggregation hub (W4.3/W4.4); when present, /ui/events serves the
+   * normalized multi-container stream with per-frontend cursors. */
+  hub?: EventHub;
 }
 
 export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Express {
@@ -169,9 +229,15 @@ export function createApp(registry: RepositoryRegistry, deps: AppDeps = {}): Exp
     }
   });
 
-  // ui-synthesized event stream (onboarding progress now, container
-  // aggregation in W4). SSE with no buffering.
+  // Aggregated multi-container event stream (W4.3+). Each frontend connection
+  // gets an independent cursor: a reconnect with Last-Event-ID backfills the
+  // missed frames from the hub's ring buffer, or receives a synthetic `resync`
+  // when its cursor has fallen outside the buffer.
   app.get("/ui/events", (req: Request, res: Response) => {
+    if (deps.hub) {
+      serveHubEvents(req, res, deps.hub);
+      return;
+    }
     if (!deps.bus) {
       sendError(res, 503, "unavailable", "event bus not configured");
       return;
