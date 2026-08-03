@@ -90,4 +90,40 @@ describe("EventHub fan-out", () => {
     expect(received).toHaveLength(1);
     expect(received[0]!.envelope.batch).toHaveLength(4);
   });
+
+  it("keeps backfill ordered before live frames on reconnect (#1: no interleave)", () => {
+    // Deterministic unit reproduction of the race: a live frame arriving
+    // between subscribe() and activate() must not overtake the backfill.
+    const hub = new EventHub();
+    hub.ingest("acme/one", frame(1, "task.state", "acme/one"));
+    hub.ingest("acme/one", frame(2, "task.state", "acme/one"));
+
+    const received: number[] = [];
+    const sub = hub.subscribe((f) => received.push(f.seq), /* lastSeenSeq */ 1);
+    // A live frame lands AFTER subscribe computed the missed backfill but
+    // BEFORE the caller finished writing it and called activate().
+    hub.ingest("acme/one", frame(3, "task.state", "acme/one"));
+    // Caller writes the backfill, then goes live.
+    for (const f of sub.missed) received.push(f.seq);
+    sub.activate();
+
+    // Order must be backfill (2) then the live sliver (3) — never 3,2.
+    expect(received).toEqual([2, 3]);
+  });
+
+  it("resync subscribers get no sliver backfill, only frames after activate", () => {
+    const hub = new EventHub({ bufferSize: 2 });
+    for (let n = 1; n <= 5; n += 1) hub.ingest("acme/one", frame(n, "task.state", "acme/one"));
+    const received: HubFrame[] = [];
+    const sub = hub.subscribe((f) => received.push(f), 1); // cursor beyond buffer
+    expect(sub.resyncRequired).toBe(true);
+    // A frame landing before activate() must NOT be sliver-backfilled (the
+    // frontend is resyncing from scratch, not trusting any gap).
+    hub.ingest("acme/one", frame(6, "task.state", "acme/one"));
+    sub.activate();
+    expect(received).toEqual([]);
+    // Frames after activate stream live as normal.
+    hub.ingest("acme/one", frame(7, "task.state", "acme/one"));
+    expect(received.map((f) => f.seq)).toEqual([7]);
+  });
 });

@@ -71,16 +71,21 @@ export class EventHub {
   }
 
   /**
-   * Subscribe a frontend connection. Returns an unsubscribe handle. When
-   * `lastSeenSeq` is provided and still within the buffer, the missed frames
-   * are replayed to this subscriber immediately (W4.4); the caller decides
-   * what to do when the cursor has fallen outside the buffer (resync).
+   * Subscribe a frontend connection. Returns an unsubscribe handle plus the
+   * backfill decision. When `lastSeenSeq` is provided and still within the
+   * buffer, the missed frames are computed for the caller to replay; when it
+   * has fallen outside the buffer, `resyncRequired` tells the caller to emit a
+   * synthetic resync instead.
+   *
+   * Ordering guarantee: the handler is NOT registered for live frames until
+   * `activate()` is called, so the caller can write the missed frames first and
+   * then go live — a reconnecting frontend never sees a live frame interleaved
+   * ahead of its backfill (which would rewind its derived state).
    */
   subscribe(
     handler: (frame: HubFrame) => void,
     lastSeenSeq?: number,
-  ): { close(): void; missed: HubFrame[]; resyncRequired: boolean } {
-    this.subscribers.add(handler);
+  ): { close(): void; activate(): void; missed: HubFrame[]; resyncRequired: boolean; liveSeq: number } {
     let missed: HubFrame[] = [];
     let resyncRequired = false;
     if (lastSeenSeq !== undefined && lastSeenSeq < this.seq) {
@@ -92,9 +97,34 @@ export class EventHub {
         oldestBuffered !== undefined && oldestBuffered > lastSeenSeq + 1;
       missed = available;
     }
+    // Frames that arrive between computing `missed` and activate() would be
+    // missed by both; capture the live watermark so activate() can backfill
+    // that sliver too, keeping the stream gap-free and in order.
+    const liveSeq = this.seq;
+    let active = false;
+    const activate = () => {
+      if (active) return;
+      active = true;
+      // Backfill anything that arrived after `missed` was computed, then
+      // register for live frames.
+      if (!resyncRequired) {
+        for (const frame of this.buffer) {
+          if (frame.seq > liveSeq && !missed.includes(frame)) handler(frame);
+        }
+      }
+      this.subscribers.add(handler);
+    };
+    // A live-only subscription (no cursor to backfill) has no ordering hazard,
+    // so it goes active immediately; the two-phase activate() only matters when
+    // there is a backfill to write first.
+    if (lastSeenSeq === undefined) {
+      activate();
+    }
     return {
       missed,
       resyncRequired,
+      liveSeq,
+      activate,
       close: () => this.subscribers.delete(handler),
     };
   }

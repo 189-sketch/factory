@@ -133,6 +133,10 @@ describe("/ui/events per-frontend cursors", () => {
     const frames = await readSse("/ui/events", 1, { "Last-Event-ID": "2" });
     expect(frames[0]!.event).toBe("resync");
     expect(JSON.parse(frames[0]!.data)).toMatchObject({ reason: "cursor_out_of_buffer" });
+    // #2: the resync frame must carry an id (the current hub seq) so the
+    // frontend's Last-Event-ID advances past the gap and the next reconnect
+    // doesn't loop on the same expired cursor.
+    expect(frames[0]!.id).toBe(10);
   });
 
   it("supports ?last_id= as a cursor fallback", async () => {

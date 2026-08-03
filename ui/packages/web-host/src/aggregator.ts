@@ -4,10 +4,10 @@
  * The aggregator receives raw per-container frames (W4.2) and produces the
  * single normalized stream the renderer consumes over `/ui/events`:
  *
- *  - The envelope already carries `repository`; it is forwarded as-is. When the
- *    envelope is missing `repository` (or it disagrees with the connection's
- *    repo), the aggregator stamps the canonical one so the renderer can always
- *    bucket by repository.
+ *  - The connection's canonical `repository` is authoritative: a frame arrived on
+ *    a given container's stream, so it is stamped with that repo. An envelope
+ *    that omits `repository` gets it filled; one that disagrees is corrected,
+ *    so the renderer can always bucket by the true source repository.
  *  - Unknown event types and unknown envelope/payload fields pass through
  *    unchanged (additive-only): the web-host never needs an upgrade when the
  *    core evolves additively.
@@ -77,12 +77,13 @@ export class EventAggregator {
     const envelope = parseEnvelope(frame.data);
     const type = envelopeType(envelope) ?? frame.event;
 
-    // Stamp/forward the repository. When the envelope is missing it (or the
-    // frame is a bare payload with no envelope), make it explicit.
+    // The connection's canonical repository is authoritative: a frame arrived
+    // on this container's stream, so it belongs to this repo regardless of what
+    // the envelope claims. Stamp it when missing AND correct it when it
+    // disagrees, so the renderer always buckets by the true source repo.
     const normalizedEnvelope: Record<string, unknown> = envelope
-      ? { ...envelope, repository: (envelope.repository as string) ?? repository }
+      ? { ...envelope, repository }
       : { repository, type, payload: safePayload(frame.data) };
-    if (!normalizedEnvelope.repository) normalizedEnvelope.repository = repository;
 
     if (type === "run.activity") {
       this.bufferActivity(repository, normalizedEnvelope);

@@ -98,16 +98,23 @@ function serveHubEvents(req: Request, res: Response, hub: EventHub): void {
   const subscription = hub.subscribe(writeFrame, lastSeen);
 
   // A cursor beyond the buffer means a permanent gap: tell the frontend to
-  // resync before streaming anything live.
+  // resync before streaming anything live. The resync frame carries the current
+  // hub seq as its `id:` so the frontend's Last-Event-ID advances past the gap
+  // and the next reconnect doesn't repeat the same expired cursor.
   if (subscription.resyncRequired) {
+    res.write(`id: ${subscription.liveSeq}\n`);
     res.write(`event: resync\n`);
     res.write(`data: ${JSON.stringify({ reason: "cursor_out_of_buffer" })}\n\n`);
   } else {
-    // Backfill the missed frames (in order) before live ones arrive.
+    // Backfill the missed frames (in order) BEFORE going live, so a reconnecting
+    // frontend never sees a live frame interleaved ahead of its backfill.
     for (const frame of subscription.missed) {
       writeFrame(frame);
     }
   }
+  // Now register for live frames; activate() first flushes any sliver that
+  // arrived while we were writing the backfill, keeping the stream gap-free.
+  subscription.activate();
 
   req.on("close", () => subscription.close());
 }

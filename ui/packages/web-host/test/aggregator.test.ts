@@ -71,6 +71,17 @@ describe("EventAggregator normalization", () => {
     expect(emitted[0]!.envelope.repository).toBe("acme/two");
   });
 
+  it("corrects a conflicting repository to the connection's repo (#3)", () => {
+    const { emitted, agg } = setup();
+    // The envelope claims acme/wrong, but the frame arrived on acme/right's
+    // stream — the connection's repo is authoritative for bucketing.
+    agg.ingest("acme/right", frame(8, "task.state", {
+      v: 1, type: "task.state", seq: 8, repository: "acme/wrong", payload: { to: "queued" },
+    }));
+    expect(emitted[0]!.repository).toBe("acme/right");
+    expect(emitted[0]!.envelope.repository).toBe("acme/right");
+  });
+
   it("passes through unknown event types unchanged (additive-only)", () => {
     const { emitted, agg } = setup();
     agg.ingest(
