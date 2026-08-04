@@ -12,8 +12,8 @@ WORKDIR /src
 # 仅用缓存层拷清单,再拷源码
 COPY Cargo.toml Cargo.lock ./
 COPY factory-core/Cargo.toml ./factory-core/Cargo.toml
-# edition 2024 要求 resolver>=2;顶层清单不含 package 时 cargo 需显式指定
-RUN printf '\n[workspace]\nresolver = "3"\n' >> Cargo.toml
+# 顶层清单已含 [workspace] resolver = "3"(edition 2024 需要 resolver>=2);
+# 不再追加,否则产生重复的 [workspace] 表导致 TOML duplicate key。
 COPY factory-core/src ./factory-core/src
 
 # rusqlite bundled 需要 C 工具链编译内嵌 sqlite

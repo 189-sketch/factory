@@ -39,6 +39,12 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+      # The web-host aggregation tests drive a real factory-core process (W4.1
+      # harness), so the binary must exist before vitest runs. Build it to the
+      # default target dir (target/debug/factory), which the harness discovers.
+      - name: Build factory-core binary
+        working-directory: .
+        run: cargo build --locked
       - name: Typecheck web-host
         run: npm run typecheck --workspace @factory-ui/web-host
       - name: Test web-host

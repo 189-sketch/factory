@@ -93,7 +93,14 @@ function findCoreBinary(): string {
   const exe = process.platform === "win32" ? "factory.exe" : "factory";
   // Walk up from ui/packages/web-host/test to the workspace root, then into
   // target/<triple>/debug. The MSVC and GNU triples are both accepted.
-  const triples = ["x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"];
+  const triples = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-pc-windows-gnu",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+  ];
   let dir = HERE;
   for (let i = 0; i < 8; i += 1) {
     for (const triple of triples) {
