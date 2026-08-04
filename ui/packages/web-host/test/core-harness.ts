@@ -168,8 +168,16 @@ export async function startCore(options: { repository?: string; port?: number; t
     // Fast health cadence so tests observe periodic repo.health quickly.
     FACTORY_REPO_HEALTH_INTERVAL_MS: "150",
   };
-  // `factory init` materialises .factory/config.toml in the repo.
-  execFileSync(binary, ["init"], { cwd: repoDir, env, stdio: "ignore" });
+  // `factory init` materialises .factory/config.toml in the repo. Capture its
+  // output so a CI failure surfaces the real reason instead of a bare exit code.
+  try {
+    execFileSync(binary, ["init"], { cwd: repoDir, env, stdio: "pipe" });
+  } catch (error) {
+    const e = error as { stdout?: Buffer; stderr?: Buffer; message?: string };
+    throw new Error(
+      `factory init failed: ${e.message}\nstdout: ${e.stdout?.toString() ?? ""}\nstderr: ${e.stderr?.toString() ?? ""}`,
+    );
+  }
 
   const child: ChildProcess = spawn(binary, ["serve"], {
     cwd: repoDir,
