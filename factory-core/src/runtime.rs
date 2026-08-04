@@ -1345,13 +1345,6 @@ fn cleanup_descendants(process_id: Option<u32>) -> Result<()> {
     }
 }
 
-// Windows has no process-group tree to reap; cleanup is a no-op there. Gated to
-// unix because its only caller is unix-only.
-#[cfg(unix)]
-fn cleanup_descendants(_process_id: Option<u32>) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn signal_process_group(process_id: Option<u32>, force: bool) -> Result<()> {
     use nix::errno::Errno;
