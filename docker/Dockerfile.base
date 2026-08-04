@@ -15,6 +15,10 @@ COPY factory-core/Cargo.toml ./factory-core/Cargo.toml
 # 顶层清单已含 [workspace] resolver = "3"(edition 2024 需要 resolver>=2);
 # 不再追加,否则产生重复的 [workspace] 表导致 TOML duplicate key。
 COPY factory-core/src ./factory-core/src
+# include_str! 在编译期内嵌这些文件:契约 schema(events.rs 校验出站事件)与
+# init 的 workflow/source 模板,必须与 src 一同进构建上下文。
+COPY schema ./schema
+COPY factory-core/.factory ./factory-core/.factory
 
 # rusqlite bundled 需要 C 工具链编译内嵌 sqlite
 RUN apt-get update \
