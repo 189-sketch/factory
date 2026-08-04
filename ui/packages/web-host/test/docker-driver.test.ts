@@ -26,7 +26,24 @@ let reachable = false;
 
 beforeAll(async () => {
   reachable = await daemonReachable();
-});
+  if (reachable) {
+    // The container-lifecycle test uses busybox; ensure it's present so the
+    // test doesn't 404 on a daemon that hasn't pulled it yet (CI runners).
+    const docker = new Docker();
+    try {
+      await docker.getImage("busybox:latest").inspect();
+    } catch {
+      await new Promise<void>((resolvePull, rejectPull) => {
+        docker.pull("busybox:latest", (err: Error | null, stream: unknown) => {
+          if (err) return rejectPull(err);
+          docker.modem.followProgress(stream as NodeJS.ReadableStream, (e: Error | null) =>
+            e ? rejectPull(e) : resolvePull(),
+          );
+        });
+      });
+    }
+  }
+}, 120000);
 
 describe("DockerDriver (docker-required)", () => {
   it("pings the daemon", async () => {
