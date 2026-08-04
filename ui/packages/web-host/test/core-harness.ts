@@ -12,7 +12,7 @@
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import Database from "better-sqlite3";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -154,6 +154,10 @@ export async function startCore(options: { repository?: string; port?: number; t
   const repoDir = join(workdir, "repo");
   const token = options.token ?? `harness-token-${Math.floor(Math.random() * 1e9)}`;
   const port = options.port ?? (await freePort());
+  // The core resolves HOME / FACTORY_DATA_HOME to real directories; they must
+  // exist before init (Linux fails hard on a missing home dir).
+  mkdirSync(home, { recursive: true });
+  mkdirSync(dataHome, { recursive: true });
 
   // Minimal git workspace the core can discover (needs an origin remote).
   git(workdir, ["init", "--quiet", repoDir]);
