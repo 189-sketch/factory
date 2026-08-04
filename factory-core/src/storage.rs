@@ -1069,7 +1069,12 @@ impl Ledger {
                 &task.repository,
                 Some(task.id),
                 None,
-                task_state_payload(None, TaskState::Queued, &task.workflow, task.source_item.as_deref()),
+                task_state_payload(
+                    None,
+                    TaskState::Queued,
+                    &task.workflow,
+                    task.source_item.as_deref(),
+                ),
             )?;
         }
         transaction
@@ -2263,7 +2268,14 @@ impl Ledger {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to begin event append transaction")?;
-        let event = append_event_in(&transaction, event_type, repository, task_id, run_id, payload)?;
+        let event = append_event_in(
+            &transaction,
+            event_type,
+            repository,
+            task_id,
+            run_id,
+            payload,
+        )?;
         transaction
             .commit()
             .context("failed to commit event append")?;
@@ -2455,7 +2467,11 @@ impl Ledger {
             Some(id),
             task_state_payload(
                 Some(TaskState::Running),
-                if recovered { TaskState::Queued } else { TaskState::Failed },
+                if recovered {
+                    TaskState::Queued
+                } else {
+                    TaskState::Failed
+                },
                 &run.workflow,
                 run.source_item.as_deref(),
             ),
@@ -2584,7 +2600,11 @@ impl Ledger {
                 recovery_attempt,
             ),
         )?;
-        let new_task_state = if retry_recovery { TaskState::Queued } else { task_state };
+        let new_task_state = if retry_recovery {
+            TaskState::Queued
+        } else {
+            task_state
+        };
         append_event_in(
             &transaction,
             EventType::TaskState,
@@ -2762,7 +2782,10 @@ impl Ledger {
             "idle"
         };
         let message = health_error.map(|value| {
-            truncate_utf8(&crate::inspection::sanitize_for_storage(&value), MAX_ERROR_BYTES)
+            truncate_utf8(
+                &crate::inspection::sanitize_for_storage(&value),
+                MAX_ERROR_BYTES,
+            )
         });
         Ok(RepoHealthView {
             status: status.to_owned(),
@@ -3977,8 +4000,7 @@ fn append_event_in(
 ) -> Result<LedgerEvent> {
     let ts = chrono::Utc::now().to_rfc3339();
     let payload = sanitize_event_payload(payload);
-    let payload_text =
-        serde_json::to_string(&payload).context("failed to encode event payload")?;
+    let payload_text = serde_json::to_string(&payload).context("failed to encode event payload")?;
     connection
         .execute(
             "INSERT INTO events (type, ts, repository, task_id, run_id, payload)
@@ -4010,9 +4032,9 @@ fn append_event_in(
 /// shares the ledger's redaction policy.
 fn sanitize_event_payload(value: serde_json::Value) -> serde_json::Value {
     match value {
-        serde_json::Value::String(text) => serde_json::Value::String(
-            crate::inspection::sanitize_for_storage(&text),
-        ),
+        serde_json::Value::String(text) => {
+            serde_json::Value::String(crate::inspection::sanitize_for_storage(&text))
+        }
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.into_iter().map(sanitize_event_payload).collect())
         }
@@ -4093,11 +4115,9 @@ fn run_outcome_payload(
 /// the initial watermark for the SSE committed-event notifier.
 fn latest_event_id(connection: &Connection) -> Result<i64> {
     connection
-        .query_row(
-            "SELECT COALESCE(MAX(event_id), 0) FROM events",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COALESCE(MAX(event_id), 0) FROM events", [], |row| {
+            row.get(0)
+        })
         .context("failed to read the latest event id")
 }
 

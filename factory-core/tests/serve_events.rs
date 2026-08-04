@@ -69,8 +69,7 @@ impl Fixture {
         // once; tests in this binary that touch the ledger do not run
         // concurrently on the same data home.
         unsafe { std::env::set_var("FACTORY_DATA_HOME", &self.data_home) };
-        let data_directory =
-            factory::config::repository_data_directory(&self.repository).unwrap();
+        let data_directory = factory::config::repository_data_directory(&self.repository).unwrap();
         Ledger::open(&data_directory.join(factory::storage::DATABASE_NAME)).unwrap()
     }
 }
@@ -129,11 +128,7 @@ struct SseFrame {
 
 /// Read SSE frames from a blocking HTTP connection until `count` data frames
 /// (or `include_comments` heartbeat comments) arrive or the deadline passes.
-fn read_frames(
-    stream: &mut impl std::io::Read,
-    count: usize,
-    deadline: Duration,
-) -> Vec<SseFrame> {
+fn read_frames(stream: &mut impl std::io::Read, count: usize, deadline: Duration) -> Vec<SseFrame> {
     let start = Instant::now();
     let mut buffer = Vec::new();
     let mut byte = [0u8; 1];
@@ -504,10 +499,8 @@ fn invalid_event_is_dropped_but_the_stream_continues() {
     // SAFETY: same rationale as Fixture::ledger; this test owns its data home.
     unsafe { std::env::set_var("FACTORY_DATA_HOME", &fixture.data_home) };
     let data_directory = factory::config::repository_data_directory(&fixture.repository).unwrap();
-    let connection = rusqlite::Connection::open(
-        data_directory.join(factory::storage::DATABASE_NAME),
-    )
-    .unwrap();
+    let connection =
+        rusqlite::Connection::open(data_directory.join(factory::storage::DATABASE_NAME)).unwrap();
     connection
         .execute(
             "INSERT INTO events (type, ts, repository, task_id, run_id, payload)

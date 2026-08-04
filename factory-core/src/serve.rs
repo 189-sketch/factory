@@ -154,11 +154,7 @@ pub async fn serve(config: &Config, port: u16, cancellation: CancellationToken) 
         .unwrap_or_else(|_| "unknown".to_owned());
     // Emit repo.health periodically and whenever the aggregated snapshot
     // changes, so the overview card tracks live ledger state.
-    let health_task = tokio::spawn(emit_repo_health(
-        database,
-        repository,
-        cancellation.clone(),
-    ));
+    let health_task = tokio::spawn(emit_repo_health(database, repository, cancellation.clone()));
     let app = build_router(state);
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
@@ -450,9 +446,9 @@ async fn status_handler(State(state): State<AppState>) -> HandlerResult<Json<ser
             &format!("failed to aggregate repository status: {error}"),
         )
     })?;
-    Ok(Json(serde_json::to_value(view).unwrap_or_else(|_| {
-        serde_json::json!({"status": "error"})
-    })))
+    Ok(Json(serde_json::to_value(view).unwrap_or_else(
+        |_| serde_json::json!({"status": "error"}),
+    )))
 }
 
 /// The body every write endpoint accepts: an idempotency key the ui supplies
@@ -516,7 +512,9 @@ async fn cancel_run_handler(
         )
     })?;
     let (status, outcome, run) = match &request {
-        CancellationRequest::Requested(run) => (StatusCode::OK, "cancellation_requested", Some(run)),
+        CancellationRequest::Requested(run) => {
+            (StatusCode::OK, "cancellation_requested", Some(run))
+        }
         CancellationRequest::AlreadyRequested(run) => {
             (StatusCode::OK, "cancellation_requested", Some(run))
         }
@@ -567,13 +565,15 @@ async fn onboard_handler(
 
     // Trigger one source scheduling evaluation (the source half of
     // `factory run --once`), not waiting for the next poll cycle.
-    let report = run_source_evaluation(&state, &mut ledger).await.map_err(|error| {
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "onboard_failed",
-            &format!("failed to evaluate the source: {error}"),
-        )
-    })?;
+    let report = run_source_evaluation(&state, &mut ledger)
+        .await
+        .map_err(|error| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "onboard_failed",
+                &format!("failed to evaluate the source: {error}"),
+            )
+        })?;
     let body_json = serde_json::json!({
         "client_request_id": body.client_request_id,
         "status": "ok",
@@ -607,10 +607,7 @@ struct SourceEvaluation {
 
 /// Run one source scheduling evaluation, equivalent to the source half of
 /// `factory run --once`. Without a configured source this is a no-op.
-async fn run_source_evaluation(
-    state: &AppState,
-    ledger: &mut Ledger,
-) -> Result<SourceEvaluation> {
+async fn run_source_evaluation(state: &AppState, ledger: &mut Ledger) -> Result<SourceEvaluation> {
     if state.config.source.is_none() {
         return Ok(SourceEvaluation {
             tasks_created: 0,
@@ -678,9 +675,19 @@ async fn events_handler(
         _ => None,
     };
 
-    let stream = build_event_stream(ledger, notifier, cursor, unsupported, state.validator.clone());
+    let stream = build_event_stream(
+        ledger,
+        notifier,
+        cursor,
+        unsupported,
+        state.validator.clone(),
+    );
     let mut response = Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(HEARTBEAT_INTERVAL).text("keep-alive"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(HEARTBEAT_INTERVAL)
+                .text("keep-alive"),
+        )
         .into_response();
     response.headers_mut().insert(
         header::HeaderName::from_static("x-accel-buffering"),
@@ -783,7 +790,10 @@ fn sse_event(event: &LedgerEvent, validator: &crate::events::EventValidator) -> 
         "payload": event.payload,
     });
     if let Err(reason) = validator.validate_envelope(&envelope) {
-        eprintln!("Factory event id={} failed schema validation: {reason}", event.event_id);
+        eprintln!(
+            "Factory event id={} failed schema validation: {reason}",
+            event.event_id
+        );
         return None;
     }
     let data = serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
@@ -835,15 +845,12 @@ async fn require_auth(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
-    let query_token = request
-        .uri()
-        .query()
-        .and_then(|query| {
-            query.split('&').find_map(|pair| {
-                let (key, value) = pair.split_once('=')?;
-                (key == "token").then_some(value)
-            })
-        });
+    let query_token = request.uri().query().and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "token").then_some(value)
+        })
+    });
     let presented = header_token.or(query_token);
     match presented {
         Some(presented) if constant_time_eq(presented.as_bytes(), state.token.as_bytes()) => {

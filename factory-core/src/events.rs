@@ -46,7 +46,10 @@ impl EventValidator {
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let payload = envelope.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+        let payload = envelope
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let Some(validator) = self.validator_for_type(event_type) else {
             // Unknown types are tolerated (additive-only): the ui ignores them.
             return Ok(());

@@ -64,12 +64,9 @@ impl Fixture {
         // SAFETY: each test drives a single serve child; ledger access here is
         // not concurrent with other tests on the same data home.
         unsafe { std::env::set_var("FACTORY_DATA_HOME", &self.data_home) };
-        let data_directory =
-            factory::config::repository_data_directory(&self.repository).unwrap();
-        factory::storage::Ledger::open(
-            &data_directory.join(factory::storage::DATABASE_NAME),
-        )
-        .unwrap()
+        let data_directory = factory::config::repository_data_directory(&self.repository).unwrap();
+        factory::storage::Ledger::open(&data_directory.join(factory::storage::DATABASE_NAME))
+            .unwrap()
     }
 }
 
@@ -128,7 +125,8 @@ fn http_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
+    let mut request =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
@@ -145,7 +143,12 @@ fn http_get(port: u16, path: &str) -> HttpResponse {
 }
 
 fn http_get_token(port: u16, path: &str, token: &str) -> HttpResponse {
-    http_request(port, "GET", path, &[("Authorization", &format!("Bearer {token}"))])
+    http_request(
+        port,
+        "GET",
+        path,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
 }
 
 /// POST a JSON body with the bearer token and read the full response.
@@ -298,7 +301,10 @@ fn serve_accepts_bearer_header_and_query_token_on_events() {
     // A correct bearer token upgrades to an SSE stream (never a 401).
     assert_eq!(events_auth_status(port, "/events", Some(TOKEN)), 200);
     // The ?token= query also authenticates (EventSource cannot set headers).
-    assert_eq!(events_auth_status(port, &format!("/events?token={TOKEN}"), None), 200);
+    assert_eq!(
+        events_auth_status(port, &format!("/events?token={TOKEN}"), None),
+        200
+    );
     // No token and a wrong token are rejected.
     assert_eq!(events_auth_status(port, "/events", None), 401);
     assert_eq!(events_auth_status(port, "/events", Some("wrong")), 401);
@@ -381,13 +387,8 @@ fn seed_task_and_run(fixture: &Fixture) -> (i64, i64) {
     ledger
         .register_daemon_owner("owner", std::process::id())
         .unwrap();
-    let identity = TaskIdentity::ticket(
-        "example/repository",
-        "implement-ready-ticket",
-        "7",
-        "rev-1",
-    )
-    .unwrap();
+    let identity =
+        TaskIdentity::ticket("example/repository", "implement-ready-ticket", "7", "rev-1").unwrap();
     ledger.enqueue(&identity).unwrap();
     let runtimes = std::collections::HashMap::from([(
         (
@@ -484,7 +485,10 @@ fn runs_query_filters_by_task_and_serves_detail() {
     // All query endpoints reject anonymous access.
     assert_eq!(http_get(port, "/api/v1/tasks").status, 401);
     assert_eq!(http_get(port, "/api/v1/runs").status, 401);
-    assert_eq!(http_get(port, &format!("/api/v1/runs/{run_id}")).status, 401);
+    assert_eq!(
+        http_get(port, &format!("/api/v1/runs/{run_id}")).status,
+        401
+    );
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -500,7 +504,12 @@ fn cancel_is_idempotent_and_terminal_returns_current_state() {
 
     // First cancel: the seeded run is owned by this (live) test process.
     let body = r#"{"client_request_id":"cancel-1"}"#;
-    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body);
+    let response = http_post_json(
+        port,
+        &format!("/api/v1/runs/{run_id}/cancel"),
+        Some(TOKEN),
+        body,
+    );
     assert_eq!(response.status, 200);
     let first = response.json();
     assert_eq!(first["outcome"], "cancellation_requested");
@@ -511,7 +520,12 @@ fn cancel_is_idempotent_and_terminal_returns_current_state() {
     assert!(detail["cancellation_requested_at"].is_number());
 
     // Same client_request_id again: replay of the first result, no new effect.
-    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body);
+    let response = http_post_json(
+        port,
+        &format!("/api/v1/runs/{run_id}/cancel"),
+        Some(TOKEN),
+        body,
+    );
     assert_eq!(response.status, 200);
     let second = response.json();
     assert_eq!(second["outcome"], "cancellation_requested");
@@ -519,7 +533,12 @@ fn cancel_is_idempotent_and_terminal_returns_current_state() {
     // A different client_request_id on the already-requested run: idempotent
     // current-state result, not an error.
     let body2 = r#"{"client_request_id":"cancel-2"}"#;
-    let response = http_post_json(port, &format!("/api/v1/runs/{run_id}/cancel"), Some(TOKEN), body2);
+    let response = http_post_json(
+        port,
+        &format!("/api/v1/runs/{run_id}/cancel"),
+        Some(TOKEN),
+        body2,
+    );
     assert_eq!(response.status, 200);
     assert_eq!(response.json()["outcome"], "cancellation_requested");
 
@@ -545,8 +564,8 @@ fn cancel_terminal_run_returns_current_state_idempotently() {
     ledger
         .register_daemon_owner("owner", std::process::id())
         .unwrap();
-    let identity = TaskIdentity::ticket("example/repository", "implement-ready-ticket", "9", "r1")
-        .unwrap();
+    let identity =
+        TaskIdentity::ticket("example/repository", "implement-ready-ticket", "9", "r1").unwrap();
     ledger.enqueue(&identity).unwrap();
     let runtimes = std::collections::HashMap::from([(
         (
@@ -557,12 +576,23 @@ fn cancel_terminal_run_returns_current_state_idempotently() {
         "codex".to_owned(),
     )]);
     let claimed = ledger
-        .claim_and_start_run(&["example/repository".to_owned()], &runtimes, "owner", std::process::id())
+        .claim_and_start_run(
+            &["example/repository".to_owned()],
+            &runtimes,
+            "owner",
+            std::process::id(),
+        )
         .unwrap()
         .unwrap();
     // Finish the run so it is terminal.
     ledger
-        .finish_run_and_task(claimed.run.id, RunOutcome::Succeeded, Some("done"), None, None)
+        .finish_run_and_task(
+            claimed.run.id,
+            RunOutcome::Succeeded,
+            Some("done"),
+            None,
+            None,
+        )
         .unwrap();
     drop(ledger);
 
@@ -571,7 +601,12 @@ fn cancel_terminal_run_returns_current_state_idempotently() {
     wait_for_health(&mut child, port);
 
     let body = r#"{"client_request_id":"cancel-terminal"}"#;
-    let response = http_post_json(port, &format!("/api/v1/runs/{}/cancel", claimed.run.id), Some(TOKEN), body);
+    let response = http_post_json(
+        port,
+        &format!("/api/v1/runs/{}/cancel", claimed.run.id),
+        Some(TOKEN),
+        body,
+    );
     assert_eq!(response.status, 200);
     assert_eq!(response.json()["outcome"], "terminal");
     assert_eq!(response.json()["run"]["outcome"], "succeeded");

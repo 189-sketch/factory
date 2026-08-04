@@ -1899,7 +1899,10 @@ fn events_after_replays_only_the_gap_after_the_cursor() {
     let replayed = ledger.events_after(ids[1]).unwrap();
     assert_eq!(replayed.len(), 3);
     assert_eq!(
-        replayed.iter().map(|event| event.event_id).collect::<Vec<_>>(),
+        replayed
+            .iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>(),
         vec![ids[2], ids[3], ids[4]]
     );
 }
@@ -1981,11 +1984,9 @@ fn appended_event_is_visible_within_the_same_transaction_as_state_transition() {
     // The claim transition itself must have appended a task.state event atomically.
     let events = ledger.events_after(0).unwrap();
     assert!(
-        events
-            .iter()
-            .any(|event| event.event_type == "task.state"
-                && event.task_id == Some(claimed.task.id)
-                && event.run_id == Some(claimed.run.id)),
+        events.iter().any(|event| event.event_type == "task.state"
+            && event.task_id == Some(claimed.task.id)
+            && event.run_id == Some(claimed.run.id)),
         "claim must append a task.state event in the same transaction, got {events:?}"
     );
 }
