@@ -37,11 +37,12 @@ type Config struct {
 }
 
 type Repository struct {
-	Key            string
-	Path           string
-	RemoteIdentity string
-	BaseCommit     string
-	BaseBranch     string
+	Key             string
+	Path            string
+	RemoteIdentity  string
+	BaseCommit      string
+	BaseBranch      string
+	coordinationKey string
 }
 
 func LoadConfig(path string) (Config, error) {

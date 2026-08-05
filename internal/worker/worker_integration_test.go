@@ -68,9 +68,14 @@ echo "$$" > "$FACTORY_TEST_CODEX_LOG/$attempt.pid"
 echo '{"type":"thread.started","thread_id":"test-thread"}'
 case "$prompt" in
   *FAKE_MODE=success*)
-    printf 'completed by fake Codex' > "$result"
-    echo '{"type":"item.completed","item":{"type":"agent_message","text":"completed"}}'
-    ;;
+	printf 'completed by fake Codex' > "$result"
+	echo '{"type":"item.completed","item":{"type":"agent_message","text":"completed"}}'
+	;;
+	*FAKE_MODE=runtime-overlap*)
+	touch "$FACTORY_TEST_CODEX_LOG/$attempt.running"
+	while [ "$(find "$FACTORY_TEST_CODEX_LOG" -name '*.running' | wc -l)" -lt 2 ]; do sleep 0.01; done
+	printf 'completed after runtime overlap' > "$result"
+	;;
   *FAKE_MODE=long*)
     head -c 68157440 /dev/zero | tr '\000' x
     echo
@@ -1199,6 +1204,115 @@ func TestMultiRepositorySuccessAndBoundedOutput(t *testing.T) {
 	}
 }
 
+func TestSameRepositoryRuntimeAndCleanupCanOverlap(t *testing.T) {
+	repository := createRepository(t, "same-repository-overlap")
+	fixture := newServerFixture(t, nil)
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"shared": repository}, 2)
+	startManager(t, manager)
+	worker := waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
+		return worker.Health == "healthy"
+	})
+	first := createTask(t, fixture.store, worker, "shared", "runtime-overlap", 60)
+	second := createTask(t, fixture.store, worker, "shared", "runtime-overlap", 60)
+	first = waitForTaskState(t, fixture.store, first.Task.ID, "succeeded")
+	second = waitForTaskState(t, fixture.store, second.Task.ID, "succeeded")
+	for _, detail := range []protocol.TaskDetail{first, second} {
+		if len(detail.Attempts) != 1 || detail.Attempts[0].Result != "completed after runtime overlap" {
+			t.Fatalf("overlapping attempt = %#v", detail.Attempts)
+		}
+		attempt := detail.Attempts[0]
+		path := filepath.Join(manager.dataDirectory, "worktrees", attempt.ID)
+		waitFor(t, 5*time.Second, func() bool {
+			_, err := os.Stat(path)
+			return errors.Is(err, os.ErrNotExist)
+		})
+	}
+	waitFor(t, 5*time.Second, func() bool { return manager.repositoryLocks.count() == 0 })
+	entries, err := listGitWorktrees(context.Background(), "git", repository.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRepository, err := filepath.EvalSymlinks(repository.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Path != canonicalRepository {
+		t.Fatalf("worktrees after concurrent cleanup = %#v", entries)
+	}
+}
+
+func TestBlockedCleanupDoesNotDelayUnrelatedRepository(t *testing.T) {
+	firstRepository := createRepository(t, "blocked-cleanup-first")
+	secondRepository := createRepository(t, "blocked-cleanup-second")
+	fixture := newServerFixture(t, nil)
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{
+			"first":  firstRepository,
+			"second": secondRepository,
+		}, 2)
+	startManager(t, manager)
+	worker := waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
+		return worker.Health == "healthy"
+	})
+	first := createTask(t, fixture.store, worker, "first", "barrier", 60)
+	second := createTask(t, fixture.store, worker, "second", "barrier", 60)
+	first = waitForTaskState(t, fixture.store, first.Task.ID, "running")
+	second = waitForTaskState(t, fixture.store, second.Task.ID, "running")
+	logDirectory := os.Getenv("FACTORY_TEST_CODEX_LOG")
+	for _, detail := range []protocol.TaskDetail{first, second} {
+		waitFor(t, 10*time.Second, func() bool {
+			_, err := os.Stat(filepath.Join(logDirectory, detail.Attempts[0].ID+".ready"))
+			return err == nil
+		})
+	}
+
+	waitContext, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	releaseFirstRepository, err := manager.repositoryLocks.acquire(
+		waitContext,
+		repositoryCoordinationKey(manager.repositoriesByKey["first"]),
+	)
+	cancelWait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirstRepository()
+	if err := os.WriteFile(
+		filepath.Join(logDirectory, first.Attempts[0].ID+".release"),
+		[]byte("release\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	waitForTaskState(t, fixture.store, first.Task.ID, "succeeded")
+
+	if err := os.WriteFile(
+		filepath.Join(logDirectory, second.Attempts[0].ID+".release"),
+		[]byte("release\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	second = waitForTaskState(t, fixture.store, second.Task.ID, "succeeded")
+	secondWorktree := filepath.Join(manager.dataDirectory, "worktrees", second.Attempts[0].ID)
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(secondWorktree)
+		return errors.Is(err, os.ErrNotExist)
+	})
+
+	releaseFirstRepository()
+	firstWorktree := filepath.Join(manager.dataDirectory, "worktrees", first.Attempts[0].ID)
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(firstWorktree)
+		return errors.Is(err, os.ErrNotExist)
+	})
+	waitFor(t, 5*time.Second, func() bool { return manager.repositoryLocks.count() == 0 })
+}
+
 func TestIdleWorkerMakesOneClaimPerPollingInterval(t *testing.T) {
 	var claimMutex sync.Mutex
 	var claimTimes []time.Time
@@ -1317,23 +1431,25 @@ func TestCodexWorkerPoolRunsTenAttemptsAndRefillsReleasedSlot(t *testing.T) {
 		}
 		return ready == 10
 	})
-	running := make([]protocol.TaskDetail, 0, len(tasks))
-	for _, task := range tasks {
+	running := make([]protocol.TaskDetail, 0, 10)
+	var queued protocol.TaskDetail
+	candidates := append(append([]protocol.TaskDetail(nil), tasks...), overflowTask)
+	for _, task := range candidates {
 		detail, err := fixture.store.Task(context.Background(), task.Task.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if detail.Execution.State != "running" || len(detail.Attempts) != 1 {
-			t.Fatalf("barrier task is not concurrently running: %#v", detail)
+		switch {
+		case detail.Execution.State == "running" && len(detail.Attempts) == 1:
+			running = append(running, detail)
+		case detail.Execution.State == "queued" && len(detail.Attempts) == 0 && queued.Task.ID == "":
+			queued = detail
+		default:
+			t.Fatalf("unexpected capacity task state: %#v", detail)
 		}
-		running = append(running, detail)
 	}
-	overflowDetail, err := fixture.store.Task(context.Background(), overflowTask.Task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if overflowDetail.Execution.State != "queued" || len(overflowDetail.Attempts) != 0 {
-		t.Fatalf("eleventh task bypassed capacity: %#v", overflowDetail)
+	if len(running) != 10 || queued.Task.ID == "" {
+		t.Fatalf("capacity split = %d running, queued %#v", len(running), queued)
 	}
 	manager.register(managerContext)
 	waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
@@ -1379,12 +1495,12 @@ func TestCodexWorkerPoolRunsTenAttemptsAndRefillsReleasedSlot(t *testing.T) {
 		runtimePIDs[runtimePID] = true
 	}
 
-	if _, err := fixture.store.CancelTask(context.Background(), tasks[0].Task.ID); err != nil {
+	if _, err := fixture.store.CancelTask(context.Background(), running[0].Task.ID); err != nil {
 		t.Fatal(err)
 	}
-	waitForTaskState(t, fixture.store, tasks[0].Task.ID, "cancelled")
-	overflowRunning := waitForTaskState(t, fixture.store, overflowTask.Task.ID, "running")
-	for _, task := range tasks[1:] {
+	waitForTaskState(t, fixture.store, running[0].Task.ID, "cancelled")
+	queuedRunning := waitForTaskState(t, fixture.store, queued.Task.ID, "running")
+	for _, task := range running[1:] {
 		detail, err := fixture.store.Task(context.Background(), task.Task.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -1394,16 +1510,17 @@ func TestCodexWorkerPoolRunsTenAttemptsAndRefillsReleasedSlot(t *testing.T) {
 		}
 	}
 
-	for _, detail := range append(running[1:], overflowRunning) {
+	remaining := append([]protocol.TaskDetail(nil), running[1:]...)
+	remaining = append(remaining, queuedRunning)
+	for _, detail := range remaining {
 		attemptID := detail.Attempts[0].ID
 		if err := os.WriteFile(filepath.Join(logDirectory, attemptID+".release"), []byte("release\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, task := range tasks[1:] {
+	for _, task := range remaining {
 		waitForTaskState(t, fixture.store, task.Task.ID, "succeeded")
 	}
-	waitForTaskState(t, fixture.store, overflowTask.Task.ID, "succeeded")
 }
 
 func TestClaudeCodeWorkerUsesTheSameConcurrentPool(t *testing.T) {
