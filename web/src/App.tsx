@@ -8,7 +8,7 @@ import { Overview } from "./Overview";
 import { RepositoriesView, RepositoryDetail } from "./Repositories";
 import { TaskDetail } from "./TaskDetail";
 import { useVisibleInterval } from "./polling";
-import type { Task, TaskPage } from "./types";
+import type { Task, TaskPage, Worker } from "./types";
 import { WorkersView, WorkerDetail } from "./Workers";
 import { WorkView } from "./Work";
 import { WorkflowDetail, WorkflowsView } from "./Workflows";
@@ -134,6 +134,17 @@ export function App() {
     : taskHistory.length > 0
       ? taskHistory
       : undefined;
+  const detailWorkerState = delegateRequest?.workerID
+    ? queryClient.getQueryState<Worker>(["worker", delegateRequest.workerID])
+    : undefined;
+  const detailWorker = detailWorkerState?.data;
+  const fleetWorker = detailWorker
+    ? (workers.data ?? []).find((worker) => worker.id === detailWorker.id)
+    : undefined;
+  const detailWorkerIsFresh = detailWorker && (!fleetWorker || (detailWorkerState?.dataUpdatedAt ?? 0) >= workers.dataUpdatedAt);
+  const delegateWorkers = detailWorkerIsFresh
+    ? [detailWorker, ...(workers.data ?? []).filter((worker) => worker.id !== detailWorker.id)]
+    : workers.data ?? [];
 
   return (
     <div className="app-shell">
@@ -181,7 +192,7 @@ export function App() {
             aria-current={route.page === "workers" ? "page" : undefined}
             onClick={() => navigate({ page: "workers" })}
           >
-            <Bot size={17} /> Workers
+			<Bot size={17} /> Runners
           </button>
           <button
             className={`nav-item ${route.page === "repositories" || route.page === "repository" ? "active" : ""}`}
@@ -210,9 +221,9 @@ export function App() {
           <div className="topbar-title">
             {route.page === "overview" && "Overview"}
             {route.page === "work" && "Work"}
-            {route.page === "workers" && "Workers"}
+			{route.page === "workers" && "Runners"}
             {route.page === "task" && "Task detail"}
-            {route.page === "worker" && "Worker detail"}
+			{route.page === "worker" && "Runner detail"}
             {route.page === "repositories" && "Repositories"}
             {route.page === "repository" && "Repository detail"}
             {route.page === "workflows" && "Runbooks"}
@@ -322,8 +333,8 @@ export function App() {
       )}
       {delegateRequest && (
         <DelegateModal
-          workers={workers.data ?? []}
-          workersPending={workers.isPending}
+          workers={delegateWorkers}
+          workersPending={workers.isPending && delegateWorkers.length === 0}
           initialWorkerID={delegateRequest.workerID}
           onClose={closeDelegate}
           onCreated={(id) => {

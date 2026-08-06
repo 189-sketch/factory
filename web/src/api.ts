@@ -85,6 +85,11 @@ export const api = {
       .map(normalizeWorker),
   worker: async (id: string) =>
     normalizeWorker(await request<Worker>(`/api/v1/workers/${encodeURIComponent(id)}`)),
+  testWorker: async (id: string) =>
+    normalizeWorker(await request<Worker>(`/api/v1/workers/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+      body: "{}",
+    })),
   workerRepositoryOptions: async (id: string) =>
     (await request<{ repositories: WorkerRepositoryOption[] | null }>(
       `/api/v1/workers/${encodeURIComponent(id)}/repository-options`,
@@ -277,8 +282,17 @@ export const api = {
 };
 
 function normalizeWorker(worker: Worker): Worker {
+	const capabilities = worker.capabilities?.length
+		? worker.capabilities
+		: [{
+			kind: "runtime" as const,
+			name: worker.runtime,
+			status: worker.health === "healthy" ? "ready" as const : "unhealthy" as const,
+			version: worker.runtime_version,
+		}];
   return {
     ...worker,
+		capabilities,
     repositories: worker.repositories ?? [],
     retained_worktrees: worker.retained_worktrees ?? [],
     source_access: worker.source_access ?? [],

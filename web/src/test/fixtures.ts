@@ -7,6 +7,13 @@ export const worker: Worker = {
   worker_version: "2.0.0",
   runtime: "codex",
   runtime_version: "0.42.0",
+	capabilities: [
+		{ kind: "tool", name: "git", status: "ready", version: "git version 2.50.1" },
+		{ kind: "tool", name: "gh", status: "ready", version: "gh version 2.94.0" },
+		{ kind: "runtime", name: "pi", status: "ready", version: "0.80.10" },
+		{ kind: "runtime", name: "codex", status: "ready", version: "0.42.0" },
+		{ kind: "runtime", name: "claude-code", status: "missing", message: "Install Claude Code and make it available on PATH." },
+	],
   capacity: 10,
   active_count: 6,
   health: "healthy",
@@ -67,6 +74,7 @@ export const tasks: Task[] = ["queued", "running", "succeeded", "failed", "cance
     title: `${state} task`,
     worker_id: worker.id,
     repository_id: worker.repositories[0].id,
+    required_runtime: index === 0 ? "pi" : "codex",
     timeout_seconds: 7200,
     state: state as Task["state"],
     created_at: new Date(Date.now() - index * 60_000).toISOString(),
@@ -187,7 +195,11 @@ export function mockControlPlane(
     repositoryToggleFailure?: boolean;
     runFailures?: number;
     workflowHistoryGate?: Promise<void>;
+    workerDetailFailuresAfter?: number;
     workerFailure?: boolean;
+    workerDetailRuntimeRefresh?: boolean;
+    workerOfflineAfterConnectionTest?: boolean;
+    workerRuntimeRefresh?: boolean;
   } = {},
 ) {
   let createFailures = options.createFailures ?? 0;
@@ -197,6 +209,9 @@ export function mockControlPlane(
   let workflowHeadRequests = 0;
   let terminalEventFailures = options.terminalEventFailures ?? 0;
   let taskDetailRequests = 0;
+  let workerDetailRequests = 0;
+  let workerConnectionTests = 0;
+  let workerListRequests = 0;
   const deletedTaskIDs = new Set<string>();
   let resolveStaleHistory: (() => void) | undefined;
   let createdTask: {
@@ -1059,7 +1074,17 @@ export function mockControlPlane(
           { status: 503 },
         );
       }
-      return Response.json({ workers: [worker, offlineWorker] });
+      workerListRequests += 1;
+      const onlineWorker = options.workerRuntimeRefresh && workerListRequests > 1
+        ? {
+            ...worker,
+            runtime: "pi",
+            capabilities: (worker.capabilities ?? []).map((capability) => capability.kind === "runtime" && capability.name === "codex"
+              ? { ...capability, status: "unauthenticated", message: "Authenticate Codex before running Jobs." }
+              : capability),
+          }
+        : worker;
+      return Response.json({ workers: [onlineWorker, offlineWorker] });
     }
     const workerRepositoryOptions = path.match(/^\/api\/v1\/workers\/([^/]+)\/repository-options$/);
     if (workerRepositoryOptions) {
@@ -1107,7 +1132,37 @@ export function mockControlPlane(
         }));
       return Response.json({ repositories: [...configured, ...advertisedOnly] });
     }
-    if (path === `/api/v1/workers/${worker.id}`) return Response.json(worker);
+    if (path === `/api/v1/workers/${worker.id}`) {
+      workerDetailRequests += 1;
+      if (options.workerDetailFailuresAfter !== undefined && workerDetailRequests > options.workerDetailFailuresAfter) {
+        return Response.json(
+          { error: { code: "worker_unavailable", message: "Runner connection failed" } },
+          { status: 503 },
+        );
+      }
+      const detailWorker = options.workerDetailRuntimeRefresh
+        ? {
+            ...worker,
+            runtime: "pi",
+            capabilities: (worker.capabilities ?? []).map((capability) => capability.kind === "runtime" && capability.name === "codex"
+              ? { ...capability, status: "unauthenticated", message: "Authenticate Codex before running Jobs." }
+              : capability),
+          }
+        : worker;
+      return Response.json(options.workerOfflineAfterConnectionTest && workerConnectionTests > 0
+        ? { ...detailWorker, online: false }
+        : detailWorker);
+    }
+    if (path === `/api/v1/workers/${worker.id}/test` && init?.method === "POST") {
+      workerConnectionTests += 1;
+      if (workerConnectionTests > 1) {
+        return Response.json(
+          { error: { code: "worker_connection_timeout", message: "Runner did not send a fresh registration" } },
+          { status: 504 },
+        );
+      }
+      return Response.json(worker);
+    }
     throw new Error(`Unhandled request: ${path}`);
   });
 }

@@ -3,35 +3,45 @@ package worker
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sort"
 	"strings"
 
 	"github.com/owainlewis/factory/internal/protocol"
 )
 
-func (manager *Manager) setHealth(value health) {
+func healthRegistrationChanged(previous, next health) bool {
+	return previous.State != next.State ||
+		!reflect.DeepEqual(previous.Capabilities, next.Capabilities) ||
+		!reflect.DeepEqual(previous.SourceAccess, next.SourceAccess)
+}
+
+func (manager *Manager) setHealth(value health) bool {
 	manager.stateMutex.Lock()
-	previous := manager.health.State
+	previous := manager.health
 	if manager.fatalHealth != nil {
 		value = health{State: "unhealthy", Error: manager.fatalHealth}
 	}
+	registrationChanged := healthRegistrationChanged(previous, value)
 	manager.health = value
-	if previous != value.State {
+	if registrationChanged {
+		manager.registrationGeneration++
 		manager.registered = false
 	}
 	if value.State != "healthy" {
 		manager.cancelPendingClaimsLocked()
 	}
+	manager.finishHealthCheckLocked()
 	manager.stateMutex.Unlock()
-	if value.Error != nil && previous != value.State {
+	if value.Error != nil && previous.State != value.State {
 		manager.logger.Warn("worker_unhealthy", "error_class", "runtime_health", "error", value.Error)
 	}
-	if value.State == "healthy" && previous != "healthy" {
+	if value.State == "healthy" && previous.State != "healthy" {
 		manager.logger.Info("worker_healthy",
 			"git_version", value.GitVersion,
-			"runtime", manager.config.Runtime,
-			"runtime_version", value.RuntimeVersion)
+			"runtimes", manager.config.Runtimes)
 	}
+	return registrationChanged
 }
 
 func (manager *Manager) markUnhealthy(errorClass string, err error) {
@@ -39,6 +49,7 @@ func (manager *Manager) markUnhealthy(errorClass string, err error) {
 	manager.fatalHealth = err
 	manager.health.State = "unhealthy"
 	manager.health.Error = err
+	manager.registrationGeneration++
 	manager.registered = false
 	manager.cancelPendingClaimsLocked()
 	manager.stateMutex.Unlock()
@@ -48,12 +59,42 @@ func (manager *Manager) markUnhealthy(errorClass string, err error) {
 func (manager *Manager) isHealthy() bool {
 	manager.stateMutex.Lock()
 	defer manager.stateMutex.Unlock()
-	return manager.health.State == "healthy" && manager.registered
+	return manager.health.State == "healthy" && manager.registered && !manager.healthCheckPending
+}
+
+func (manager *Manager) beginHealthCheck() bool {
+	manager.stateMutex.Lock()
+	defer manager.stateMutex.Unlock()
+	if manager.healthCheckPending {
+		return false
+	}
+	manager.healthCheckPending = true
+	manager.healthCheckDone = make(chan struct{})
+	return true
+}
+
+func (manager *Manager) finishHealthCheckLocked() {
+	if !manager.healthCheckPending {
+		return
+	}
+	manager.healthCheckPending = false
+	close(manager.healthCheckDone)
+	manager.healthCheckDone = nil
 }
 
 func (manager *Manager) registration() protocol.WorkerRegistration {
 	manager.stateMutex.Lock()
 	defer manager.stateMutex.Unlock()
+	return manager.registrationLocked()
+}
+
+func (manager *Manager) registrationSnapshot() (protocol.WorkerRegistration, uint64) {
+	manager.stateMutex.Lock()
+	defer manager.stateMutex.Unlock()
+	return manager.registrationLocked(), manager.registrationGeneration
+}
+
+func (manager *Manager) registrationLocked() protocol.WorkerRegistration {
 	repositories := make([]protocol.RepositoryRegistration, 0, len(manager.repositories))
 	retained := make([]protocol.RetainedWorktree, 0, len(manager.retained))
 	disposedAttemptIDs := make([]string, 0, len(manager.disposed))
@@ -80,6 +121,7 @@ func (manager *Manager) registration() protocol.WorkerRegistration {
 		WorkerVersion:              manager.options.WorkerVersion,
 		Runtime:                    manager.config.Runtime,
 		RuntimeVersion:             manager.health.RuntimeVersion,
+		Capabilities:               append([]protocol.Capability(nil), manager.health.Capabilities...),
 		Capacity:                   manager.config.MaxConcurrent,
 		ActiveCount:                len(manager.slots),
 		Health:                     manager.health.State,
@@ -107,15 +149,42 @@ func (manager *Manager) register(ctx context.Context) {
 	manager.registrationMutex.Lock()
 	defer manager.registrationMutex.Unlock()
 	if manager.capacityHandoffs != 0 {
+		manager.heartbeatWorkerLocked(ctx)
 		return
 	}
 	manager.registerLocked(ctx)
 }
 
+func (manager *Manager) heartbeatWorkerLocked(ctx context.Context) {
+	manager.stateMutex.Lock()
+	generation := manager.registrationGeneration
+	registrationCurrent := manager.hasAdvertisedRegistration && manager.advertisedGeneration == generation
+	manager.stateMutex.Unlock()
+	if !registrationCurrent {
+		return
+	}
+	requestContext, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	if _, err := manager.client.heartbeatWorker(requestContext, manager.id); err != nil {
+		manager.stateMutex.Lock()
+		manager.registered = false
+		manager.cancelPendingClaimsLocked()
+		manager.stateMutex.Unlock()
+		manager.logger.Warn("worker_heartbeat_failed", "error_class", apiErrorClass(err))
+		return
+	}
+	manager.stateMutex.Lock()
+	if manager.hasAdvertisedRegistration && manager.registrationGeneration == generation &&
+		manager.advertisedGeneration == generation {
+		manager.registered = true
+	}
+	manager.stateMutex.Unlock()
+}
+
 func (manager *Manager) registerLocked(ctx context.Context) {
 	requestContext, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	registration := manager.registration()
+	registration, generation := manager.registrationSnapshot()
 	if _, err := manager.client.register(requestContext, manager.id, registration); err != nil {
 		manager.stateMutex.Lock()
 		manager.registered = false
@@ -140,6 +209,17 @@ func (manager *Manager) registerLocked(ctx context.Context) {
 	for _, attemptID := range registration.DisposedAttemptIDs {
 		delete(manager.disposed, attemptID)
 	}
-	manager.registered = true
+	manager.completeRegistrationLocked(generation)
 	manager.stateMutex.Unlock()
+}
+
+func (manager *Manager) completeRegistrationLocked(generation uint64) {
+	manager.registered = generation == manager.registrationGeneration
+	if manager.registered {
+		manager.advertisedGeneration = generation
+		manager.hasAdvertisedRegistration = true
+	}
+	if !manager.registered {
+		manager.cancelPendingClaimsLocked()
+	}
 }

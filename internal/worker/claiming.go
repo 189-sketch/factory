@@ -10,7 +10,7 @@ import (
 func (manager *Manager) reserveAndClaim(ctx context.Context) {
 	manager.stateMutex.Lock()
 	defer manager.stateMutex.Unlock()
-	if manager.claiming || manager.health.State != "healthy" || !manager.registered {
+	if manager.claiming || manager.health.State != "healthy" || !manager.registered || manager.healthCheckPending {
 		return
 	}
 	select {
@@ -59,7 +59,7 @@ func (manager *Manager) claimOnce(ctx context.Context) {
 	claim, err := manager.client.claim(claimContext, manager.id, protocol.ClaimRequest{
 		RequestID: requestID, LeaseToken: token,
 	}, manager.options.TransportBackoffMin, manager.options.TransportBackoffMax)
-	eligible = manager.endClaim(requestID)
+	eligible = manager.endClaim(claimContext, requestID)
 	cancelClaim()
 	if err != nil {
 		if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
@@ -105,18 +105,41 @@ func (manager *Manager) beginClaim(
 	ctx, cancel := context.WithCancel(parent)
 	manager.stateMutex.Lock()
 	defer manager.stateMutex.Unlock()
-	if manager.health.State != "healthy" || !manager.registered {
+	if manager.health.State != "healthy" || !manager.registered || manager.healthCheckPending {
 		return ctx, cancel, false
 	}
 	manager.pending[requestID] = cancel
 	return ctx, cancel, true
 }
 
-func (manager *Manager) endClaim(requestID string) bool {
-	manager.stateMutex.Lock()
-	defer manager.stateMutex.Unlock()
-	delete(manager.pending, requestID)
-	return manager.health.State == "healthy" && manager.registered
+func (manager *Manager) endClaim(ctx context.Context, requestID string) bool {
+	for {
+		manager.stateMutex.Lock()
+		if _, pending := manager.pending[requestID]; !pending {
+			manager.stateMutex.Unlock()
+			return false
+		}
+		if !manager.healthCheckPending {
+			delete(manager.pending, requestID)
+			// The claim began against an advertised registration. If the probe
+			// changed unrelated capabilities, validate the decoded claim against
+			// the refreshed health instead of discarding the committed response.
+			eligible := manager.health.State == "healthy"
+			manager.stateMutex.Unlock()
+			return eligible
+		}
+		done := manager.healthCheckDone
+		manager.stateMutex.Unlock()
+
+		select {
+		case <-done:
+		case <-ctx.Done():
+			manager.stateMutex.Lock()
+			delete(manager.pending, requestID)
+			manager.stateMutex.Unlock()
+			return false
+		}
+	}
 }
 
 func (manager *Manager) cancelPendingClaimsLocked() {

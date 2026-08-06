@@ -487,11 +487,309 @@ func writeFakeClaude(t *testing.T, path string) {
 	}
 }
 
+func writeFakePi(t *testing.T, path string) {
+	t.Helper()
+	body := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  --version) echo "0.80.10" ;;
+  --list-models) printf 'provider model\nopenai test-model\n' ;;
+  --print)
+    test "${2:-}" = "--no-session"
+    cat >/dev/null
+    echo "completed by fake Pi"
+    ;;
+  *) exit 91 ;;
+esac
+`
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMultiRuntimeHealthAndPiSupervisorContract(t *testing.T) {
+	piPath := filepath.Join(t.TempDir(), "pi")
+	writeFakePi(t, piPath)
+	value := checkHealth(
+		context.Background(), "git", filepath.Join(t.TempDir(), "missing-gh"), protocol.RuntimePi,
+		[]string{protocol.RuntimePi, protocol.RuntimeCodex},
+		map[string]string{
+			protocol.RuntimePi:    piPath,
+			protocol.RuntimeCodex: filepath.Join(t.TempDir(), "missing-codex"),
+		},
+	)
+	if value.State != "healthy" || value.RuntimeVersion != "0.80.10" ||
+		!capabilityReady(value.Capabilities, protocol.CapabilityKindRuntime, protocol.RuntimePi) {
+		t.Fatalf("multi-runtime health = %#v", value)
+	}
+	var codexStatus string
+	for _, capability := range value.Capabilities {
+		if capability.Kind == protocol.CapabilityKindRuntime && capability.Name == protocol.RuntimeCodex {
+			codexStatus = capability.Status
+		}
+	}
+	if codexStatus != protocol.CapabilityMissing {
+		t.Fatalf("missing Codex status = %q", codexStatus)
+	}
+
+	t.Setenv("FACTORY_TEST_SUPERVISOR", "1")
+	repository := createRepository(t, "pi-supervisor")
+	process, err := startSupervisor(
+		[]string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		supervisorInit{
+			Runtime: protocol.RuntimePi, RuntimeExecutable: piPath,
+			Worktree: repository.path, ResultPath: filepath.Join(t.TempDir(), "unused-result"),
+			Prompt: "complete this task", TimeoutSeconds: 60,
+		},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.awaitReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := process.send("start"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case message := <-process.messages:
+			if message.Type == "exit" {
+				if message.ExitCode != 0 || message.Result != "completed by fake Pi" {
+					t.Fatalf("Pi supervisor exit = %#v", message)
+				}
+				return
+			}
+		case err := <-process.decodeErrors:
+			t.Fatalf("decode Pi supervisor output: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("Pi supervisor did not exit")
+		}
+	}
+}
+
+func TestRegistrationContinuesWhileHealthProbeIsRunning(t *testing.T) {
+	toolDirectory := t.TempDir()
+	piPath := filepath.Join(toolDirectory, "pi")
+	probeCountPath := filepath.Join(toolDirectory, "probe-count")
+	probeBlockedPath := filepath.Join(toolDirectory, "probe-blocked")
+	probeReleasePath := filepath.Join(toolDirectory, "probe-release")
+	t.Setenv("FACTORY_TEST_PI_PROBE_COUNT", probeCountPath)
+	t.Setenv("FACTORY_TEST_PI_PROBE_BLOCKED", probeBlockedPath)
+	t.Setenv("FACTORY_TEST_PI_PROBE_RELEASE", probeReleasePath)
+	script := `#!/bin/sh
+set -eu
+if [ "$1" = "--version" ]; then
+  echo "0.80.10"
+  exit 0
+fi
+if [ "$1" != "--list-models" ]; then
+  exit 91
+fi
+if [ ! -f "$FACTORY_TEST_PI_PROBE_COUNT" ]; then
+  echo 1 > "$FACTORY_TEST_PI_PROBE_COUNT"
+else
+  touch "$FACTORY_TEST_PI_PROBE_BLOCKED"
+  while [ ! -f "$FACTORY_TEST_PI_PROBE_RELEASE" ]; do
+    sleep 0.01
+  done
+fi
+printf 'provider model\nopenai-codex gpt-5.3-codex\n'
+`
+	if err := os.WriteFile(piPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.WriteFile(probeReleasePath, []byte("released\n"), 0o600) //nolint:errcheck
+
+	fixture := newServerFixture(t, nil)
+	repository := createRepository(t, "health-registration")
+	manager := newTestRuntimeManager(
+		t, fixture, protocol.RuntimePi, piPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"health-registration": repository}, 1,
+	)
+	manager.options.HealthInterval = 20 * time.Millisecond
+	manager.options.RegistrationInterval = 50 * time.Millisecond
+	manager.options.PollInterval = 10 * time.Millisecond
+	_, cancel, done := startManagerWithContext(t, manager)
+	waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
+		return worker.Health == "healthy"
+	})
+	waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(probeBlockedPath)
+		return err == nil
+	})
+	before, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		worker, err := fixture.store.Worker(context.Background(), manager.ID())
+		return err == nil && worker.LastHeartbeat.After(before.LastHeartbeat)
+	})
+	task := createTask(t, fixture.store, before, "health-registration", "success", 60)
+	time.Sleep(150 * time.Millisecond)
+	detail, err := fixture.store.Task(context.Background(), task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Execution.State != "queued" || len(detail.Attempts) != 0 {
+		t.Fatalf("Runner claimed while health probe was pending: state=%s attempts=%d",
+			detail.Execution.State, len(detail.Attempts))
+	}
+	if err := os.WriteFile(probeReleasePath, []byte("released\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		detail, err := fixture.store.Task(context.Background(), task.Task.ID)
+		return err == nil && len(detail.Attempts) > 0
+	})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCapacityHandoffSendsWorkerLivenessHeartbeat(t *testing.T) {
+	fixture := newServerFixture(t, nil)
+	repository := createRepository(t, "handoff-heartbeat")
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"factory": repository}, 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	manager.setHealth(checkHealth(context.Background(), manager.options.GitExecutable,
+		manager.options.GitHubExecutable, manager.config.Runtime,
+		manager.config.Runtimes, manager.options.RuntimeExecutables))
+	manager.register(context.Background())
+	before, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	manager.beginCapacityHandoff()
+	manager.register(context.Background())
+	manager.registrationMutex.Lock()
+	manager.capacityHandoffs--
+	manager.registrationMutex.Unlock()
+	after, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.LastHeartbeat.After(before.LastHeartbeat) || after.Runtime != before.Runtime ||
+		!reflect.DeepEqual(after.Capabilities, before.Capabilities) {
+		t.Fatalf("capacity handoff heartbeat changed registration = %#v; before %#v", after, before)
+	}
+}
+
+func TestCapacityHandoffHeartbeatRecoversAfterTransientFailure(t *testing.T) {
+	var failNext atomic.Bool
+	failNext.Store(true)
+	fixture := newServerFixture(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.Method == http.MethodPut && strings.HasSuffix(request.URL.Path, "/heartbeat") &&
+				failNext.CompareAndSwap(true, false) {
+				http.Error(writer, "transient heartbeat failure", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(writer, request)
+		})
+	})
+	repository := createRepository(t, "handoff-heartbeat-recovery")
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"factory": repository}, 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	manager.setHealth(checkHealth(context.Background(), manager.options.GitExecutable,
+		manager.options.GitHubExecutable, manager.config.Runtime,
+		manager.config.Runtimes, manager.options.RuntimeExecutables))
+	manager.register(context.Background())
+	before, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.beginCapacityHandoff()
+	defer func() {
+		manager.registrationMutex.Lock()
+		manager.capacityHandoffs--
+		manager.registrationMutex.Unlock()
+	}()
+	manager.register(context.Background())
+	manager.stateMutex.Lock()
+	registeredAfterFailure := manager.registered
+	manager.stateMutex.Unlock()
+	if registeredAfterFailure {
+		t.Fatal("failed heartbeat left Runner claimable")
+	}
+	time.Sleep(2 * time.Millisecond)
+	manager.register(context.Background())
+	after, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.stateMutex.Lock()
+	registeredAfterRecovery := manager.registered
+	manager.stateMutex.Unlock()
+	if !registeredAfterRecovery || !after.LastHeartbeat.After(before.LastHeartbeat) {
+		t.Fatalf("heartbeat did not recover current registration: registered=%t worker=%#v",
+			registeredAfterRecovery, after)
+	}
+}
+
+func TestCapacityHandoffDoesNotHeartbeatInvalidatedCapabilities(t *testing.T) {
+	fixture := newServerFixture(t, nil)
+	repository := createRepository(t, "invalidated-handoff")
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"factory": repository}, 1)
+	t.Cleanup(func() { _ = manager.Close() })
+	access := protocol.SourceAccess{Provider: "git", Hostname: "local.test"}
+	manager.setHealth(health{
+		State: "healthy", RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimePi, Status: protocol.CapabilityReady},
+		},
+		SourceAccess: []protocol.SourceAccess{access},
+	})
+	manager.register(context.Background())
+	registered, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.beginCapacityHandoff()
+	defer func() {
+		manager.registrationMutex.Lock()
+		manager.capacityHandoffs--
+		manager.registrationMutex.Unlock()
+	}()
+	manager.setHealth(health{
+		State: "healthy", RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+		},
+		SourceAccess: []protocol.SourceAccess{access},
+	})
+	time.Sleep(2 * time.Millisecond)
+	manager.register(context.Background())
+
+	stale, err := fixture.store.Worker(context.Background(), manager.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.LastHeartbeat.After(registered.LastHeartbeat) {
+		t.Fatalf("invalidated registration sent a handoff heartbeat: %#v", stale)
+	}
+}
+
 func TestClaudeCodeHealthAndSupervisorContract(t *testing.T) {
 	claudePath := filepath.Join(t.TempDir(), "claude")
 	writeFakeClaude(t, claudePath)
 	value := checkHealth(
-		context.Background(), "git", protocol.RuntimeClaudeCode, claudePath, "gh", nil,
+		context.Background(), "git", "gh", protocol.RuntimeClaudeCode,
+		[]string{protocol.RuntimeClaudeCode}, map[string]string{protocol.RuntimeClaudeCode: claudePath},
 	)
 	if value.State != "healthy" || value.RuntimeVersion != "2.1.220 (Claude Code)" {
 		t.Fatalf("Claude Code health = %#v", value)
@@ -552,6 +850,7 @@ func TestGitHubSourceAccessIsAdvertisedOnlyAfterSuccessfulProbe(t *testing.T) {
 	writeProbe := func(exitCode string) {
 		t.Helper()
 		body := "#!/bin/sh\n" +
+			"if [ \"$*\" = \"--version\" ]; then echo 'gh version test'; exit 0; fi\n" +
 			"test \"$*\" = \"auth status --hostname github.com\" || exit 91\n" +
 			"exit " + exitCode + "\n"
 		if err := os.WriteFile(githubPath, []byte(body), 0o700); err != nil {
@@ -561,8 +860,8 @@ func TestGitHubSourceAccessIsAdvertisedOnlyAfterSuccessfulProbe(t *testing.T) {
 
 	writeProbe("0")
 	value := checkHealth(
-		context.Background(), "git", protocol.RuntimeCodex, codexPath,
-		githubPath, nil,
+		context.Background(), "git", githubPath, protocol.RuntimeCodex,
+		[]string{protocol.RuntimeCodex}, map[string]string{protocol.RuntimeCodex: codexPath},
 	)
 	want := []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}}
 	if value.State != "healthy" || !reflect.DeepEqual(value.SourceAccess, want) ||
@@ -573,8 +872,8 @@ func TestGitHubSourceAccessIsAdvertisedOnlyAfterSuccessfulProbe(t *testing.T) {
 
 	writeProbe("1")
 	value = checkHealth(
-		context.Background(), "git", protocol.RuntimeCodex, codexPath,
-		githubPath, []string{"github"},
+		context.Background(), "git", githubPath, protocol.RuntimeCodex,
+		[]string{protocol.RuntimeCodex}, map[string]string{protocol.RuntimeCodex: codexPath},
 	)
 	if value.State != "healthy" || len(value.SourceAccess) != 0 {
 		t.Fatalf("failed GitHub probe health = %#v", value)
@@ -603,6 +902,10 @@ func TestZeroRepositoryWorkerAcquiresCentrallyManagedGitHubRepository(t *testing
 	t.Setenv("FACTORY_TEST_GH_ORIGIN", upstream.origin)
 	githubScript := `#!/bin/sh
 set -eu
+if [ "${1:-}" = "--version" ]; then
+  echo "gh version test"
+  exit 0
+fi
 if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
   exit 0
 fi
@@ -877,13 +1180,15 @@ func TestClaudeCodeSupervisorAcceptsOversizedResult(t *testing.T) {
 
 func testOptions(codexPath string) Options {
 	return Options{
-		GitExecutable:        "git",
-		GitHubExecutable:     filepath.Join(filepath.Dir(codexPath), "unavailable-gh"),
-		RuntimeExecutable:    codexPath,
-		SupervisorCommand:    []string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
-		WorkerVersion:        "test",
-		PollInterval:         20 * time.Millisecond,
-		HealthInterval:       50 * time.Millisecond,
+		GitExecutable:     "git",
+		GitHubExecutable:  filepath.Join(filepath.Dir(codexPath), "unavailable-gh"),
+		RuntimeExecutable: codexPath,
+		SupervisorCommand: []string{os.Args[0], "-test.run=TestWorkerSupervisorHelperProcess", "--"},
+		WorkerVersion:     "test",
+		PollInterval:      20 * time.Millisecond,
+		// Keep the production ratio between claim polling and health probes so
+		// tests that are not about health do not continuously cancel claims.
+		HealthInterval:       300 * time.Millisecond,
 		RegistrationInterval: 25 * time.Millisecond,
 		LeaseRenewInterval:   100 * time.Millisecond,
 		LeaseRetryInterval:   50 * time.Millisecond,
@@ -1332,6 +1637,7 @@ func TestIdleWorkerMakesOneClaimPerPollingInterval(t *testing.T) {
 	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
 		map[string]repositoryFixture{"idle-claim-pool": repository}, 10)
 	manager.options.PollInterval = 120 * time.Millisecond
+	manager.options.HealthInterval = time.Hour
 	cancel, done := startManager(t, manager)
 	waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
 		return worker.Health == "healthy" && worker.Capacity == 10
@@ -1712,7 +2018,7 @@ func TestCommittedClaimBecomesFailedWhenHealthChangesBeforeResponse(t *testing.T
 	writeFakeCodex(t, codexPath)
 	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
 		map[string]repositoryFixture{"health": repository}, 1)
-	manager.options.HealthInterval = 20 * time.Millisecond
+	manager.options.HealthInterval = time.Hour
 	manager.options.RegistrationInterval = 5 * time.Second
 
 	claimCommitted := make(chan struct{})
@@ -1748,15 +2054,11 @@ func TestCommittedClaimBecomesFailedWhenHealthChangesBeforeResponse(t *testing.T
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not commit a claim")
 	}
-	if err := os.Remove(codexPath); err != nil {
-		t.Fatal(err)
+	if !manager.beginHealthCheck() {
+		t.Fatal("health refresh did not start")
 	}
-	waitFor(t, 5*time.Second, func() bool {
-		manager.stateMutex.Lock()
-		defer manager.stateMutex.Unlock()
-		return manager.health.State == "unhealthy"
-	})
 	close(releaseResponse)
+	manager.setHealth(health{State: "unhealthy", Error: errors.New("runtime unavailable")})
 
 	detail := waitForTaskState(t, fixture.store, task.Task.ID, "failed")
 	if len(detail.Attempts) != 1 || detail.Attempts[0].State != "failed" ||
@@ -1765,6 +2067,76 @@ func TestCommittedClaimBecomesFailedWhenHealthChangesBeforeResponse(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(manager.dataDirectory, "worktrees", detail.Attempts[0].ID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("ineligible claim created a worktree: %v", err)
+	}
+}
+
+func TestCommittedClaimWaitsForUnchangedHealthRefresh(t *testing.T) {
+	fixture := newServerFixture(t, nil)
+	repository := createRepository(t, "committed-claim-healthy")
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	writeFakeCodex(t, codexPath)
+	manager := newTestManager(t, fixture, codexPath, filepath.Join(t.TempDir(), "worker"),
+		map[string]repositoryFixture{"health": repository}, 1)
+	manager.options.HealthInterval = time.Hour
+	manager.options.RegistrationInterval = 5 * time.Second
+
+	claimCommitted := make(chan struct{})
+	releaseResponse := make(chan struct{})
+	var blocked atomic.Bool
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	manager.client.http = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		response, err := transport.RoundTrip(request)
+		if err != nil || !strings.HasSuffix(request.URL.Path, "/claims") ||
+			response.StatusCode != http.StatusOK || !blocked.CompareAndSwap(false, true) {
+			return response, err
+		}
+		body, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		response.Body = io.NopCloser(bytes.NewReader(body))
+		response.ContentLength = int64(len(body))
+		close(claimCommitted)
+		<-releaseResponse
+		return response, nil
+	})}
+
+	startManager(t, manager)
+	worker := waitForWorker(t, fixture.store, manager.ID(), func(worker protocol.Worker) bool {
+		return worker.Health == "healthy"
+	})
+	task := createTask(t, fixture.store, worker, "health", "success", 60)
+	select {
+	case <-claimCommitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not commit a claim")
+	}
+	manager.stateMutex.Lock()
+	unchanged := manager.health
+	unchanged.Capabilities = append([]protocol.Capability(nil), unchanged.Capabilities...)
+	unchanged.SourceAccess = append([]protocol.SourceAccess(nil), unchanged.SourceAccess...)
+	manager.stateMutex.Unlock()
+	if !manager.beginHealthCheck() {
+		t.Fatal("health refresh did not start")
+	}
+	close(releaseResponse)
+
+	time.Sleep(20 * time.Millisecond)
+	detail, err := fixture.store.Task(context.Background(), task.Task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Execution.State != "preparing" || len(detail.Attempts) != 1 {
+		t.Fatalf("committed claim did not wait for health evidence: state=%s attempts=%d",
+			detail.Execution.State, len(detail.Attempts))
+	}
+
+	manager.setHealth(unchanged)
+	detail = waitForTaskState(t, fixture.store, task.Task.ID, "succeeded")
+	if len(detail.Attempts) != 1 || detail.Attempts[0].State != "succeeded" {
+		t.Fatalf("claim did not resume after unchanged healthy evidence: %#v", detail.Attempts)
 	}
 }
 

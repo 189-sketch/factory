@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -302,6 +303,85 @@ func TestHTTPWorkerRegistrationSupportsLegacyAndRuntimeAwareContracts(t *testing
 	runtimeAware := decodeResponse[protocol.Worker](t, response)
 	if runtimeAware.Runtime != protocol.RuntimeClaudeCode || runtimeAware.RuntimeVersion != "2.1.220" {
 		t.Fatalf("runtime-aware response = %q %q", runtimeAware.Runtime, runtimeAware.RuntimeVersion)
+	}
+}
+
+func TestWaitForWorkerRegistrationRequiresAFreshHeartbeat(t *testing.T) {
+	store := newTestStore(t)
+	worker := registerTestWorker(t, store, workerA, 1)
+
+	t.Run("fresh registration", func(t *testing.T) {
+		registrationError := make(chan error, 1)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			_, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+				Name: workerA, WorkerVersion: "test", RuntimeVersion: "codex-test",
+				Capacity: 1, Health: "healthy",
+			})
+			registrationError <- err
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		connected, err := waitForWorkerRegistration(ctx, store, workerA, worker.LastHeartbeat, 5*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := <-registrationError; err != nil {
+			t.Fatal(err)
+		}
+		if !connected.LastHeartbeat.After(worker.LastHeartbeat) {
+			t.Fatalf("connection heartbeat = %s; want after %s", connected.LastHeartbeat, worker.LastHeartbeat)
+		}
+	})
+
+	t.Run("stale registration", func(t *testing.T) {
+		current, err := store.Worker(context.Background(), workerA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, err = waitForWorkerRegistration(ctx, store, workerA, current.LastHeartbeat, 5*time.Millisecond)
+		var serviceError *ServiceError
+		if !errors.As(err, &serviceError) || serviceError.Code != "worker_connection_timeout" {
+			t.Fatalf("stale registration error = %v", err)
+		}
+	})
+
+	t.Run("fresh liveness heartbeat", func(t *testing.T) {
+		current, err := store.Worker(context.Background(), workerA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+		if _, err := store.HeartbeatWorker(context.Background(), workerA); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		connected, err := waitForWorkerRegistration(ctx, store, workerA, current.LastHeartbeat, 5*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !connected.LastHeartbeat.After(current.LastHeartbeat) || !connected.Online {
+			t.Fatalf("liveness heartbeat did not refresh connection evidence: %#v", connected)
+		}
+	})
+}
+
+func TestHTTPWorkerHeartbeatPreservesRunnerRegistration(t *testing.T) {
+	fixture := newHTTPFixture(t)
+	worker := registerHTTPWorker(t, fixture, workerA, "factory", "github.com/example/factory", 1)
+	time.Sleep(2 * time.Millisecond)
+	response := fixture.request(
+		http.MethodPut, "/api/v1/workers/"+worker.ID+"/heartbeat",
+		"application/json", fixture.server.URL, "{}",
+	)
+	requireStatus(t, response, http.StatusOK)
+	updated := decodeResponse[protocol.Worker](t, response)
+	if !updated.LastHeartbeat.After(worker.LastHeartbeat) || updated.Capacity != worker.Capacity ||
+		updated.Runtime != worker.Runtime || len(updated.Repositories) != len(worker.Repositories) {
+		t.Fatalf("worker heartbeat changed registration = %#v; before %#v", updated, worker)
 	}
 }
 

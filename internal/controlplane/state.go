@@ -73,11 +73,10 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 	}
 
 	var capacity, healthy int
-	var runtime string
 	var lastHeartbeat int64
 	err = tx.QueryRowContext(ctx, `
-		SELECT capacity, health = 'healthy', last_heartbeat, runtime FROM workers WHERE id = ?
-	`, workerID).Scan(&capacity, &healthy, &lastHeartbeat, &runtime)
+		SELECT capacity, health = 'healthy', last_heartbeat FROM workers WHERE id = ?
+	`, workerID).Scan(&capacity, &healthy, &lastHeartbeat)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -109,7 +108,20 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		JOIN worker_repositories wr
 		  ON wr.worker_id = e.assigned_worker_id AND wr.repository_id = t.repository_id
 		WHERE e.assigned_worker_id = ?
-		  AND e.required_runtime = ?
+		  AND EXISTS (
+		      SELECT 1
+		      FROM workers claim_worker, json_each(claim_worker.capabilities_json) capability
+		      WHERE claim_worker.id = ?
+		        AND json_extract(capability.value, '$.kind') = 'runtime'
+		        AND json_extract(capability.value, '$.name') = e.required_runtime
+		        AND json_extract(capability.value, '$.status') = 'ready'
+		      UNION ALL
+		      SELECT 1
+		      FROM workers legacy_worker
+		      WHERE legacy_worker.id = ?
+		        AND json_array_length(legacy_worker.capabilities_json) = 0
+		        AND legacy_worker.runtime = e.required_runtime
+		  )
 		  AND e.state = 'queued'
 		  AND wr.advertised = 1
 		  AND wr.retained_count + (
@@ -132,7 +144,7 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		  ) < ?
 		ORDER BY e.created_at, e.id
 		LIMIT 1
-	`, workerID, runtime, protocol.MaxRetainedPerRepo).Scan(&executionID)
+	`, workerID, workerID, workerID, protocol.MaxRetainedPerRepo).Scan(&executionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := insertEmptyClaim(ctx, tx, workerID, input.RequestID, digest, nowMillis); err != nil {
 			return nil, err
@@ -225,7 +237,7 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 	}
 	row = s.db.QueryRowContext(ctx, `
 		SELECT t.id, t.request_key, t.title, t.description, t.repository_id, t.timeout_seconds,
-		       e.assigned_worker_id, e.state, t.created_at
+		       e.assigned_worker_id, e.required_runtime, e.state, t.created_at
 		FROM tasks t JOIN executions e ON e.task_id = t.id WHERE t.id = ?
 	`, claim.Execution.TaskID)
 	claim.Task, err = scanTask(row, true)
@@ -603,13 +615,18 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 		return protocol.TaskDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
-	var taskID, state, workerID, repositoryID string
+	var taskID, state, workerID, repositoryID, requiredRuntime, workerRuntime string
+	var encodedCapabilities []byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT execution.task_id, execution.state, execution.assigned_worker_id, task.repository_id
+		SELECT execution.task_id, execution.state, execution.assigned_worker_id, task.repository_id,
+		       execution.required_runtime, worker.runtime, worker.capabilities_json
 		FROM executions execution
 		JOIN tasks task ON task.id = execution.task_id
+		JOIN workers worker ON worker.id = execution.assigned_worker_id
 		WHERE execution.id = ?
-	`, executionID).Scan(&taskID, &state, &workerID, &repositoryID)
+	`, executionID).Scan(
+		&taskID, &state, &workerID, &repositoryID, &requiredRuntime, &workerRuntime, &encodedCapabilities,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.TaskDetail{}, ErrNotFound
 	}
@@ -618,6 +635,18 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 	}
 	if state != "failed" && state != "cancelled" {
 		return protocol.TaskDetail{}, conflict("retry_not_allowed", "only a failed or cancelled execution can be retried")
+	}
+	var capabilities []protocol.Capability
+	if err := json.Unmarshal(encodedCapabilities, &capabilities); err != nil {
+		return protocol.TaskDetail{}, unavailable(err)
+	}
+	runtimeReady := workerRuntime == requiredRuntime
+	if len(capabilities) != 0 {
+		runtimeReady = runtimeCapabilityReady(capabilities, requiredRuntime)
+	}
+	if !runtimeReady {
+		return protocol.TaskDetail{}, conflict(
+			"retry_runtime_unavailable", "the frozen runtime is no longer ready on the assigned worker")
 	}
 	var dynamic, advertised int
 	if err := tx.QueryRowContext(ctx, `
