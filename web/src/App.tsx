@@ -13,6 +13,7 @@ import { WorkersView, WorkerDetail } from "./Workers";
 import { WorkView } from "./Work";
 import { WorkflowDetail, WorkflowsView } from "./Workflows";
 import { AutomationDetail, AutomationsView } from "./Automations";
+import { DefinitionDetail, DefinitionsView } from "./Definitions";
 
 type Route =
   | { page: "overview" }
@@ -22,6 +23,8 @@ type Route =
   | { page: "task"; id: string }
   | { page: "worker"; id: string }
   | { page: "repository"; id: string }
+  | { page: "definitions"; archived?: boolean }
+  | { page: "definition"; id: string; archived?: boolean }
   | { page: "workflows" }
   | { page: "workflow"; id: string }
   | { page: "automations" }
@@ -29,8 +32,11 @@ type Route =
 
 function readRoute(): Route {
   const parts = window.location.pathname.split("/").filter(Boolean);
+  const archived = new URLSearchParams(window.location.search).get("archived") === "true";
   if (parts[0] === "tasks" && parts[1]) return { page: "task", id: parts[1] };
   if (parts[0] === "workers" && parts[1]) return { page: "worker", id: parts[1] };
+  if (parts[0] === "definitions" && parts[1]) return { page: "definition", id: parts[1], archived };
+  if (parts[0] === "definitions") return { page: "definitions", archived };
   if (parts[0] === "workflows" && parts[1]) return { page: "workflow", id: parts[1] };
   if (parts[0] === "workflows") return { page: "workflows" };
   if (parts[0] === "automations" && parts[1]) return { page: "automation", id: parts[1] };
@@ -45,6 +51,8 @@ function readRoute(): Route {
 function routePath(route: Route): string {
   if (route.page === "task") return `/tasks/${route.id}`;
   if (route.page === "worker") return `/workers/${route.id}`;
+  if (route.page === "definition") return `/definitions/${route.id}${route.archived ? "?archived=true" : ""}`;
+  if (route.page === "definitions") return `/definitions${route.archived ? "?archived=true" : ""}`;
   if (route.page === "workflow") return `/workflows/${route.id}`;
   if (route.page === "workflows") return "/workflows";
   if (route.page === "automation") return `/automations/${route.id}`;
@@ -174,6 +182,13 @@ export function App() {
             <ListChecks size={17} /> Work
           </button>
           <button
+            className={`nav-item ${route.page === "definitions" || route.page === "definition" ? "active" : ""}`}
+            aria-current={route.page === "definitions" ? "page" : undefined}
+            onClick={() => navigate({ page: "definitions" })}
+          >
+            <BookOpenText size={17} /> Definitions
+          </button>
+          <button
             className={`nav-item ${route.page === "workflows" || route.page === "workflow" ? "active" : ""}`}
             aria-current={route.page === "workflows" ? "page" : undefined}
             onClick={() => navigate({ page: "workflows" })}
@@ -226,6 +241,8 @@ export function App() {
 			{route.page === "worker" && "Runner detail"}
             {route.page === "repositories" && "Repositories"}
             {route.page === "repository" && "Repository detail"}
+            {route.page === "definitions" && "Definitions"}
+            {route.page === "definition" && "Definition detail"}
             {route.page === "workflows" && "Runbooks"}
             {route.page === "workflow" && "Runbook detail"}
             {route.page === "automations" && "Automations"}
@@ -303,6 +320,21 @@ export function App() {
             <RepositoryDetail
               id={route.id}
               onBack={() => navigate({ page: "repositories" })}
+            />
+          )}
+          {route.page === "definitions" && (
+            <DefinitionsView
+              key={route.archived ? "archived" : "active"}
+              archived={Boolean(route.archived)}
+              onArchivedChange={(archived) => navigate({ page: "definitions", archived })}
+              onDefinition={(id) => navigate({ page: "definition", id, archived: route.archived })}
+            />
+          )}
+          {route.page === "definition" && (
+            <DefinitionDetail
+              id={route.id}
+              onBack={() => navigate({ page: "definitions", archived: route.archived })}
+              onStateChanged={() => navigate({ page: "definitions" })}
             />
           )}
           {route.page === "workflows" && (

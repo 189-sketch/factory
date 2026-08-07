@@ -257,6 +257,185 @@ describe("App", () => {
     })).toBe(true);
   });
 
+  it("creates, edits, and archives a shared Definition without revision controls", async () => {
+    const fetch = mockControlPlane();
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: /^Definitions$/ }));
+    expect(await screen.findByRole("heading", { name: "Definitions" })).toBeVisible();
+    await user.click(screen.getAllByRole("button", { name: "Create Definition" })[0]);
+    const create = screen.getByRole("dialog", { name: "Create Definition" });
+    await user.type(within(create).getByLabelText("Name"), "Find important bugs");
+    await user.type(within(create).getByLabelText("Agent prompt"), "Inspect the repository and report confirmed bugs.");
+    await user.selectOptions(within(create).getByLabelText("Agent runtime"), "pi");
+    await user.clear(within(create).getByLabelText("Required tools"));
+    await user.type(within(create).getByLabelText("Required tools"), "git, gh");
+    await user.type(within(create).getByLabelText("Optional inputs"), "severity=high");
+    expect(within(create).queryByText(/revision/i)).not.toBeInTheDocument();
+    await user.click(within(create).getByRole("button", { name: "Create Definition" }));
+
+    expect(await screen.findByRole("heading", { name: "Find important bugs" })).toBeVisible();
+    expect(screen.getByText("Inspect the repository and report confirmed bugs.", { selector: ".long-copy" })).toBeVisible();
+    expect(screen.getByText("Pi", { selector: "dd" })).toBeVisible();
+    expect(screen.getByText("severity", { selector: "dt" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Edit Definition" }));
+    const edit = screen.getByRole("dialog", { name: "Edit Definition" });
+    const prompt = within(edit).getByLabelText("Agent prompt");
+    await user.clear(prompt);
+    await user.type(prompt, "Inspect the repository and open issues for confirmed bugs.");
+    await user.click(within(edit).getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Inspect the repository and open issues for confirmed bugs.", { selector: ".long-copy" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Archive" }));
+    await user.click(screen.getByRole("button", { name: "Archive Definition" }));
+    expect(await screen.findByText("No Definitions yet")).toBeVisible();
+    expect(fetch.mock.calls.some(([input, init]) => {
+      const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return path.endsWith("/archived") && init?.method === "PUT";
+    })).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "View archive" }));
+    expect(window.location.href).toContain("/definitions?archived=true");
+    await user.click(await screen.findByRole("button", { name: /Find important bugs/ }));
+    expect(window.location.href).toContain("/definitions/definition-created?archived=true");
+    expect(await screen.findByText("Archived", { selector: ".status-badge" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "All Definitions" }));
+    expect(window.location.href).toContain("/definitions?archived=true");
+    await user.click(await screen.findByRole("button", { name: /Find important bugs/ }));
+    await user.click(screen.getByRole("button", { name: "Restore Definition" }));
+    expect(window.location.pathname).toBe("/definitions");
+    expect(window.location.search).toBe("");
+    expect(await screen.findByRole("heading", { name: "Definitions" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: /Find important bugs/ })).toBeVisible();
+  });
+
+  it("keeps the edit generation frozen across a background refetch", async () => {
+    const fetch = mockControlPlane();
+    await globalThis.fetch("/api/v1/definitions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: "create-concurrency-definition",
+        name: "Concurrent Definition",
+        prompt: "Original prompt.",
+        runtime: "codex",
+        allowed_tools: ["git"],
+        timeout_seconds: 600,
+        inputs: {},
+      }),
+    });
+    window.history.replaceState({}, "", "/definitions/definition-created");
+    const { client } = renderApp();
+    const user = userEvent.setup();
+    expect(await screen.findByRole("heading", { name: "Concurrent Definition" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Edit Definition" }));
+    const edit = screen.getByRole("dialog", { name: "Edit Definition" });
+    const prompt = within(edit).getByLabelText("Agent prompt");
+    await user.clear(prompt);
+    await user.type(prompt, "Stale local prompt.");
+
+    await globalThis.fetch("/api/v1/definitions/definition-created", {
+      method: "PUT",
+      body: JSON.stringify({
+        request_key: "external-definition-edit",
+        expected_generation: 1,
+        name: "Concurrent Definition",
+        prompt: "Newer external prompt.",
+        runtime: "codex",
+        allowed_tools: ["git"],
+        timeout_seconds: 600,
+        inputs: {},
+      }),
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["definition", "definition-created"] });
+    });
+    await user.click(within(edit).getByRole("button", { name: "Save changes" }));
+    expect(await within(edit).findByText(/the Definition was edited by another request/)).toBeVisible();
+
+    const updates = fetch.mock.calls.filter(([input, init]) => {
+      const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return path === "/api/v1/definitions/definition-created" && init?.method === "PUT";
+    });
+    const submitted = JSON.parse(String(updates.at(-1)?.[1]?.body)) as { expected_generation: number };
+    expect(submitted.expected_generation).toBe(1);
+  });
+
+  it("drops loaded history when a head refresh changes archive membership", async () => {
+    window.history.replaceState({}, "", "/definitions");
+    mockControlPlane({ paginatedDefinitions: true });
+    const user = userEvent.setup();
+    const { client } = renderApp();
+
+    expect(await screen.findByText("Head Definition")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Load more Definitions" }));
+    expect(await screen.findByText("Historical Definition")).toBeVisible();
+
+    await globalThis.fetch("/api/v1/definitions/definition-history/archived", {
+      method: "PUT",
+      body: JSON.stringify({ archived: true, expected_generation: 1 }),
+    });
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["definitions", "active", "head"] });
+    });
+
+    await vi.waitFor(() => {
+      expect(screen.queryByText("Historical Definition")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Load more Definitions" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("rejects a stale page response after a cached Definitions remount", async () => {
+    window.history.replaceState({}, "", "/definitions");
+    let releaseHeadRefresh!: () => void;
+    let releaseHistory!: () => void;
+    const definitionHeadRefreshGate = new Promise<void>((resolve) => {
+      releaseHeadRefresh = resolve;
+    });
+    const definitionHistoryGate = new Promise<void>((resolve) => {
+      releaseHistory = resolve;
+    });
+    const fetch = mockControlPlane({
+      paginatedDefinitions: true,
+      definitionHeadRefreshGate,
+      definitionHistoryGate,
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(await screen.findByRole("button", { name: /Head Definition/ }));
+    await user.click(await screen.findByRole("button", { name: "All Definitions" }));
+    await vi.waitFor(() => {
+      const heads = fetch.mock.calls.filter(([input]) => {
+        const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        return path === "/api/v1/definitions?limit=200&archived=false";
+      });
+      expect(heads).toHaveLength(2);
+    });
+    await user.click(screen.getByRole("button", { name: "Load more Definitions" }));
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([input]) => {
+      const path = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return path.includes("cursor=definition-history");
+    })).toBe(true));
+
+    await globalThis.fetch("/api/v1/definitions/definition-history/archived", {
+      method: "PUT",
+      body: JSON.stringify({ archived: true, expected_generation: 1 }),
+    });
+    releaseHeadRefresh();
+    await vi.waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Load more Definitions" })).not.toBeInTheDocument();
+    });
+    releaseHistory();
+
+    await vi.waitFor(() => {
+      expect(screen.queryByText("Historical Definition")).not.toBeInTheDocument();
+      expect(screen.getByText("Head Definition")).toBeVisible();
+    });
+  });
+
   it("keeps runbook editor focus during background polling", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

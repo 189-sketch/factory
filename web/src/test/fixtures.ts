@@ -1,4 +1,4 @@
-import type { AutomationDetail, AutomationOccurrence, LegacyPollerMigration, ManagedRepository, MetricsSummary, Task, Worker, Workflow, WorkflowDetail } from "../types";
+import type { AutomationDetail, AutomationOccurrence, Definition, LegacyPollerMigration, ManagedRepository, MetricsSummary, Task, Worker, Workflow, WorkflowDetail } from "../types";
 import { vi } from "vitest";
 
 export const worker: Worker = {
@@ -176,6 +176,8 @@ export function mockControlPlane(
     eventFailuresAfter?: number;
     growingTaskHistory?: boolean;
     incrementalEvents?: boolean;
+    definitionHeadRefreshGate?: Promise<void>;
+    definitionHistoryGate?: Promise<void>;
     ledgerOnlyMigration?: boolean;
     automationRunWithoutTaskState?: "pending" | "failed" | "skipped" | "task_deleted";
     automationTaskState?: Task["state"];
@@ -183,6 +185,7 @@ export function mockControlPlane(
     paginatedAutomations?: boolean;
     paginatedAutomationOccurrences?: boolean;
     paginatedAutomationWorkflows?: boolean;
+    paginatedDefinitions?: boolean;
     paginatedTasks?: boolean;
     refreshesHistoricalWorkflow?: boolean;
     shiftingWorkflowBoundary?: boolean;
@@ -206,6 +209,7 @@ export function mockControlPlane(
   let runFailures = options.runFailures ?? 0;
   let eventRequests = 0;
   let taskHeadRequests = 0;
+  let definitionHeadRequests = 0;
   let workflowHeadRequests = 0;
   let terminalEventFailures = options.terminalEventFailures ?? 0;
   let taskDetailRequests = 0;
@@ -226,6 +230,34 @@ export function mockControlPlane(
     description: "Build and verify the real interface.",
   };
   let repositoryItems = managedRepositories.map((repository) => ({ ...repository }));
+  let definitionItems: Definition[] = options.paginatedDefinitions ? [
+    {
+      id: "definition-head",
+      name: "Head Definition",
+      prompt: "Inspect the current repository.",
+      runtime: "codex",
+      allowed_tools: ["git"],
+      timeout_seconds: 600,
+      inputs: {},
+      generation: 1,
+      archived: false,
+      created_at: "2026-08-06T10:00:00Z",
+      updated_at: "2026-08-06T10:00:00Z",
+    },
+    {
+      id: "definition-history",
+      name: "Historical Definition",
+      prompt: "Inspect an older repository.",
+      runtime: "codex",
+      allowed_tools: ["git"],
+      timeout_seconds: 600,
+      inputs: {},
+      generation: 1,
+      archived: false,
+      created_at: "2026-08-05T10:00:00Z",
+      updated_at: "2026-08-05T10:00:00Z",
+    },
+  ] : [];
   let workflowDetail = structuredClone(initialWorkflowDetail);
   let automationDetail = structuredClone(initialAutomationDetail);
   if (options.automationTaskState) {
@@ -387,6 +419,94 @@ export function mockControlPlane(
         const body = JSON.parse(String(init.body)) as { enabled: boolean };
         const updated = { ...existing, enabled: body.enabled, updated_at: new Date().toISOString() };
         repositoryItems = repositoryItems.map((item) => item.id === updated.id ? updated : item);
+        return Response.json(updated);
+      }
+      return Response.json(existing);
+    }
+    if (path.startsWith("/api/v1/definitions?")) {
+      const query = new URL(path, "http://factory.test").searchParams;
+      const archived = query.get("archived") === "true";
+      if (options.paginatedDefinitions && !archived) {
+        if (query.get("cursor") === "definition-history") {
+          const historicalDefinitions = definitionItems.filter((definition) =>
+            !definition.archived && definition.id === "definition-history"
+          );
+          await options.definitionHistoryGate;
+          return Response.json({
+            definitions: historicalDefinitions,
+            next_cursor: null,
+          });
+        }
+        definitionHeadRequests += 1;
+        if (definitionHeadRequests > 1) await options.definitionHeadRefreshGate;
+        const visible = definitionItems.filter((definition) => !definition.archived);
+        const hasHistory = visible.some((definition) => definition.id === "definition-history");
+        return Response.json({
+          definitions: visible.filter((definition) => definition.id === "definition-head"),
+          next_cursor: hasHistory ? "definition-history" : null,
+        });
+      }
+      const visible = definitionItems.filter((definition) => definition.archived === archived);
+      return Response.json({
+        definitions: visible,
+        next_cursor: null,
+      });
+    }
+    if (path === "/api/v1/definitions" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Omit<Definition, "id" | "generation" | "archived" | "created_at" | "updated_at">;
+      const now = new Date().toISOString();
+      const definition: Definition = {
+        ...body,
+        id: "definition-created",
+        generation: 1,
+        archived: false,
+        created_at: now,
+        updated_at: now,
+      };
+      definitionItems = [definition, ...definitionItems];
+      return Response.json(definition, { status: 201 });
+    }
+    if (path.startsWith("/api/v1/definitions/")) {
+      const parts = path.split("/");
+      const definitionID = parts[4];
+      const existing = definitionItems.find((definition) => definition.id === definitionID);
+      if (!existing) return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      if (parts[5] === "archived" && init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as { archived: boolean; expected_generation: number };
+        if (body.archived === existing.archived) return Response.json(existing);
+        if (body.expected_generation !== existing.generation) {
+          return Response.json(
+            { error: { code: "definition_generation_conflict", message: "the Definition was edited by another request" } },
+            { status: 409 },
+          );
+        }
+        const updated = {
+          ...existing,
+          archived: body.archived,
+          generation: existing.generation + 1,
+          updated_at: new Date().toISOString(),
+        };
+        definitionItems = definitionItems.map((definition) => definition.id === updated.id ? updated : definition);
+        return Response.json(updated);
+      }
+      if (init?.method === "PUT") {
+        const body = JSON.parse(String(init.body)) as Definition & { expected_generation: number };
+        if (body.expected_generation !== existing.generation) {
+          return Response.json(
+            { error: { code: "definition_generation_conflict", message: "the Definition was edited by another request" } },
+            { status: 409 },
+          );
+        }
+        const updated: Definition = {
+          ...existing,
+          ...body,
+          id: existing.id,
+          generation: existing.generation + 1,
+          archived: existing.archived,
+          created_at: existing.created_at,
+          updated_at: new Date().toISOString(),
+        };
+        definitionItems = definitionItems.map((definition) => definition.id === updated.id ? updated : definition);
         return Response.json(updated);
       }
       return Response.json(existing);
