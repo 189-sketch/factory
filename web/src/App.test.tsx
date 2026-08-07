@@ -436,6 +436,166 @@ describe("App", () => {
     });
   });
 
+  it("runs one shared Definition against one repository and tracks the Job", async () => {
+    mockControlPlane({ terminalRunCancellationFlag: true });
+    await globalThis.fetch("/api/v1/definitions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: "create-run-once-definition",
+        name: "Review repository",
+        prompt: "Review this repository and report confirmed bugs.",
+        runtime: "codex",
+        allowed_tools: ["git", "gh"],
+        timeout_seconds: 600,
+        inputs: {},
+      }),
+    });
+    window.history.replaceState({}, "", "/runs?new=true");
+    const user = userEvent.setup();
+    renderApp();
+
+    const dialog = await screen.findByRole("dialog", { name: "Run once" });
+    await user.selectOptions(within(dialog).getByLabelText("Definition"), "definition-created");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-managed");
+    await user.click(within(dialog).getByRole("button", { name: "Start Run" }));
+
+    expect(await screen.findByRole("heading", { name: "Review repository" })).toBeVisible();
+    expect(screen.getByText("github.com/example/managed")).toBeVisible();
+    expect(screen.getAllByText("Queued").length).toBeGreaterThan(0);
+    expect(screen.getByText("Review this repository and report confirmed bugs.", { selector: ".long-copy" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Cancel Job" }));
+    await user.click(screen.getByRole("button", { name: "Confirm cancel" }));
+    expect((await screen.findAllByText("Cancelled", { selector: ".status-badge" })).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Cancellation requested. The Runner will stop this Job on its next heartbeat.")).not.toBeInTheDocument();
+  });
+
+  it("submits per-Run Definition input overrides", async () => {
+    const fetch = mockControlPlane();
+    await globalThis.fetch("/api/v1/definitions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: "create-parameterized-definition",
+        name: "Parameterized review",
+        prompt: "Review {{scope}} at {{severity}} severity.",
+        runtime: "codex",
+        allowed_tools: ["git"],
+        timeout_seconds: 600,
+        inputs: { severity: "high", scope: "repository" },
+      }),
+    });
+    window.history.replaceState({}, "", "/runs?new=true");
+    const user = userEvent.setup();
+    renderApp();
+
+    const dialog = await screen.findByRole("dialog", { name: "Run once" });
+    await user.selectOptions(within(dialog).getByLabelText("Definition"), "definition-created");
+    expect(within(dialog).getByLabelText("severity")).toHaveValue("high");
+    expect(within(dialog).getByLabelText("scope")).toHaveValue("repository");
+    await user.clear(within(dialog).getByLabelText("severity"));
+    await user.type(within(dialog).getByLabelText("severity"), "critical");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-managed");
+    await user.click(within(dialog).getByRole("button", { name: "Start Run" }));
+
+    expect(await screen.findByRole("heading", { name: "Parameterized review" })).toBeVisible();
+    const request = fetch.mock.calls
+      .filter(([input, init]) => input === "/api/v1/runs" && init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)) as { parameters: Record<string, string> })
+      .at(-1);
+    expect(request?.parameters).toEqual({ severity: "critical", scope: "repository" });
+  });
+
+  it("shows pending cancellation and prevents duplicate Job cancellation", async () => {
+    mockControlPlane({ pendingRunCancellation: true });
+    await globalThis.fetch("/api/v1/definitions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: "create-cancellable-definition",
+        name: "Review active repository",
+        prompt: "Review this repository.",
+        runtime: "codex",
+        allowed_tools: ["git", "gh"],
+        timeout_seconds: 600,
+        inputs: {},
+      }),
+    });
+    window.history.replaceState({}, "", "/runs?new=true");
+    const user = userEvent.setup();
+    renderApp();
+
+    const dialog = await screen.findByRole("dialog", { name: "Run once" });
+    await user.selectOptions(within(dialog).getByLabelText("Definition"), "definition-created");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-managed");
+    await user.click(within(dialog).getByRole("button", { name: "Start Run" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel Job" }));
+    await user.click(screen.getByRole("button", { name: "Confirm cancel" }));
+
+    expect(await screen.findByText("Cancellation requested. The Runner will stop this Job on its next heartbeat.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Cancel Job" })).not.toBeInTheDocument();
+  });
+
+  it("loads every active Definition page in the Run once selector", async () => {
+    const fetch = mockControlPlane({ paginatedDefinitions: true });
+    window.history.replaceState({}, "", "/runs?new=true");
+    renderApp();
+
+    const dialog = await screen.findByRole("dialog", { name: "Run once" });
+    expect(await within(dialog).findByRole("option", { name: "Historical Definition" })).toBeVisible();
+    expect(fetch.mock.calls.some(([input]) =>
+      String(input).includes("cursor=definition-history")
+    )).toBe(true);
+  });
+
+  it("reuses the Run request key after a committed response is lost", async () => {
+    const fetch = mockControlPlane({ runCreateFailures: 1 });
+    await globalThis.fetch("/api/v1/definitions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_key: "create-replay-definition",
+        name: "Replay-safe review",
+        prompt: "Review this repository once.",
+        runtime: "codex",
+        allowed_tools: ["git"],
+        timeout_seconds: 600,
+        inputs: {},
+      }),
+    });
+    window.history.replaceState({}, "", "/runs?new=true");
+    const user = userEvent.setup();
+    renderApp();
+
+    const dialog = await screen.findByRole("dialog", { name: "Run once" });
+    await user.selectOptions(within(dialog).getByLabelText("Definition"), "definition-created");
+    await user.selectOptions(within(dialog).getByLabelText("Repository"), "repo-managed");
+    await user.click(within(dialog).getByRole("button", { name: "Start Run" }));
+    expect(await within(dialog).findByText(/connection lost after Run commit/)).toBeVisible();
+    await user.click(within(dialog).getByRole("button", { name: "Start Run" }));
+    expect(await screen.findByRole("heading", { name: "Replay-safe review" })).toBeVisible();
+
+    const requests = fetch.mock.calls
+      .filter(([input, init]) => input === "/api/v1/runs" && init?.method === "POST")
+      .map(([, init]) => JSON.parse(String(init?.body)) as { request_key: string });
+    expect(requests).toHaveLength(2);
+    expect(requests[0].request_key).toBe(requests[1].request_key);
+  });
+
+  it("loads older Runs through stable cursor pagination", async () => {
+    mockControlPlane({ paginatedRuns: true });
+    window.history.replaceState({}, "", "/runs");
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByText("Recent review")).toBeVisible();
+    expect(screen.queryByText("Older review")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load older Runs" }));
+
+    expect(await screen.findByText("Older review")).toBeVisible();
+    expect(screen.getByText("Recent review")).toBeVisible();
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) =>
+      String(input).includes("cursor=run-history")
+    )).toBe(true);
+  });
+
   it("keeps runbook editor focus during background polling", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

@@ -1,4 +1,4 @@
-import type { AutomationDetail, AutomationOccurrence, Definition, LegacyPollerMigration, ManagedRepository, MetricsSummary, Task, Worker, Workflow, WorkflowDetail } from "../types";
+import type { AutomationDetail, AutomationOccurrence, Definition, LegacyPollerMigration, ManagedRepository, MetricsSummary, Run, RunDetail, Task, Worker, Workflow, WorkflowDetail } from "../types";
 import { vi } from "vitest";
 
 export const worker: Worker = {
@@ -186,6 +186,9 @@ export function mockControlPlane(
     paginatedAutomationOccurrences?: boolean;
     paginatedAutomationWorkflows?: boolean;
     paginatedDefinitions?: boolean;
+    paginatedRuns?: boolean;
+    runCreateFailures?: number;
+    pendingRunCancellation?: boolean;
     paginatedTasks?: boolean;
     refreshesHistoricalWorkflow?: boolean;
     shiftingWorkflowBoundary?: boolean;
@@ -195,6 +198,7 @@ export function mockControlPlane(
     taskDetailFailuresAfter?: number;
     terminalEventFailures?: number;
     terminalTaskAfter?: number;
+    terminalRunCancellationFlag?: boolean;
     repositoryToggleFailure?: boolean;
     runFailures?: number;
     workflowHistoryGate?: Promise<void>;
@@ -207,6 +211,7 @@ export function mockControlPlane(
 ) {
   let createFailures = options.createFailures ?? 0;
   let runFailures = options.runFailures ?? 0;
+  let runCreateFailures = options.runCreateFailures ?? 0;
   let eventRequests = 0;
   let taskHeadRequests = 0;
   let definitionHeadRequests = 0;
@@ -258,6 +263,7 @@ export function mockControlPlane(
       updated_at: "2026-08-05T10:00:00Z",
     },
   ] : [];
+  let runDetails: RunDetail[] = [];
   let workflowDetail = structuredClone(initialWorkflowDetail);
   let automationDetail = structuredClone(initialAutomationDetail);
   if (options.automationTaskState) {
@@ -348,6 +354,13 @@ export function mockControlPlane(
     if (path.startsWith("/api/v1/metrics/summary?window=")) {
       const window = new URL(path, "http://factory.test").searchParams.get("window");
       return Response.json({ ...metrics, window });
+    }
+    if (path === "/api/v1/run-repositories") {
+      return Response.json({
+        repositories: repositoryItems
+          .filter((repository) => repository.enabled)
+          .map(({ id, remote_identity }) => ({ id, remote_identity })),
+      });
     }
     if (path === "/api/v1/repositories") {
       if (init?.method === "POST") {
@@ -510,6 +523,138 @@ export function mockControlPlane(
         return Response.json(updated);
       }
       return Response.json(existing);
+    }
+    if (path === "/api/v1/runs" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as {
+        request_key: string;
+        definition_id: string;
+        repository_id: string;
+        parameters?: Record<string, string>;
+      };
+      const replay = runDetails.find((detail) => detail.run.request_key === body.request_key);
+      if (replay) return Response.json(replay);
+      const definition = definitionItems.find((item) => item.id === body.definition_id);
+      const repository = repositoryItems.find((item) => item.id === body.repository_id);
+      if (!definition || !repository) {
+        return Response.json({ error: { code: "not_found", message: "Run input was not found" } }, { status: 404 });
+      }
+      const now = new Date().toISOString();
+      const detail: RunDetail = {
+        run: {
+          id: "run-created",
+          request_key: body.request_key,
+          source_kind: "manual",
+          definition: {
+            id: definition.id,
+            name: definition.name,
+            prompt: definition.prompt,
+            runtime: definition.runtime,
+            allowed_tools: definition.allowed_tools,
+            timeout_seconds: definition.timeout_seconds,
+            inputs: definition.inputs,
+            generation: definition.generation,
+          },
+          state: options.pendingRunCancellation ? "running" : "queued",
+          job_count: 1,
+          repository_remote_identities: [repository.remote_identity],
+          admitted_at: now,
+          updated_at: now,
+        },
+        parameters: { ...definition.inputs, ...body.parameters },
+        jobs: [{
+          job: {
+            id: "job-created",
+            run_id: "run-created",
+            repository_id: repository.id,
+            repository_remote_identity: repository.remote_identity,
+            task_id: "run-task-created",
+            execution_id: "run-execution-created",
+            assigned_worker_id: worker.id,
+            required_runtime: definition.runtime,
+            state: options.pendingRunCancellation ? "running" : "queued",
+            admitted_at: now,
+            retry_may_repeat_effects: false,
+            cancellation_requested: false,
+          },
+          attempts: null,
+          resolved_prompt: definition.prompt,
+        }],
+      };
+      runDetails = [detail, ...runDetails];
+      if (runCreateFailures > 0) {
+        runCreateFailures -= 1;
+        return Response.json(
+          { error: { code: "connection_lost", message: "connection lost after Run commit" } },
+          { status: 503 },
+        );
+      }
+      return Response.json(detail, { status: 201 });
+    }
+    if (path.startsWith("/api/v1/runs?")) {
+      if (options.paginatedRuns) {
+        const query = new URL(path, "http://factory.test").searchParams;
+        const makeRun = (id: string, name: string, admittedAt: string): Run => ({
+          id,
+          request_key: `request-${id}`,
+          source_kind: "manual",
+          definition: {
+            id: `definition-${id}`,
+            name,
+            prompt: "Inspect the configured repository.",
+            runtime: "codex",
+            allowed_tools: ["git"],
+            timeout_seconds: 600,
+            inputs: {},
+            generation: 1,
+          },
+          state: "succeeded",
+          job_count: 1,
+          repository_remote_identities: ["github.com/example/factory"],
+          admitted_at: admittedAt,
+          updated_at: admittedAt,
+        });
+        if (query.get("cursor") === "run-history") {
+          return Response.json({
+            runs: [makeRun("run-history", "Older review", "2026-08-05T10:00:00Z")],
+            next_cursor: null,
+          });
+        }
+        return Response.json({
+          runs: [makeRun("run-head", "Recent review", "2026-08-06T10:00:00Z")],
+          next_cursor: "run-history",
+        });
+      }
+      return Response.json({ runs: runDetails.map((detail) => detail.run), next_cursor: null });
+    }
+    if (path.startsWith("/api/v1/runs/")) {
+      const runID = path.split("/")[4];
+      const detail = runDetails.find((item) => item.run.id === runID);
+      return detail
+        ? Response.json(detail)
+        : Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+    }
+    if (path.startsWith("/api/v1/jobs/") && init?.method === "POST") {
+      const parts = path.split("/");
+      const jobID = parts[4];
+      const detail = runDetails.find((item) => item.jobs.some((job) => job.job.id === jobID));
+      if (!detail) return Response.json({ error: { code: "not_found", message: "not found" } }, { status: 404 });
+      const cancellationPending = parts[5] === "cancel" && Boolean(options.pendingRunCancellation);
+      const jobState = cancellationPending ? detail.jobs[0].job.state : parts[5] === "cancel" ? "cancelled" as const : "queued" as const;
+      const runState: Run["state"] = cancellationPending ? detail.run.state : parts[5] === "cancel" ? "cancelled" : "queued";
+      const updated: RunDetail = {
+        ...detail,
+        run: { ...detail.run, state: runState, updated_at: new Date().toISOString() },
+        jobs: detail.jobs.map((job) => job.job.id === jobID ? {
+          ...job,
+          job: {
+            ...job.job,
+            state: jobState,
+            cancellation_requested: cancellationPending || Boolean(options.terminalRunCancellationFlag),
+          },
+        } : job),
+      };
+      runDetails = runDetails.map((item) => item.run.id === updated.run.id ? updated : item);
+      return Response.json(updated);
     }
     if (path.startsWith("/api/v1/workflows?limit=200")) {
       const query = new URL(path, "http://factory.test").searchParams;

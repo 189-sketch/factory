@@ -99,12 +99,19 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		}
 		return nil, nil
 	}
+	if err := s.materializeBlockedJobForWorker(ctx, tx, workerID, nowMillis); err != nil {
+		return nil, err
+	}
+	if err := s.rerouteQueuedRunJobForWorker(ctx, tx, workerID, nowMillis); err != nil {
+		return nil, err
+	}
 
 	var executionID string
 	err = tx.QueryRowContext(ctx, `
 		SELECT e.id
 		FROM executions e
 		JOIN tasks t ON t.id = e.task_id
+		JOIN repositories repository ON repository.id = t.repository_id
 		JOIN worker_repositories wr
 		  ON wr.worker_id = e.assigned_worker_id AND wr.repository_id = t.repository_id
 		WHERE e.assigned_worker_id = ?
@@ -136,6 +143,11 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		  )
 		  AND e.state = 'queued'
 		  AND wr.advertised = 1
+		  AND (
+		      repository.centrally_managed = 0
+		      OR repository.enabled = 1
+		      OR NOT EXISTS (SELECT 1 FROM jobs job WHERE job.execution_id = e.id)
+		  )
 		  AND wr.retained_count + (
 		      SELECT COUNT(*)
 		      FROM attempts active_attempt
@@ -254,6 +266,12 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 	`, claim.Execution.TaskID)
 	claim.Task, err = scanTask(row, true)
 	if err != nil {
+		return claim, unavailable(err)
+	}
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, run_id FROM jobs WHERE task_id = ?
+	`, claim.Task.ID).Scan(&claim.JobID, &claim.RunID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return claim, unavailable(err)
 	}
 	err = s.db.QueryRowContext(ctx, `
@@ -598,12 +616,23 @@ func (s *Store) CancelTask(ctx context.Context, taskID string) (protocol.TaskDet
 	}
 	defer tx.Rollback()
 	var executionID, state string
-	err = tx.QueryRowContext(ctx, `SELECT id, state FROM executions WHERE task_id = ?`, taskID).Scan(&executionID, &state)
+	var runJob int
+	err = tx.QueryRowContext(ctx, `
+		SELECT execution.id, execution.state,
+		       EXISTS (SELECT 1 FROM jobs job WHERE job.task_id = execution.task_id)
+		FROM executions execution
+		WHERE execution.task_id = ?
+	`, taskID).Scan(&executionID, &state, &runJob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.TaskDetail{}, ErrNotFound
 	}
 	if err != nil {
 		return protocol.TaskDetail{}, unavailable(err)
+	}
+	if runJob != 0 {
+		return protocol.TaskDetail{}, conflict(
+			"cancel_not_allowed", "Run Job Tasks must be cancelled through the Job endpoint",
+		)
 	}
 	switch state {
 	case "queued":
@@ -628,25 +657,32 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 	}
 	defer tx.Rollback()
 	var taskID, state, workerID, repositoryID, requiredRuntime, workerRuntime string
+	var runJob int
 	var encodedCapabilities []byte
 	var encodedDefinitionSnapshot sql.NullString
 	err = tx.QueryRowContext(ctx, `
 		SELECT execution.task_id, execution.state, execution.assigned_worker_id, task.repository_id,
 		       execution.required_runtime, worker.runtime, worker.capabilities_json,
-		       task.definition_snapshot
+		       task.definition_snapshot,
+		       EXISTS (SELECT 1 FROM jobs job WHERE job.execution_id = execution.id)
 		FROM executions execution
 		JOIN tasks task ON task.id = execution.task_id
 		JOIN workers worker ON worker.id = execution.assigned_worker_id
 		WHERE execution.id = ?
 	`, executionID).Scan(
 		&taskID, &state, &workerID, &repositoryID, &requiredRuntime, &workerRuntime, &encodedCapabilities,
-		&encodedDefinitionSnapshot,
+		&encodedDefinitionSnapshot, &runJob,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.TaskDetail{}, ErrNotFound
 	}
 	if err != nil {
 		return protocol.TaskDetail{}, unavailable(err)
+	}
+	if runJob != 0 {
+		return protocol.TaskDetail{}, conflict(
+			"retry_not_allowed", "Run Job executions must be retried through the Job endpoint",
+		)
 	}
 	if state != "failed" && state != "cancelled" {
 		return protocol.TaskDetail{}, conflict("retry_not_allowed", "only a failed or cancelled execution can be retried")

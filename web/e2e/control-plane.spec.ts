@@ -105,14 +105,18 @@ async function createTask(
   );
 }
 
-async function claimAndStart(api: APIRequestContext, requestID: string) {
+async function claimAndStart(
+  api: APIRequestContext,
+  requestID: string,
+  workerID = workerOnline,
+) {
   const token = `lease-token-${requestID}-0123456789abcdef0123456789`;
   const claim = await json<{
     attempt: { id: string };
     execution: { id: string };
     task: { id: string };
   }>(
-    await api.post(`/api/v1/workers/${workerOnline}/claims`, {
+    await api.post(`/api/v1/workers/${workerID}/claims`, {
       data: { request_id: requestID, lease_token: token },
     }),
   );
@@ -152,7 +156,7 @@ async function waitForRealWorker(api: APIRequestContext) {
           id: string;
           health: string;
           online: boolean;
-          repositories: Array<{ id: string; key: string }>;
+          repositories: Array<{ id: string; key: string; remote_identity: string }>;
         }> | null;
       };
       const worker = body.workers?.find((candidate) => candidate.id === realWorker);
@@ -189,9 +193,11 @@ function observeBrowser(page: Page) {
 test.beforeAll(async () => {
   const api = await request.newContext({ baseURL: "http://127.0.0.1:17437" });
   const real = await waitForRealWorker(api);
-  identifiers.realFactoryRepository = real.repositories.find(
+  const realFactoryRepository = real.repositories.find(
     (repository) => repository.key === "factory-demo",
-  )!.id;
+  )!;
+  identifiers.realFactoryRepository = realFactoryRepository.id;
+  identifiers.realFactoryIdentity = realFactoryRepository.remote_identity;
   identifiers.realHandbookRepository = real.repositories.find(
     (repository) => repository.key === "handbook-demo",
   )!.id;
@@ -457,6 +463,55 @@ test("creates, edits, and archives one shared Definition", async ({ page }) => {
   browser.assertClean();
 });
 
+test("runs one shared Definition against one repository end to end", async ({ page }) => {
+  const browser = observeBrowser(page);
+  const api = await request.newContext({ baseURL: "http://127.0.0.1:17437" });
+  const definition = await json<{ id: string }>(
+    await api.post("/api/v1/definitions", {
+      data: {
+        request_key: "e2e-run-once-definition",
+        name: "E2E inspect one repository",
+        prompt: "Inspect this repository and create deterministic evidence.",
+        runtime: "codex",
+        allowed_tools: ["git", "gh"],
+        timeout_seconds: 1800,
+        inputs: {},
+      },
+    }),
+  );
+
+  await page.goto("/runs?new=true");
+  const dialog = page.getByRole("dialog", { name: "Run once" });
+  await dialog.getByLabel("Definition", { exact: true }).selectOption(definition.id);
+  await dialog.getByLabel("Repository", { exact: true }).selectOption(identifiers.realFactoryRepository);
+  await dialog.getByRole("button", { name: "Start Run" }).click();
+
+  await expect(page.getByRole("heading", { name: "E2E inspect one repository" })).toBeVisible();
+  await expect(page.getByText(identifiers.realFactoryIdentity, { exact: true })).toBeVisible();
+  await expect(page.getByText("Succeeded", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText("Completed by deterministic fake Codex.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Created deterministic worktree evidence.", { exact: false })).toBeVisible();
+
+  const runID = new URL(page.url()).pathname.split("/").at(-1)!;
+  const run = await json<{
+    run: { id: string; state: string; job_count: number };
+    jobs: Array<{
+      job: { state: string; repository_remote_identity: string; result: string };
+      attempts: Array<{ state: string; result: string }>;
+    }>;
+  }>(await api.get(`/api/v1/runs/${runID}`));
+  expect(run.run).toMatchObject({ id: runID, state: "succeeded", job_count: 1 });
+  expect(run.jobs).toHaveLength(1);
+  expect(run.jobs[0].job).toMatchObject({
+    state: "succeeded",
+    repository_remote_identity: identifiers.realFactoryIdentity,
+  });
+  expect(run.jobs[0].attempts).toHaveLength(1);
+  expect(run.jobs[0].attempts[0].result).toContain("Completed by deterministic fake Codex.");
+  await api.dispose();
+  browser.assertClean();
+});
+
 test("creates, pins, revises, and disables a reusable Workflow", async ({ page }) => {
   const browser = observeBrowser(page);
   await page.goto("/workflows");
@@ -633,6 +688,19 @@ test("confirms and deletes terminal task history", async ({ page }) => {
 
 test("shows worker capacity, current work, retained cleanup, and saves Workers", async ({ page }) => {
   const browser = observeBrowser(page);
+  const api = await request.newContext({ baseURL: "http://127.0.0.1:17437" });
+  const fixtureID = Date.now().toString();
+  await registerWorker(api, workerOnline, "Build Mac", onlineRepositories);
+  await createTask(
+    api,
+    `e2e-worker-current-${fixtureID}`,
+    "Implement the modern control-plane UI",
+    workerOnline,
+    identifiers.factoryRepository,
+  );
+  await claimAndStart(api, `claim-worker-current-${fixtureID}`);
+  await registerWorker(api, workerOnline, "Build Mac", onlineRepositories, 1);
+  await api.dispose();
   await page.goto("/workers");
   await expect(page.getByRole("heading", { name: "Execution capacity" })).toBeVisible();
   const workersNavigation = page.getByRole("button", { name: "Runners", exact: true });
@@ -709,14 +777,77 @@ test("confirms queued cancellation and explicitly retries a failure", async ({ p
 
 test("shows ordered progress and long task detail", async ({ page }) => {
   const browser = observeBrowser(page);
+  const api = await request.newContext({ baseURL: "http://127.0.0.1:17437" });
+  const fixtureID = Date.now().toString();
+  await registerWorker(
+    api,
+    automationWorker,
+    "Automation fixture",
+    [{
+      key: "automation-fixture",
+      remote_identity: "github.com/example/automation-fixture",
+      retained_count: 0,
+    }],
+  );
+  const running = await createTask(
+    api,
+    `e2e-progress-${fixtureID}`,
+    "Track ordered progress",
+    automationWorker,
+    identifiers.automationRepository,
+  );
+  const active = await claimAndStart(api, `claim-progress-${fixtureID}`, automationWorker);
+  const eventsResponse = await api.post(`/api/v1/attempts/${active.attempt.id}/events`, {
+    data: {
+      lease_token: active.token,
+      events: [
+        {
+          sequence: 0,
+          kind: "codex",
+          payload: {
+            type: "item.completed",
+            item: { type: "agent_message", text: "Inspected the control-plane contract." },
+          },
+        },
+        {
+          sequence: 1,
+          kind: "codex",
+          payload: {
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "npm test",
+              aggregated_output: "RAW_COMMAND_OUTPUT_SHOULD_NOT_RENDER",
+              exit_code: 0,
+            },
+          },
+        },
+        { sequence: 2, kind: "codex", payload: { type: "thread.started", thread_id: "thread-e2e" } },
+        { sequence: 3, kind: "check", payload: { summary: "Running browser verification." } },
+      ],
+    },
+  });
+  expect(eventsResponse.ok()).toBe(true);
+  await registerWorker(
+    api,
+    automationWorker,
+    "Automation fixture",
+    [{
+      key: "automation-fixture",
+      remote_identity: "github.com/example/automation-fixture",
+      retained_count: 0,
+    }],
+    1,
+  );
+  await api.dispose();
   const eventAfters: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname === `/api/v1/attempts/${identifiers.runningAttempt}/events`) {
+    if (url.pathname === `/api/v1/attempts/${active.attempt.id}/events`) {
       eventAfters.push(url.searchParams.get("after") ?? "");
     }
   });
-  await page.goto(`/tasks/${identifiers.runningTask}`);
+  await page.goto(`/tasks/${running.task.id}`);
   const workNavigation = page.getByRole("button", { name: "Work", exact: true });
   await expect(workNavigation).toHaveClass(/active/);
   await expect(workNavigation).not.toHaveAttribute("aria-current");

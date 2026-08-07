@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -54,6 +55,8 @@ type Store struct {
 	now                   func() time.Time
 	sweepEvery            time.Duration
 	beginLegacyResumeLink func(context.Context) (*sql.Tx, error)
+	runJobScanCursorMu    sync.Mutex
+	runJobScanCursors     map[runJobScanCursorKey]runJobScanCursor
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -2013,29 +2016,45 @@ func (s *Store) selectTaskRoute(
 	requiredRuntime string,
 	requiredTools []string,
 ) (taskRouteCandidate, error) {
-	return s.selectTaskRouteWithSourceRequirement(ctx, tx, route, now, true, workerID, requiredRuntime, requiredTools)
+	return s.selectTaskRouteWithSourceRequirement(ctx, tx, route, "", now, true, false, workerID, requiredRuntime, requiredTools)
 }
 
 func (s *Store) selectTaskRouteWithSourceRequirement(
 	ctx context.Context,
 	tx *sql.Tx,
 	route protocol.TaskRoute,
+	selectedRepositoryID string,
 	now int64,
 	requireSourceAccess bool,
+	allowStaticRepository bool,
 	workerID string,
 	requiredRuntime string,
 	requiredTools []string,
 ) (taskRouteCandidate, error) {
 	repositoryPredicate := "r.remote_identity = ?"
-	if route.SourceAccess.Provider == "github" && route.SourceAccess.Hostname == "github.com" {
+	repositoryLookup := route.RepositoryRemoteIdentity
+	if selectedRepositoryID != "" {
+		repositoryPredicate = "r.id = ?"
+		repositoryLookup = selectedRepositoryID
+	} else if route.SourceAccess.Provider == "github" && route.SourceAccess.Hostname == "github.com" {
 		repositoryPredicate = "lower(r.remote_identity) = lower(?)"
 	}
 	var repositoryID, repositoryIdentity string
+	var repositoryEnabled int
 	err := tx.QueryRowContext(ctx, `
-		SELECT r.id, r.remote_identity
+		SELECT r.id, r.remote_identity, r.enabled
 		FROM repositories r
-		WHERE `+repositoryPredicate+` AND r.enabled = 1
-	`, route.RepositoryRemoteIdentity).Scan(&repositoryID, &repositoryIdentity)
+		WHERE `+repositoryPredicate+`
+		  AND (
+		      r.enabled = 1
+		      OR (? = 1 AND EXISTS (
+		          SELECT 1 FROM worker_repositories available
+		          WHERE available.repository_id = r.id
+		            AND available.advertised = 1
+		            AND available.dynamic = 0
+		      ))
+		  )
+	`, repositoryLookup, allowStaticRepository).Scan(&repositoryID, &repositoryIdentity, &repositoryEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return taskRouteCandidate{}, conflict(
 			"repository_not_managed",
@@ -2045,6 +2064,12 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 	if err != nil {
 		return taskRouteCandidate{}, unavailable(err)
 	}
+	workerRepositoryIdentity := repositoryIdentity
+	if canonical, normalizeErr := normalizeManagedGitHubRemote(repositoryIdentity); normalizeErr == nil {
+		workerRepositoryIdentity = canonical
+	}
+	requireAdvertisedRepository := allowStaticRepository &&
+		(repositoryEnabled == 0 || route.SourceAccess.Provider != "github" || route.SourceAccess.Hostname != "github.com")
 	rows, err := tx.QueryContext(ctx, `
 		SELECT w.id, w.runtime, w.capabilities_json, w.capacity, w.active_count,
 		       w.source_access_json, COALESCE(wr.advertised, 0),
@@ -2059,6 +2084,7 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		WHERE w.health = 'healthy'
 		  AND w.last_heartbeat >= ?
 		  AND (? = '' OR w.id = ?)
+		  AND (? = 0 OR COALESCE(wr.advertised, 0) = 1)
 		  AND (
 		      COALESCE(wr.advertised, 0) = 1
 		      OR NOT EXISTS (
@@ -2114,7 +2140,8 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		  ) < ?
 		ORDER BY w.id
 	`, repositoryID, now-protocol.WorkerOnlineWindow.Milliseconds(), workerID, workerID,
-		repositoryIdentity, repositoryID,
+		requireAdvertisedRepository,
+		workerRepositoryIdentity, repositoryID,
 		repositoryID, protocol.MaxRepositoryCacheEntries,
 		repositoryID, repositoryID, protocol.MaxRetainedPerRepo)
 	if err != nil {
@@ -2156,7 +2183,8 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		if !toolCapabilitiesReady(capabilities, requiredTools) {
 			continue
 		}
-		if requireSourceAccess && !hasSourceAccess(access, route.SourceAccess) {
+		if requireSourceAccess && !(allowStaticRepository && candidate.repositoryAdvertised) &&
+			!hasSourceAccess(access, route.SourceAccess) {
 			continue
 		}
 		candidate.load = active + queued
@@ -2198,7 +2226,7 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 				advertised=1,
 				dynamic=1,
 				updated_at=excluded.updated_at
-		`, best.workerID, repositoryIdentity, repositoryID, repositoryIdentity, now); err != nil {
+		`, best.workerID, workerRepositoryIdentity, repositoryID, workerRepositoryIdentity, now); err != nil {
 			return taskRouteCandidate{}, unavailable(err)
 		}
 	}
@@ -2468,10 +2496,11 @@ func (s *Store) Tasks(ctx context.Context, request protocol.TaskPageRequest) (pr
 		SELECT t.id, t.request_key, t.title, t.repository_id, t.timeout_seconds,
 		       e.assigned_worker_id, e.required_runtime, e.state, t.created_at
 		FROM tasks t JOIN executions e ON e.task_id = t.id
+		WHERE NOT EXISTS (SELECT 1 FROM jobs job WHERE job.task_id = t.id)
 	`
 	args := make([]any, 0, 3)
 	if request.Cursor != nil {
-		query += ` WHERE (t.created_at < ? OR (t.created_at = ? AND t.id < ?))`
+		query += ` AND (t.created_at < ? OR (t.created_at = ? AND t.id < ?))`
 		args = append(args, request.Cursor.CreatedAtMillis, request.Cursor.CreatedAtMillis, request.Cursor.ID)
 	}
 	query += ` ORDER BY t.created_at DESC, t.id DESC LIMIT ?`
@@ -2628,14 +2657,21 @@ func (s *Store) DeleteTask(ctx context.Context, taskID string) error {
 	defer tx.Rollback()
 
 	var executionID, state string
+	var runJob int
 	err = tx.QueryRowContext(ctx, `
-		SELECT id, state FROM executions WHERE task_id = ?
-	`, taskID).Scan(&executionID, &state)
+		SELECT execution.id, execution.state,
+		       EXISTS (SELECT 1 FROM jobs job WHERE job.task_id = execution.task_id)
+		FROM executions execution
+		WHERE execution.task_id = ?
+	`, taskID).Scan(&executionID, &state, &runJob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return unavailable(err)
+	}
+	if runJob != 0 {
+		return conflict("task_delete_not_allowed", "Run Job Tasks cannot be deleted through the legacy Task endpoint")
 	}
 	if state != "succeeded" && state != "failed" && state != "cancelled" {
 		return conflict("task_not_terminal", "only terminal task history can be deleted")
