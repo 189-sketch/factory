@@ -608,11 +608,15 @@ func validateDefinitionScheduleDependencies(
 
 func validateGitHubWebhookRepository(ctx context.Context, tx *sql.Tx, repositoryID string) error {
 	var identity string
-	if err := tx.QueryRowContext(ctx, `SELECT remote_identity FROM repositories WHERE id = ?`, repositoryID).Scan(&identity); err != nil {
+	var enabled bool
+	if err := tx.QueryRowContext(ctx, `SELECT remote_identity, enabled FROM repositories WHERE id = ?`, repositoryID).Scan(&identity, &enabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return invalid("repository_not_found", "repository was not found")
 		}
 		return unavailable(err)
+	}
+	if !enabled {
+		return conflict("repository_disabled", "enable the selected repository before using it for GitHub webhooks")
 	}
 	parts := strings.Split(strings.ToLower(strings.Trim(identity, "/")), "/")
 	if len(parts) != 3 || parts[0] != "github.com" || parts[1] == "" || parts[2] == "" {
@@ -1273,6 +1277,12 @@ func (s *Store) setAutomationEnabled(
 			var repositoryIDs []string
 			if triggerType == protocol.AutomationTriggerGitHubWebhook {
 				repositoryIDs = []string{repositoryID}
+				if err := validateGitHubWebhookRepository(ctx, tx, repositoryID); err != nil {
+					return protocol.AutomationDetail{}, "", err
+				}
+				if err := validateGitHubWebhookDefinition(ctx, tx, definitionID); err != nil {
+					return protocol.AutomationDetail{}, "", err
+				}
 			} else {
 				rows, err := tx.QueryContext(ctx, `
 					SELECT repository_id FROM automation_schedule_repositories
@@ -1301,14 +1311,6 @@ func (s *Store) setAutomationEnabled(
 				ctx, tx, definitionID, repositoryIDs, parameters, true,
 			); err != nil {
 				return protocol.AutomationDetail{}, "", err
-			}
-			if triggerType == protocol.AutomationTriggerGitHubWebhook {
-				if err := validateGitHubWebhookRepository(ctx, tx, repositoryID); err != nil {
-					return protocol.AutomationDetail{}, "", err
-				}
-				if err := validateGitHubWebhookDefinition(ctx, tx, definitionID); err != nil {
-					return protocol.AutomationDetail{}, "", err
-				}
 			}
 		} else if err := validateAutomationDependencies(ctx, tx, workflowID.String, repositoryID, true); err != nil {
 			return protocol.AutomationDetail{}, "", err
