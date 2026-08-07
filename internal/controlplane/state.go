@@ -142,6 +142,22 @@ func (s *Store) Claim(ctx context.Context, workerID string, input protocol.Claim
 		      )
 		  )
 		  AND e.state = 'queued'
+		  AND (
+		      NOT EXISTS (SELECT 1 FROM jobs current_job WHERE current_job.execution_id = e.id)
+		      OR (
+		          SELECT COUNT(*)
+		          FROM jobs current_job
+		          JOIN jobs active_job ON active_job.run_id = current_job.run_id
+		          JOIN executions active_execution ON active_execution.id = active_job.execution_id
+		          WHERE current_job.execution_id = e.id
+		            AND active_execution.state IN ('preparing', 'running')
+		      ) < (
+		          SELECT run.concurrency_limit
+		          FROM jobs current_job
+		          JOIN runs run ON run.id = current_job.run_id
+		          WHERE current_job.execution_id = e.id
+		      )
+		  )
 		  AND wr.advertised = 1
 		  AND (
 		      repository.centrally_managed = 0
@@ -276,11 +292,17 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 	}
 	err = s.db.QueryRowContext(ctx, `
 		SELECT r.id, wr.display_key,
-		       COALESCE(NULLIF(wr.worker_remote_identity, ''), r.remote_identity),
+		       COALESCE(
+		           NULLIF(job.repository_identity, ''),
+		           NULLIF(wr.worker_remote_identity, ''),
+		           r.remote_identity
+		       ),
 		       wr.retained_count
-		FROM repositories r JOIN worker_repositories wr ON wr.repository_id = r.id
+		FROM repositories r
+		JOIN worker_repositories wr ON wr.repository_id = r.id
+		LEFT JOIN jobs job ON job.task_id = ?
 		WHERE r.id = ? AND wr.worker_id = ?
-	`, claim.Task.RepositoryID, claim.Attempt.WorkerID).Scan(
+	`, claim.Task.ID, claim.Task.RepositoryID, claim.Attempt.WorkerID).Scan(
 		&claim.Repository.ID, &claim.Repository.Key, &claim.Repository.RemoteIdentity, &claim.Repository.RetainedCount)
 	if err != nil {
 		return claim, unavailable(err)
@@ -686,6 +708,34 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 	}
 	if state != "failed" && state != "cancelled" {
 		return protocol.TaskDetail{}, conflict("retry_not_allowed", "only a failed or cancelled execution can be retried")
+	}
+	var runID string
+	var concurrencyLimit int
+	err = tx.QueryRowContext(ctx, `
+		SELECT job.run_id, run.concurrency_limit
+		FROM jobs job
+		JOIN runs run ON run.id = job.run_id
+		WHERE job.execution_id = ?
+	`, executionID).Scan(&runID, &concurrencyLimit)
+	if err == nil {
+		var activeJobs int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM jobs job
+			JOIN executions execution ON execution.id = job.execution_id
+			WHERE job.run_id = ?
+			  AND execution.state IN ('queued', 'preparing', 'running')
+		`, runID).Scan(&activeJobs); err != nil {
+			return protocol.TaskDetail{}, unavailable(err)
+		}
+		if activeJobs >= concurrencyLimit {
+			return protocol.TaskDetail{}, conflict(
+				"run_concurrency_full",
+				"retry this Job after another active Job in the Run reaches a terminal state",
+			)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return protocol.TaskDetail{}, unavailable(err)
 	}
 	var capabilities []protocol.Capability
 	if err := json.Unmarshal(encodedCapabilities, &capabilities); err != nil {

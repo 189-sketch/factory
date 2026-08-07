@@ -2,11 +2,14 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/owainlewis/factory/internal/protocol"
+	"github.com/owainlewis/factory/migrations"
 )
 
 func setupRunTest(
@@ -150,6 +153,446 @@ func TestRunOnceRoutesAStaticRepositoryOnlyToItsAdvertisingRunner(t *testing.T) 
 	}
 	if got := detail.Jobs[0].Job.AssignedWorkerID; got != staticWorker.ID {
 		t.Fatalf("assigned worker = %q; want advertising worker %q", got, staticWorker.ID)
+	}
+}
+
+func TestMultiRepositoryRunFansOutAtomicallyWithFrozenTargetsAndBoundedConcurrency(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "fleet-definition", "Review Fleet")
+	repositories := make([]protocol.ManagedRepository, 0, 4)
+	registrations := make([]protocol.RepositoryRegistration, 0, 4)
+	for _, name := range []string{"alpha", "bravo", "charlie", "delta"} {
+		repository := createManagedTestRepository(t, store, "github.com/example/"+name)
+		repositories = append(repositories, repository)
+		registrations = append(registrations, protocol.RepositoryRegistration{
+			Key: name, RemoteIdentity: repository.RemoteIdentity,
+		})
+	}
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", Runtime: protocol.RuntimeCodex, RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindTool, Name: "git", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindTool, Name: "gh", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+		},
+		Capacity: 4, Health: "healthy", Repositories: registrations,
+		SourceAccess: []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryIDs := []string{repositories[3].ID, repositories[1].ID, repositories[0].ID, repositories[2].ID}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "fleet-run", DefinitionID: definition.ID,
+		RepositoryIDs: repositoryIDs, ConcurrencyLimit: 2,
+	})
+	if err != nil || !created {
+		t.Fatalf("create fleet Run: created=%t err=%v", created, err)
+	}
+	if detail.Run.JobCount != 4 || detail.Run.ConcurrencyLimit != 2 || len(detail.Jobs) != 4 {
+		t.Fatalf("fleet Run summary = %#v", detail.Run)
+	}
+	states := map[string]int{}
+	identities := map[string]bool{}
+	for _, job := range detail.Jobs {
+		states[job.Job.State]++
+		identities[job.Job.RepositoryRemoteIdentity] = true
+	}
+	if states["queued"] != 2 || states["blocked"] != 2 || len(identities) != 4 {
+		t.Fatalf("fleet Jobs states=%#v identities=%#v", states, identities)
+	}
+
+	replayed, replayCreated, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "fleet-run", DefinitionID: definition.ID,
+		RepositoryIDs:    []string{repositories[2].ID, repositories[0].ID, repositories[1].ID, repositories[3].ID},
+		ConcurrencyLimit: 2,
+	})
+	if err != nil || replayCreated || replayed.Run.ID != detail.Run.ID {
+		t.Fatalf("order-independent replay: created=%t err=%v detail=%#v", replayCreated, err, replayed.Run)
+	}
+
+	if _, err := store.db.Exec(`UPDATE repositories SET remote_identity = 'github.com/example/renamed' WHERE id = ?`, repositories[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	frozen, err := store.Run(context.Background(), detail.Run.ID)
+	if err != nil || !containsString(frozen.Run.RepositoryRemoteIdentities, repositories[0].RemoteIdentity) ||
+		containsString(frozen.Run.RepositoryRemoteIdentities, "github.com/example/renamed") {
+		t.Fatalf("frozen repository targets: err=%v identities=%#v", err, frozen.Run.RepositoryRemoteIdentities)
+	}
+
+	first := claimTestTask(t, store, worker.ID, "fleet-first", tokenA)
+	if _, err := store.StartAttempt(context.Background(), first.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), first.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "failed", Error: "confirmed failure",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	third := claimTestTask(t, store, worker.ID, "fleet-third", tokenB)
+	progress, err := store.Run(context.Background(), detail.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states = map[string]int{}
+	for _, job := range progress.Jobs {
+		states[job.Job.State]++
+	}
+	if third.Task.ID == first.Task.ID || progress.Run.State != "running" ||
+		states["failed"] != 1 || states["preparing"] != 1 || states["queued"] != 2 || states["blocked"] != 0 {
+		t.Fatalf("partial failure progress: third=%#v Run=%#v states=%#v", third.Task, progress.Run, states)
+	}
+	var failedJobID string
+	for _, job := range progress.Jobs {
+		if job.Job.TaskID == first.Task.ID {
+			failedJobID = job.Job.ID
+			break
+		}
+	}
+	fourth := claimTestTask(t, store, worker.ID, "fleet-fourth", tokenA)
+	if fourth.Task.ID == first.Task.ID || fourth.Task.ID == third.Task.ID {
+		t.Fatalf("fourth claim repeated earlier Task: %#v", fourth.Task)
+	}
+	_, err = store.RetryJob(context.Background(), failedJobID)
+	assertErrorCode(t, err, "run_concurrency_full")
+	if _, err := store.StartAttempt(context.Background(), third.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenB, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), third.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenB, State: "succeeded", Result: "review complete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := store.RetryJob(context.Background(), failedJobID)
+	if err != nil || retried.Run.State != "running" {
+		t.Fatalf("retry after Run slot opens: err=%v Run=%#v", err, retried.Run)
+	}
+}
+
+func TestRunLoadsTwoHundredJobSummariesWithoutLiveRunnerMappings(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "large-fleet-definition", "Review Large Fleet")
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", Runtime: protocol.RuntimeCodex, RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindTool, Name: "git", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindTool, Name: "gh", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+		},
+		Capacity: 3, Health: "healthy", AcceptsManagedRepositories: true,
+		SourceAccess: []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryIDs := make([]string, 0, 200)
+	identities := make(map[string]bool, 200)
+	for index := 0; index < 200; index++ {
+		repository := createManagedTestRepository(t, store, fmt.Sprintf("github.com/example/fleet-%03d", index))
+		repositoryIDs = append(repositoryIDs, repository.ID)
+		identities[repository.RemoteIdentity] = true
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "large-fleet-run", DefinitionID: definition.ID,
+		RepositoryIDs: repositoryIDs, ConcurrencyLimit: 3,
+	})
+	if err != nil || !created || detail.Run.JobCount != 200 {
+		t.Fatalf("create 200-Job Run: created=%t err=%v summary=%#v", created, err, detail.Run)
+	}
+	if _, err := store.db.Exec(`DELETE FROM worker_repositories WHERE worker_id = ?`, worker.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Run(context.Background(), detail.Run.ID)
+	if err != nil || loaded.Run.JobCount != 200 || len(loaded.Jobs) != 200 {
+		t.Fatalf("load 200-Job Run without live Runner mappings: err=%v summary=%#v", err, loaded.Run)
+	}
+	for _, identity := range loaded.Run.RepositoryRemoteIdentities {
+		if !identities[identity] {
+			t.Fatalf("Run returned unknown repository identity %q", identity)
+		}
+		delete(identities, identity)
+	}
+	if len(identities) != 0 {
+		t.Fatalf("Run omitted %d frozen repository identities", len(identities))
+	}
+}
+
+func TestBlockedRunJobRoutesAndClaimsItsFrozenRepositoryIdentity(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "frozen-route-definition", "Review Frozen Targets")
+	firstRepository := createManagedTestRepository(t, store, "github.com/example/frozen-first")
+	secondRepository := createManagedTestRepository(t, store, "github.com/example/frozen-second")
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", Runtime: protocol.RuntimeCodex, RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindTool, Name: "git", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindTool, Name: "gh", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+		},
+		Capacity: 1, Health: "healthy",
+		Repositories: []protocol.RepositoryRegistration{
+			{Key: "frozen-first", RemoteIdentity: firstRepository.RemoteIdentity},
+			{Key: "frozen-second", RemoteIdentity: secondRepository.RemoteIdentity},
+		},
+		SourceAccess: []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "frozen-route-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{firstRepository.ID, secondRepository.ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Run: created=%t err=%v", created, err)
+	}
+	var blocked protocol.Job
+	for _, job := range detail.Jobs {
+		if job.Job.State == "blocked" {
+			blocked = job.Job
+		}
+	}
+	if blocked.ID == "" {
+		t.Fatalf("Run has no blocked Job: %#v", detail.Jobs)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE repositories SET remote_identity = 'github.com/example/renamed-after-admission' WHERE id = ?`,
+		blocked.RepositoryID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	first := claimTestTask(t, store, worker.ID, "frozen-route-first", tokenA)
+	if _, err := store.StartAttempt(context.Background(), first.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), first.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded", Result: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := claimTestTask(t, store, worker.ID, "frozen-route-second", tokenB)
+	if second.Repository.ID != blocked.RepositoryID || second.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
+		t.Fatalf("materialized claim repository = %#v; want ID %q and frozen identity %q",
+			second.Repository, blocked.RepositoryID, blocked.RepositoryRemoteIdentity)
+	}
+}
+
+func TestBlockedRunJobDynamicallyAcquiresItsFrozenRepositoryIdentity(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "dynamic-frozen-route-definition", "Review Managed Targets")
+	firstRepository := createManagedTestRepository(t, store, "github.com/example/dynamic-frozen-first")
+	secondRepository := createManagedTestRepository(t, store, "github.com/example/dynamic-frozen-second")
+	worker, err := store.RegisterWorker(context.Background(), workerA, protocol.WorkerRegistration{
+		Name: workerA, WorkerVersion: "test", Runtime: protocol.RuntimeCodex, RuntimeVersion: "codex-test",
+		Capabilities: []protocol.Capability{
+			{Kind: protocol.CapabilityKindTool, Name: "git", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindTool, Name: "gh", Status: protocol.CapabilityReady},
+			{Kind: protocol.CapabilityKindRuntime, Name: protocol.RuntimeCodex, Status: protocol.CapabilityReady},
+		},
+		Capacity: 1, Health: "healthy", AcceptsManagedRepositories: true,
+		SourceAccess: []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "dynamic-frozen-route-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{firstRepository.ID, secondRepository.ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Run: created=%t err=%v", created, err)
+	}
+	var blocked protocol.Job
+	for _, job := range detail.Jobs {
+		if job.Job.State == "blocked" {
+			blocked = job.Job
+		}
+	}
+	if blocked.ID == "" {
+		t.Fatalf("Run has no blocked Job: %#v", detail.Jobs)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE repositories SET remote_identity = 'github.com/example/dynamic-renamed-after-admission' WHERE id = ?`,
+		blocked.RepositoryID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	first := claimTestTask(t, store, worker.ID, "dynamic-frozen-first", tokenA)
+	if _, err := store.StartAttempt(context.Background(), first.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), first.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded", Result: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second := claimTestTask(t, store, worker.ID, "dynamic-frozen-second", tokenB)
+	if second.Repository.ID != blocked.RepositoryID || second.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
+		t.Fatalf("dynamic claim repository = %#v; want ID %q and frozen identity %q",
+			second.Repository, blocked.RepositoryID, blocked.RepositoryRemoteIdentity)
+	}
+	var dynamic int
+	var workerIdentity string
+	if err := store.db.QueryRow(`
+		SELECT dynamic, worker_remote_identity
+		FROM worker_repositories WHERE worker_id = ? AND repository_id = ?
+	`, worker.ID, blocked.RepositoryID).Scan(&dynamic, &workerIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if dynamic != 1 || workerIdentity != blocked.RepositoryRemoteIdentity {
+		t.Fatalf("dynamic reservation = dynamic %d identity %q; want 1 and %q",
+			dynamic, workerIdentity, blocked.RepositoryRemoteIdentity)
+	}
+}
+
+func TestMultiRepositoryRunRejectsAnyUnavailableTargetWithoutPartialAdmission(t *testing.T) {
+	store, definition, repository, _ := setupRunTest(t, true)
+	_, _, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "atomic-invalid-fleet", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repository.ID, "missing-repository"}, ConcurrencyLimit: 2,
+	})
+	assertErrorCode(t, err, "repository_not_available")
+	var runs, jobs int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runs`).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM jobs`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 0 || jobs != 0 {
+		t.Fatalf("partial admission created runs=%d jobs=%d", runs, jobs)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestMultiRepositoryMigrationPreservesLegacySingleRepositoryReplay(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/legacy-run.sqlite3"
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+		CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			applied_at INTEGER NOT NULL
+		)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &Store{db: database, now: time.Now}
+	names := []string{
+		"001_controlplane.sql", "002_attempt_capacity_handoff.sql", "003_task_list_pagination.sql",
+		"004_worker_runtime.sql", "005_metrics_indexes.sql", "006_execution_retries.sql",
+		"007_worker_source_access.sql", "008_managed_repositories.sql", "009_workflows.sql",
+		"010_github_issue_automations.sql", "011_github_pull_request_automations.sql",
+		"012_schedule_automations.sql", "013_legacy_poller_migration.sql",
+		"014_workflow_automation_titles.sql", "015_codex_weekly_limit.sql",
+		"016_worker_capacity.sql", "017_runner_capabilities.sql", "018_definitions.sql", "019_runs.sql",
+	}
+	for index, name := range names {
+		body, readErr := migrations.Files.ReadFile(name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		version := index + 1
+		if version == 13 || version == 16 || version == 17 {
+			if err := legacy.applyForeignKeyRebuildMigration(ctx, name, version, body); err != nil {
+				t.Fatalf("apply %s: %v", name, err)
+			}
+			continue
+		}
+		tx, beginErr := database.BeginTx(ctx, nil)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if _, err = tx.ExecContext(ctx, string(body)); err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, 0)`, version)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply %s: %v", name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := protocol.DefinitionSnapshot{
+		ID: "definition", Name: "Legacy review", Prompt: "Review the repository.",
+		Runtime: protocol.RuntimeCodex, AllowedTools: []string{"git"}, TimeoutSeconds: 600,
+		Inputs: map[string]string{"severity": "high"}, Generation: 1,
+	}
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, _, err := normalizeRunRequest(protocol.CreateRunRequest{
+		RequestKey: "legacy-replay", DefinitionID: snapshot.ID, RepositoryID: "repository",
+		Parameters: map[string]string{"severity": "high"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDigest, err := legacyRunRequestDigest(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO repositories(id, remote_identity, created_at, enabled, updated_at, centrally_managed)
+		VALUES ('repository', 'github.com/example/legacy', 1, 1, 1, 1);
+		INSERT INTO definitions(
+			id, name, name_key, prompt, runtime, allowed_tools, timeout_seconds,
+			inputs, generation, archived, created_at, updated_at
+		) VALUES ('definition', 'Legacy review', 'legacy review', 'Review the repository.',
+			'codex', '["git"]', 600, '{"severity":"high"}', 1, 0, 1, 1);
+		INSERT INTO runs(
+			id, request_key, request_digest, source_kind, definition_id,
+			definition_snapshot, parameters, admitted_at, updated_at
+		) VALUES ('run', 'legacy-replay', ?, 'manual', 'definition', ?,
+			'{"severity":"high"}', 1, 1);
+		INSERT INTO jobs(
+			id, run_id, repository_id, state, blocked_reason, admitted_at, updated_at
+		) VALUES ('job', 'run', 'repository', 'blocked', 'Waiting for a Runner.', 1, 1)
+	`, legacyDigest, snapshotJSON); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDatabaseMarker(path + ".v2-control-plane"); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade v19 database: %v", err)
+	}
+	defer upgraded.Close()
+	replayed, created, err := upgraded.CreateRun(ctx, protocol.CreateRunRequest{
+		RequestKey: "legacy-replay", DefinitionID: snapshot.ID, RepositoryID: "repository",
+		Parameters: map[string]string{"severity": "high"},
+	})
+	if err != nil || created || replayed.Run.ID != "run" || replayed.Run.ConcurrencyLimit != defaultRunConcurrency ||
+		len(replayed.Jobs) != 1 || replayed.Jobs[0].Job.RepositoryRemoteIdentity != "github.com/example/legacy" {
+		t.Fatalf("legacy Run replay after upgrade: created=%t err=%v detail=%#v", created, err, replayed)
 	}
 }
 
@@ -311,15 +754,23 @@ func TestRunHistoryUsesAStableCursorWithoutDroppingOlderRuns(t *testing.T) {
 	store, definition, repository, _ := setupRunTest(t, true)
 	fixed := time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 	store.now = func() time.Time { return fixed }
-	createdIDs := make(map[string]bool)
-	for _, requestKey := range []string{"run-page-a", "run-page-b", "run-page-c"} {
+	createdRuns := make(map[string]int)
+	for index, requestKey := range []string{"run-page-a", "run-page-b", "run-page-c"} {
+		concurrencyLimit := index + 1
 		detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
-			RequestKey: requestKey, DefinitionID: definition.ID, RepositoryID: repository.ID,
+			RequestKey: requestKey, DefinitionID: definition.ID,
+			RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: concurrencyLimit,
 		})
 		if err != nil || !created {
 			t.Fatalf("create paged Run %q: created=%t err=%v", requestKey, created, err)
 		}
-		createdIDs[detail.Run.ID] = true
+		createdRuns[detail.Run.ID] = concurrencyLimit
+	}
+	if _, err := store.db.Exec(
+		`UPDATE repositories SET remote_identity = 'github.com/example/renamed-after-run-history' WHERE id = ?`,
+		repository.ID,
+	); err != nil {
+		t.Fatal(err)
 	}
 	first, err := store.Runs(context.Background(), protocol.RunPageRequest{Limit: 2})
 	if err != nil || len(first.Runs) != 2 || first.NextCursor == nil {
@@ -335,9 +786,16 @@ func TestRunHistoryUsesAStableCursorWithoutDroppingOlderRuns(t *testing.T) {
 			t.Fatalf("Run %q appeared on more than one page", run.ID)
 		}
 		seen[run.ID] = true
+		if run.ConcurrencyLimit != createdRuns[run.ID] {
+			t.Fatalf("Run %q concurrency = %d, want %d", run.ID, run.ConcurrencyLimit, createdRuns[run.ID])
+		}
+		if len(run.RepositoryRemoteIdentities) != 1 || run.RepositoryRemoteIdentities[0] != repository.RemoteIdentity {
+			t.Fatalf("Run %q repositories = %#v, want frozen identity %q",
+				run.ID, run.RepositoryRemoteIdentities, repository.RemoteIdentity)
+		}
 	}
-	if len(seen) != len(createdIDs) {
-		t.Fatalf("paged Run IDs = %#v, want %#v", seen, createdIDs)
+	if len(seen) != len(createdRuns) {
+		t.Fatalf("paged Run IDs = %#v, want %#v", seen, createdRuns)
 	}
 }
 
@@ -407,6 +865,218 @@ func TestQueuedRunReroutesWhenItsAssignedRunnerGoesOffline(t *testing.T) {
 	rerouted, err := store.Run(context.Background(), detail.Run.ID)
 	if err != nil || rerouted.Jobs[0].Job.AssignedWorkerID != workerB || rerouted.Jobs[0].Job.State != "preparing" {
 		t.Fatalf("rerouted Run: err=%v detail=%#v", err, rerouted)
+	}
+}
+
+func TestOfflineQueuedRunJobDoesNotHoldItsConcurrencySlot(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	definition := createTestDefinition(t, store, "offline-slot-definition", "Review Available Target")
+	repositories := []protocol.ManagedRepository{
+		createManagedTestRepository(t, store, "github.com/example/offline-slot-a"),
+		createManagedTestRepository(t, store, "github.com/example/offline-slot-b"),
+	}
+	registrations := map[string]protocol.RepositoryRegistration{
+		workerA: {Key: "offline-slot-a", RemoteIdentity: repositories[0].RemoteIdentity},
+		workerB: {Key: "offline-slot-b", RemoteIdentity: repositories[1].RemoteIdentity},
+	}
+	for _, workerID := range []string{workerA, workerB} {
+		registerDefinitionWorker(t, store, workerID, registrations[workerID], protocol.CapabilityReady,
+			[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "offline-slot-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repositories[0].ID, repositories[1].ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Run: created=%t err=%v detail=%#v", created, err, detail)
+	}
+	var queued protocol.Job
+	for _, job := range detail.Jobs {
+		if job.Job.State == "queued" {
+			queued = job.Job
+		}
+	}
+	if queued.ID == "" {
+		t.Fatalf("Run has no queued Job: %#v", detail.Jobs)
+	}
+	offlineWorker := queued.AssignedWorkerID
+	availableWorker := workerA
+	if offlineWorker == workerA {
+		availableWorker = workerB
+	}
+
+	now = now.Add(protocol.WorkerOnlineWindow + time.Millisecond)
+	registerDefinitionWorker(t, store, availableWorker, registrations[availableWorker], protocol.CapabilityReady,
+		[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	active := claimTestTask(t, store, availableWorker, "available-slot-claim", tokenA)
+	if active.Execution.ID == queued.ExecutionID {
+		t.Fatalf("available Runner claimed offline Job execution %q", queued.ExecutionID)
+	}
+
+	registerDefinitionWorker(t, store, offlineWorker, registrations[offlineWorker], protocol.CapabilityReady,
+		[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	blocked, err := store.Claim(context.Background(), offlineWorker, protocol.ClaimRequest{
+		RequestID: "returned-runner-active-slot", LeaseToken: tokenB,
+	})
+	if err != nil || blocked != nil {
+		t.Fatalf("returned Runner bypassed active Run slot: claim=%#v err=%v", blocked, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), active.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), active.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded", Result: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed := claimTestTask(t, store, offlineWorker, "returned-runner-free-slot", tokenB)
+	if resumed.Execution.ID != queued.ExecutionID {
+		t.Fatalf("returned Runner claimed execution %q; want queued execution %q",
+			resumed.Execution.ID, queued.ExecutionID)
+	}
+}
+
+func TestUnclaimableQueuedRunJobDoesNotHoldItsConcurrencySlot(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "disabled-slot-definition", "Review Enabled Target")
+	repositories := []protocol.ManagedRepository{
+		createManagedTestRepository(t, store, "github.com/example/disabled-slot-a"),
+		createManagedTestRepository(t, store, "github.com/example/disabled-slot-b"),
+	}
+	registrations := map[string]protocol.RepositoryRegistration{
+		workerA: {Key: "disabled-slot-a", RemoteIdentity: repositories[0].RemoteIdentity},
+		workerB: {Key: "disabled-slot-b", RemoteIdentity: repositories[1].RemoteIdentity},
+	}
+	for _, workerID := range []string{workerA, workerB} {
+		registerDefinitionWorker(t, store, workerID, registrations[workerID], protocol.CapabilityReady,
+			[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "disabled-slot-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repositories[0].ID, repositories[1].ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Run: created=%t err=%v detail=%#v", created, err, detail)
+	}
+	var queued protocol.Job
+	for _, job := range detail.Jobs {
+		if job.Job.State == "queued" {
+			queued = job.Job
+		}
+	}
+	if queued.ID == "" {
+		t.Fatalf("Run has no queued Job: %#v", detail.Jobs)
+	}
+	if _, err := store.db.Exec(`UPDATE repositories SET enabled = 0 WHERE id = ?`, queued.RepositoryID); err != nil {
+		t.Fatal(err)
+	}
+	availableWorker := workerA
+	if queued.AssignedWorkerID == workerA {
+		availableWorker = workerB
+	}
+	claim := claimTestTask(t, store, availableWorker, "enabled-slot-claim", tokenA)
+	if claim.Execution.ID == queued.ExecutionID {
+		t.Fatalf("available Runner claimed disabled Job execution %q", queued.ExecutionID)
+	}
+	routed, err := store.Run(context.Background(), detail.Run.ID)
+	if err != nil || routed.Run.State != "running" {
+		t.Fatalf("Run did not progress past disabled queued Job: err=%v detail=%#v", err, routed)
+	}
+}
+
+func TestRetryIgnoresQueuedJobAssignedToAnOfflineRunner(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	definition := createTestDefinition(t, store, "offline-retry-definition", "Retry Available Target")
+	repositories := []protocol.ManagedRepository{
+		createManagedTestRepository(t, store, "github.com/example/offline-retry-a"),
+		createManagedTestRepository(t, store, "github.com/example/offline-retry-b"),
+	}
+	registrations := map[string]protocol.RepositoryRegistration{
+		workerA: {Key: "offline-retry-a", RemoteIdentity: repositories[0].RemoteIdentity},
+		workerB: {Key: "offline-retry-b", RemoteIdentity: repositories[1].RemoteIdentity},
+	}
+	for _, workerID := range []string{workerA, workerB} {
+		registerDefinitionWorker(t, store, workerID, registrations[workerID], protocol.CapabilityReady,
+			[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	}
+	detail, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "offline-retry-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repositories[0].ID, repositories[1].ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Run: created=%t err=%v detail=%#v", created, err, detail)
+	}
+	var first protocol.Job
+	for _, job := range detail.Jobs {
+		if job.Job.State == "queued" {
+			first = job.Job
+		}
+	}
+	if first.ID == "" {
+		t.Fatalf("Run has no queued Job: %#v", detail.Jobs)
+	}
+	failedWorker := first.AssignedWorkerID
+	queuedWorker := workerA
+	if failedWorker == workerA {
+		queuedWorker = workerB
+	}
+	claim := claimTestTask(t, store, failedWorker, "offline-retry-first", tokenA)
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "fake-agent",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "failed", Error: "confirmed failure",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.materializeBlockedJobForWorker(context.Background(), tx, queuedWorker, now.UnixMilli()); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Add(protocol.WorkerOnlineWindow + time.Millisecond)
+	registerDefinitionWorker(t, store, failedWorker, registrations[failedWorker], protocol.CapabilityReady,
+		[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	retried, err := store.RetryJob(context.Background(), first.ID)
+	if err != nil {
+		t.Fatalf("retry with offline queued sibling: %v", err)
+	}
+	var retryExecutionID string
+	for _, job := range retried.Jobs {
+		if job.Job.ID == first.ID {
+			retryExecutionID = job.Job.ExecutionID
+			if job.Job.State != "queued" {
+				t.Fatalf("retried Job state = %q; want queued", job.Job.State)
+			}
+		}
+	}
+	retryClaim := claimTestTask(t, store, failedWorker, "offline-retry-claim", tokenB)
+	if retryClaim.Execution.ID != retryExecutionID {
+		t.Fatalf("retry claim execution = %q; want %q", retryClaim.Execution.ID, retryExecutionID)
+	}
+
+	registerDefinitionWorker(t, store, queuedWorker, registrations[queuedWorker], protocol.CapabilityReady,
+		[]protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	blocked, err := store.Claim(context.Background(), queuedWorker, protocol.ClaimRequest{
+		RequestID: "offline-sibling-returned", LeaseToken: tokenA,
+	})
+	if err != nil || blocked != nil {
+		t.Fatalf("returned sibling Runner exceeded retry concurrency: claim=%#v err=%v", blocked, err)
 	}
 }
 

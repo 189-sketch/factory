@@ -2053,7 +2053,7 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 		            AND available.advertised = 1
 		            AND available.dynamic = 0
 		      ))
-		  )
+			  )
 	`, repositoryLookup, allowStaticRepository).Scan(&repositoryID, &repositoryIdentity, &repositoryEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return taskRouteCandidate{}, conflict(
@@ -2064,8 +2064,11 @@ func (s *Store) selectTaskRouteWithSourceRequirement(
 	if err != nil {
 		return taskRouteCandidate{}, unavailable(err)
 	}
-	workerRepositoryIdentity := repositoryIdentity
-	if canonical, normalizeErr := normalizeManagedGitHubRemote(repositoryIdentity); normalizeErr == nil {
+	workerRepositoryIdentity := route.RepositoryRemoteIdentity
+	if workerRepositoryIdentity == "" {
+		workerRepositoryIdentity = repositoryIdentity
+	}
+	if canonical, normalizeErr := normalizeManagedGitHubRemote(workerRepositoryIdentity); normalizeErr == nil {
 		workerRepositoryIdentity = canonical
 	}
 	requireAdvertisedRepository := allowStaticRepository &&
