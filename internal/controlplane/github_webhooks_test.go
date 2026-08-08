@@ -328,6 +328,52 @@ func TestGitHubWebhookDeliveryIDRejectsDifferentPayload(t *testing.T) {
 	assertErrorCode(t, err, "delivery_id_conflict")
 }
 
+func TestGitHubWebhookFanoutEnforcesOccurrenceLimitAtomically(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "limited-webhook-definition", "Review pull request")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/limited-webhook")
+	var automationIDs []string
+	for index := 0; index < 2; index++ {
+		detail, _, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+			RequestKey: "limited-webhook-" + string(rune('a'+index)), Title: "Limited webhook " + string(rune('A'+index)),
+			DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
+			Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerGitHubWebhook, Actions: []string{"opened"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.SetAutomationEnabled(context.Background(), detail.Automation.ID, true, false); err != nil {
+			t.Fatal(err)
+		}
+		automationIDs = append(automationIDs, detail.Automation.ID)
+	}
+	originalLimit := maxGitHubWebhookOccurrences
+	maxGitHubWebhookOccurrences = 1
+	t.Cleanup(func() { maxGitHubWebhookOccurrences = originalLimit })
+	delivery := GitHubPullRequestWebhook{
+		DeliveryID: "limited-fanout", Action: "opened", RepositoryIdentity: repository.RemoteIdentity,
+		PullRequest: protocol.GitHubPullRequestMatch{
+			Number: 42, URL: "https://github.com/owainlewis/limited-webhook/pull/42",
+			BaseBranch: "main", HeadCommit: strings.Repeat("c", 40),
+		},
+	}
+	_, err := store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("limited fanout"))
+	assertErrorCode(t, err, "occurrence_limit_reached")
+	var deliveries, occurrences, matched int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM github_webhook_deliveries WHERE delivery_id = ?`, delivery.DeliveryID).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM automation_occurrences`).Scan(&occurrences); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT SUM(matched_count) FROM automations WHERE id IN (?, ?)`, automationIDs[0], automationIDs[1]).Scan(&matched); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 0 || occurrences != 0 || matched != 0 {
+		t.Fatalf("partial webhook admission: deliveries=%d occurrences=%d matched=%d", deliveries, occurrences, matched)
+	}
+}
+
 func webhookRequest(t *testing.T, serverURL string, body []byte, deliveryID, signature string) *http.Request {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, serverURL+"/api/v1/webhooks/github", bytes.NewReader(body))

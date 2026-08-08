@@ -12,6 +12,8 @@ import (
 	"github.com/owainlewis/factory/internal/protocol"
 )
 
+var maxGitHubWebhookOccurrences = protocol.MaxAutomationOccurrences
+
 type GitHubPullRequestWebhook struct {
 	DeliveryID         string
 	Action             string
@@ -110,6 +112,13 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 		}
 		if err := rows.Close(); err != nil {
 			return 0, unavailable(err)
+		}
+		var occurrenceCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_occurrences`).Scan(&occurrenceCount); err != nil {
+			return 0, unavailable(err)
+		}
+		if occurrenceCount+len(matches) > maxGitHubWebhookOccurrences {
+			return 0, conflict("occurrence_limit_reached", "the durable Occurrence limit has been reached")
 		}
 		for _, match := range matches {
 			definition, err := scanDefinition(tx.QueryRowContext(ctx, definitionSelect+` WHERE id = ?`, match.definitionID))
