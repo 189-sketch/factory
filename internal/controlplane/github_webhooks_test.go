@@ -114,7 +114,9 @@ func TestGitHubWebhookSignatureDispatchAndRedelivery(t *testing.T) {
 		run.Run.ObservedHeadCommit != strings.Repeat("a", 40) {
 		t.Fatalf("webhook Run identity = %#v", run.Run)
 	}
-	if !strings.Contains(run.Jobs[0].ResolvedPrompt, `"delivery_id":"delivery-232"`) ||
+	if !strings.Contains(run.Jobs[0].ResolvedPrompt, "Trusted Factory Run parameters:") ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"severity":"high"`) ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"delivery_id":"delivery-232"`) ||
 		!strings.Contains(run.Jobs[0].ResolvedPrompt, "Use authenticated gh CLI") {
 		t.Fatalf("webhook prompt = %q", run.Jobs[0].ResolvedPrompt)
 	}
