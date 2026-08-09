@@ -3,12 +3,16 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,20 +27,169 @@ type APIError struct {
 	Message string
 }
 
+type requestTransportError struct{ error }
+type retryableEnrollmentError struct{ error }
+
+func (err requestTransportError) Unwrap() error    { return err.error }
+func (err retryableEnrollmentError) Unwrap() error { return err.error }
+
 func (err *APIError) Error() string {
 	return fmt.Sprintf("control plane returned %d %s: %s", err.Status, err.Code, err.Message)
 }
 
 type client struct {
-	baseURL string
-	http    *http.Client
+	baseURL    string
+	http       *http.Client
+	credential string
+}
+
+type storedRunnerCredential struct {
+	Server     string `json:"server"`
+	Credential string `json:"credential"`
 }
 
 func newClient(server string, httpClient *http.Client) *client {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	return &client{baseURL: strings.TrimRight(server, "/"), http: httpClient}
+	safeClient := *httpClient
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client{baseURL: strings.TrimRight(server, "/"), http: &safeClient}
+}
+
+func (client *client) enroll(ctx context.Context, workerID, enrollmentToken, credentialPath string) error {
+	if !strings.HasPrefix(client.baseURL, "https://") {
+		return nil
+	}
+	pendingPath := credentialPath + ".pending"
+	if client.credential != "" {
+		err := os.Remove(pendingPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale pending Runner credential: %w", err)
+		}
+		if err == nil {
+			if err := syncDirectory(filepath.Dir(pendingPath)); err != nil {
+				return fmt.Errorf("sync Runner credential directory: %w", err)
+			}
+		}
+		return nil
+	}
+	if enrollmentToken == "" {
+		return errors.New("remote Runner requires enrollment_token until its credential has been saved")
+	}
+	credential, err := loadCredentialFile(pendingPath, client.baseURL)
+	if err != nil {
+		return err
+	}
+	if credential == "" {
+		body := make([]byte, 32)
+		if _, err := rand.Read(body); err != nil {
+			return fmt.Errorf("generate Runner credential: %w", err)
+		}
+		credential = "factory_runner_" + base64.RawURLEncoding.EncodeToString(body)
+		if err := writeCredentialFile(pendingPath, client.baseURL, credential); err != nil {
+			return err
+		}
+	}
+	var response protocol.RunnerCredential
+	_, err = client.requestWithoutCredential(ctx, http.MethodPost, "/api/v1/runner-enrollments/exchange",
+		protocol.ExchangeRunnerEnrollmentRequest{
+			WorkerID: workerID, EnrollmentToken: enrollmentToken, Credential: credential,
+		}, &response)
+	if err != nil {
+		wrapped := fmt.Errorf("enroll remote Runner: %w", err)
+		var apiError *APIError
+		var transportError requestTransportError
+		if errors.As(err, &transportError) || (errors.As(err, &apiError) && apiError.Status >= 500) {
+			return retryableEnrollmentError{error: wrapped}
+		}
+		return wrapped
+	}
+	if response.Credential != credential {
+		return errors.New("enroll remote Runner: server returned an invalid credential")
+	}
+	if err := writeCredentialFile(credentialPath, client.baseURL, credential); err != nil {
+		return err
+	}
+	client.credential = credential
+	if err := os.Remove(pendingPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove pending Runner credential: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(pendingPath)); err != nil {
+		return fmt.Errorf("sync Runner credential directory: %w", err)
+	}
+	return nil
+}
+
+func loadCredentialFile(path, server string) (string, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect Runner credential: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("Runner credential must be a regular non-symlink file readable only by its owner")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Runner credential: %w", err)
+	}
+	var stored storedRunnerCredential
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&stored); err != nil {
+		return "", errors.New("Runner credential is invalid")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return "", errors.New("Runner credential is invalid")
+	}
+	if stored.Server != strings.TrimRight(server, "/") {
+		return "", errors.New("Runner credential belongs to a different Factory server; remove runner-credential and enroll this identity explicitly")
+	}
+	credential := strings.TrimSpace(stored.Credential)
+	if credential == "" || len(credential) > 1024 || credential != stored.Credential {
+		return "", errors.New("Runner credential is invalid")
+	}
+	return credential, nil
+}
+
+func writeCredentialFile(path, server, credential string) error {
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("create temporary Runner credential: %w", err)
+	}
+	temporaryPath := file.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	writeErr := error(nil)
+	if err := json.NewEncoder(file).Encode(storedRunnerCredential{
+		Server: strings.TrimRight(server, "/"), Credential: credential,
+	}); err != nil {
+		writeErr = err
+	} else if err := file.Sync(); err != nil {
+		writeErr = err
+	}
+	if err := file.Close(); err != nil && writeErr == nil {
+		writeErr = err
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write Runner credential: %w", writeErr)
+	}
+	if err := os.Link(temporaryPath, path); err != nil {
+		return fmt.Errorf("install Runner credential: %w", err)
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return fmt.Errorf("remove temporary Runner credential: %w", err)
+	}
+	if err := syncDirectory(directory); err != nil {
+		return fmt.Errorf("sync Runner credential directory: %w", err)
+	}
+	return nil
 }
 
 func (client *client) register(ctx context.Context, workerID string, input protocol.WorkerRegistration) (protocol.Worker, error) {
@@ -170,6 +323,14 @@ func (client *client) retry(
 }
 
 func (client *client) request(ctx context.Context, method, path string, input any, output any) (int, error) {
+	return client.requestWithCredential(ctx, method, path, input, output, client.credential)
+}
+
+func (client *client) requestWithoutCredential(ctx context.Context, method, path string, input any, output any) (int, error) {
+	return client.requestWithCredential(ctx, method, path, input, output, "")
+}
+
+func (client *client) requestWithCredential(ctx context.Context, method, path string, input any, output any, credential string) (int, error) {
 	body, err := json.Marshal(input)
 	if err != nil {
 		return 0, fmt.Errorf("encode request: %w", err)
@@ -182,14 +343,17 @@ func (client *client) request(ctx context.Context, method, path string, input an
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	if credential != "" {
+		request.Header.Set("Authorization", "Bearer "+credential)
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("send request: %w", err)
+		return 0, requestTransportError{error: fmt.Errorf("send request: %w", err)}
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, protocol.MaxBodyBytes+1))
 	if err != nil {
-		return response.StatusCode, fmt.Errorf("read response: %w", err)
+		return response.StatusCode, requestTransportError{error: fmt.Errorf("read response: %w", err)}
 	}
 	if len(responseBody) > protocol.MaxBodyBytes {
 		return response.StatusCode, errors.New("control-plane response exceeds 1 MiB")
