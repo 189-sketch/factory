@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -251,6 +252,13 @@ func TestGitHubWebhookDispatchContinuesAfterOneAutomationFails(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE source_kind = 'webhook'`).Scan(&runCount); err != nil || runCount != 1 {
 		t.Fatalf("disabled redelivery Run count=%d err=%v", runCount, err)
 	}
+	var deliveryState string
+	if err := store.db.QueryRow(`SELECT state FROM github_webhook_deliveries WHERE delivery_id = ?`, delivery.DeliveryID).Scan(&deliveryState); err != nil {
+		t.Fatal(err)
+	}
+	if deliveryState != "failed" {
+		t.Fatalf("disabled redelivery state = %q", deliveryState)
+	}
 }
 
 func TestRestoringWebhookDefinitionPreservesDisabledRepositoryBlock(t *testing.T) {
@@ -433,6 +441,111 @@ func TestPendingGitHubWebhookOccurrenceRecoversAfterDispatchInterruption(t *test
 	}
 	if state != "dispatched" || runID == "" {
 		t.Fatalf("recovered occurrence state=%q run_id=%q", state, runID)
+	}
+}
+
+func TestGitHubWebhookBookkeepingRecoversAfterRunCommitAndRestart(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controlplane.sqlite3")
+	store, err := Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if store != nil {
+			_ = store.Close()
+		}
+	})
+	definition := createTestDefinition(t, store, "committed-run-recovery-definition", "Review pull request")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/committed-run-recovery")
+	registerDefinitionWorker(t, store, "committed-run-recovery-worker", protocol.RepositoryRegistration{
+		Key: "committed-run-recovery", RemoteIdentity: repository.RemoteIdentity,
+	}, protocol.CapabilityReady, []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	automation, _, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "committed-run-recovery-automation", Title: "Committed Run recovery",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerGitHubWebhook, Actions: []string{"opened"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAutomationEnabled(context.Background(), automation.Automation.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.afterGitHubWebhookRunCreate = cancel
+	delivery := GitHubPullRequestWebhook{
+		DeliveryID: "committed-run-recovery-delivery", Action: "opened", RepositoryIdentity: repository.RemoteIdentity,
+		PullRequest: protocol.GitHubPullRequestMatch{
+			Number: 15, URL: "https://github.com/owainlewis/committed-run-recovery/pull/15",
+			BaseBranch: "main", HeadCommit: strings.Repeat("f", 40),
+		},
+	}
+	if _, err := store.AcceptGitHubPullRequestWebhook(ctx, delivery, []byte("committed-run-recovery")); err == nil {
+		t.Fatal("dispatch interrupted after Run commit unexpectedly succeeded")
+	}
+	store.afterGitHubWebhookRunCreate = nil
+
+	var occurrenceID, occurrenceState, runID, deliveryState string
+	if err := store.db.QueryRow(`
+		SELECT occurrence.id, occurrence.state, webhook.run_id, delivery.state
+		FROM automation_occurrences occurrence
+		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+		JOIN github_webhook_deliveries delivery ON delivery.delivery_id = webhook.delivery_id
+		WHERE webhook.delivery_id = ?
+	`, delivery.DeliveryID).Scan(&occurrenceID, &occurrenceState, &runID, &deliveryState); err != nil {
+		t.Fatal(err)
+	}
+	if occurrenceState != "pending" || runID == "" || deliveryState != "accepted" {
+		t.Fatalf("interrupted bookkeeping: occurrence=%q run_id=%q delivery=%q", occurrenceState, runID, deliveryState)
+	}
+	var runCount, dispatchedCount int
+	var healthStatus string
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE request_key = ?`,
+		"automation:"+automation.Automation.ID+":webhook:"+delivery.DeliveryID).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT dispatched_count, health_status FROM automations WHERE id = ?`,
+		automation.Automation.ID).Scan(&dispatchedCount, &healthStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runCount != 1 || dispatchedCount != 0 || healthStatus != "pending" {
+		t.Fatalf("interrupted counters: runs=%d dispatched=%d health=%q", runCount, dispatchedCount, healthStatus)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = nil
+	reopened, err := Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store = reopened
+	if err := store.dispatchPendingOccurrences(context.Background(), 100); err != nil {
+		t.Fatal(err)
+	}
+	var recoveredRunID string
+	if err := store.db.QueryRow(`
+		SELECT occurrence.state, webhook.run_id, delivery.state
+		FROM automation_occurrences occurrence
+		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+		JOIN github_webhook_deliveries delivery ON delivery.delivery_id = webhook.delivery_id
+		WHERE occurrence.id = ?
+	`, occurrenceID).Scan(&occurrenceState, &recoveredRunID, &deliveryState); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE request_key = ?`,
+		"automation:"+automation.Automation.ID+":webhook:"+delivery.DeliveryID).Scan(&runCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT dispatched_count, health_status FROM automations WHERE id = ?`,
+		automation.Automation.ID).Scan(&dispatchedCount, &healthStatus); err != nil {
+		t.Fatal(err)
+	}
+	if occurrenceState != "dispatched" || recoveredRunID != runID || deliveryState != "completed" ||
+		runCount != 1 || dispatchedCount != 1 || healthStatus != "healthy" {
+		t.Fatalf("recovered bookkeeping: occurrence=%q run_id=%q delivery=%q runs=%d dispatched=%d health=%q",
+			occurrenceState, recoveredRunID, deliveryState, runCount, dispatchedCount, healthStatus)
 	}
 }
 

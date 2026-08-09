@@ -60,6 +60,7 @@ type Store struct {
 	automationDispatchMu        sync.Mutex
 	afterScheduleEnabledCheck   func()
 	afterGitHubWebhookAdmission func()
+	afterGitHubWebhookRunCreate func()
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {

@@ -31,6 +31,11 @@ type webhookOccurrenceAdmission struct {
 	Prompt       string
 }
 
+type webhookDispatchOutcome struct {
+	admission webhookOccurrenceAdmission
+	err       error
+}
+
 func (s *Store) AcceptGitHubPullRequestWebhook(
 	ctx context.Context,
 	delivery GitHubPullRequestWebhook,
@@ -224,6 +229,20 @@ func (s *Store) dispatchGitHubWebhookOccurrence(ctx context.Context, occurrenceI
 }
 
 func (s *Store) dispatchGitHubWebhookOccurrences(ctx context.Context, deliveryID string) (int, error) {
+	// A failed occurrence becomes pending before another attempt so a process
+	// interruption during Run creation can always be recovered on startup.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE automation_occurrences SET state = 'pending', diagnostic = '', updated_at = ?
+		WHERE id IN (
+			SELECT occurrence.id
+			FROM automation_occurrences occurrence
+			JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+			JOIN automations automation ON automation.id = occurrence.automation_id
+			WHERE webhook.delivery_id = ? AND occurrence.state = 'failed' AND automation.enabled = 1
+		)
+	`, s.now().UnixMilli(), deliveryID); err != nil {
+		return 0, unavailable(err)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT occurrence.id, occurrence.automation_id, occurrence.repository_id,
 		       occurrence.resolved_prompt, occurrence.task_request_key,
@@ -231,7 +250,7 @@ func (s *Store) dispatchGitHubWebhookOccurrences(ctx context.Context, deliveryID
 		FROM automation_occurrences occurrence
 		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
 		JOIN automations automation ON automation.id = occurrence.automation_id
-		WHERE webhook.delivery_id = ? AND occurrence.state IN ('pending', 'failed')
+		WHERE webhook.delivery_id = ? AND occurrence.state = 'pending'
 		  AND automation.enabled = 1
 		ORDER BY occurrence.id
 	`, deliveryID)
@@ -262,7 +281,7 @@ func (s *Store) dispatchGitHubWebhookOccurrences(ctx context.Context, deliveryID
 	if err := rows.Close(); err != nil {
 		return 0, unavailable(err)
 	}
-	dispatched := 0
+	outcomes := make([]webhookDispatchOutcome, 0, len(admissions))
 	var firstDispatchError error
 	for _, admission := range admissions {
 		_, _, err := s.createWebhookRun(ctx, protocol.CreateRunRequest{
@@ -270,53 +289,87 @@ func (s *Store) dispatchGitHubWebhookOccurrences(ctx context.Context, deliveryID
 			DefinitionID: admission.DefinitionID, RepositoryIDs: []string{admission.RepositoryID},
 			ConcurrencyLimit: 1, Parameters: admission.Parameters,
 		}, admission.Snapshot, admission.Prompt, admission.ID)
-		now := s.now().UnixMilli()
+		outcomes = append(outcomes, webhookDispatchOutcome{admission: admission, err: err})
+		if err != nil && firstDispatchError == nil {
+			firstDispatchError = err
+		}
+	}
+	if s.afterGitHubWebhookRunCreate != nil {
+		s.afterGitHubWebhookRunCreate()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, unavailable(err)
+	}
+	defer tx.Rollback()
+	now := s.now().UnixMilli()
+	dispatched := 0
+	for _, outcome := range outcomes {
+		state := "dispatched"
+		diagnostic := ""
+		if outcome.err != nil {
+			state = "failed"
+			diagnostic = truncateAutomationDiagnostic(outcome.err.Error())
+		}
+		result, err := tx.ExecContext(ctx, `
+			UPDATE automation_occurrences SET state = ?, diagnostic = ?, updated_at = ?
+			WHERE id = ? AND state = 'pending'
+		`, state, diagnostic, now, outcome.admission.ID)
 		if err != nil {
-			diagnostic := truncateAutomationDiagnostic(err.Error())
-			_, _ = s.db.ExecContext(ctx, `
-				UPDATE automation_occurrences SET state = 'failed', diagnostic = ?, updated_at = ? WHERE id = ?;
-			`, diagnostic, now, admission.ID)
-			_, _ = s.db.ExecContext(ctx, `
+			return 0, unavailable(err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return 0, unavailable(err)
+		}
+		if changed != 1 {
+			return 0, unavailable(errors.New("webhook occurrence changed during dispatch"))
+		}
+		if outcome.err != nil {
+			if _, err := tx.ExecContext(ctx, `
 				UPDATE automations SET health_status = 'error', health_code = 'webhook_dispatch_failed',
 				    health_message = ?, updated_at = ? WHERE id = ?
-			`, diagnostic, now, admission.AutomationID)
-			_, _ = s.db.ExecContext(ctx, `UPDATE github_webhook_deliveries SET state = 'failed', diagnostic = ?, updated_at = ? WHERE delivery_id = ?`, diagnostic, now, deliveryID)
-			if firstDispatchError == nil {
-				firstDispatchError = err
+			`, diagnostic, now, outcome.admission.AutomationID); err != nil {
+				return 0, unavailable(err)
 			}
 			continue
 		}
-		result, err := s.db.ExecContext(ctx, `
-			UPDATE automation_occurrences SET state = 'dispatched', diagnostic = '', updated_at = ?
-			WHERE id = ? AND state IN ('pending', 'failed')
-		`, now, admission.ID)
-		if err != nil {
-			return dispatched, unavailable(err)
-		}
-		changed, _ := result.RowsAffected()
-		if changed == 1 {
-			dispatched++
-			_, _ = s.db.ExecContext(ctx, `UPDATE automations SET dispatched_count = dispatched_count + 1,
-				health_status = 'healthy', health_code = '', health_message = 'Latest webhook started a Run.', updated_at = ? WHERE id = ?`, now, admission.AutomationID)
+		dispatched++
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE automations SET dispatched_count = dispatched_count + 1,
+			    health_status = 'healthy', health_code = '',
+			    health_message = 'Latest webhook started a Run.', updated_at = ?
+			WHERE id = ?
+		`, now, outcome.admission.AutomationID); err != nil {
+			return 0, unavailable(err)
 		}
 	}
-	now := s.now().UnixMilli()
-	var failed int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM automation_occurrences occurrence
+	var failed, pending int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE occurrence.state = 'failed'),
+			COUNT(*) FILTER (WHERE occurrence.state = 'pending')
+		FROM automation_occurrences occurrence
 		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
-		WHERE webhook.delivery_id = ? AND occurrence.state = 'failed'
-	`, deliveryID).Scan(&failed); err != nil {
-		return dispatched, unavailable(err)
+		WHERE webhook.delivery_id = ?
+	`, deliveryID).Scan(&failed, &pending); err != nil {
+		return 0, unavailable(err)
 	}
 	state := "completed"
 	diagnostic := ""
 	if failed > 0 {
 		state = "failed"
 		diagnostic = "one or more matching Automations could not start a Run"
+	} else if pending > 0 {
+		state = "accepted"
+		diagnostic = "one or more matching Automations are waiting to start a Run"
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE github_webhook_deliveries SET state = ?, diagnostic = ?, updated_at = ? WHERE delivery_id = ?`, state, diagnostic, now, deliveryID); err != nil {
-		return dispatched, unavailable(err)
+	if _, err := tx.ExecContext(ctx, `UPDATE github_webhook_deliveries SET state = ?, diagnostic = ?, updated_at = ? WHERE delivery_id = ?`, state, diagnostic, now, deliveryID); err != nil {
+		return 0, unavailable(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, unavailable(err)
 	}
 	if firstDispatchError != nil {
 		return dispatched, firstDispatchError
