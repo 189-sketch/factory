@@ -19,6 +19,15 @@ import (
 func TestGitHubWebhookSignatureDispatchAndRedelivery(t *testing.T) {
 	store := newTestStore(t)
 	definition := createTestDefinition(t, store, "webhook-definition", "Review pull request")
+	definition, _, err := store.UpdateDefinition(context.Background(), definition.ID, protocol.UpdateDefinitionRequest{
+		RequestKey: "webhook-definition-inputs", ExpectedGeneration: definition.Generation,
+		Name: definition.Name, Prompt: definition.Prompt, Runtime: definition.Runtime,
+		AllowedTools: definition.AllowedTools, TimeoutSeconds: definition.TimeoutSeconds,
+		Inputs: map[string]string{"audience": "maintainers", "severity": "high"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository := createManagedTestRepository(t, store, "github.com/owainlewis/factory")
 	registerDefinitionWorker(t, store, "webhook-worker", protocol.RepositoryRegistration{
 		Key: "factory", RemoteIdentity: repository.RemoteIdentity,
@@ -26,7 +35,7 @@ func TestGitHubWebhookSignatureDispatchAndRedelivery(t *testing.T) {
 	detail, created, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
 		RequestKey: "webhook-automation", Title: "Review incoming pull requests",
 		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
-		Parameters: map[string]string{"severity": "high"},
+		Parameters: map[string]string{"severity": "critical"},
 		Trigger: protocol.AutomationTrigger{
 			Type:    protocol.AutomationTriggerGitHubWebhook,
 			Actions: []string{"synchronize", "opened"},
@@ -115,7 +124,7 @@ func TestGitHubWebhookSignatureDispatchAndRedelivery(t *testing.T) {
 		t.Fatalf("webhook Run identity = %#v", run.Run)
 	}
 	if !strings.Contains(run.Jobs[0].ResolvedPrompt, "Trusted Factory Run parameters:") ||
-		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"severity":"high"`) ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `{"audience":"maintainers","severity":"critical"}`) ||
 		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"delivery_id":"delivery-232"`) ||
 		!strings.Contains(run.Jobs[0].ResolvedPrompt, "Use authenticated gh CLI") {
 		t.Fatalf("webhook prompt = %q", run.Jobs[0].ResolvedPrompt)

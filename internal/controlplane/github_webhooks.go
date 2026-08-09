@@ -130,9 +130,16 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 			if err != nil {
 				return 0, unavailable(err)
 			}
-			var parameters map[string]string
-			if err := json.Unmarshal(match.parametersJSON, &parameters); err != nil {
+			parameters := make(map[string]string, len(snapshot.Inputs))
+			for key, value := range snapshot.Inputs {
+				parameters[key] = value
+			}
+			var overrides map[string]string
+			if err := json.Unmarshal(match.parametersJSON, &overrides); err != nil {
 				return 0, unavailable(errors.New("stored webhook parameters are invalid"))
+			}
+			for key, value := range overrides {
+				parameters[key] = value
 			}
 			definitionPrompt, err := protocol.ResolveDefinitionPrompt(snapshot.Prompt, parameters)
 			if err != nil {
