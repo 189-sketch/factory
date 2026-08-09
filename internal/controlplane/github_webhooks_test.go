@@ -328,15 +328,112 @@ func TestEnablingWebhookRepositoryPreservesArchivedDefinitionBlock(t *testing.T)
 
 func TestGitHubWebhookDeliveryIDRejectsDifferentPayload(t *testing.T) {
 	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "conflict-webhook-definition", "Review pull request")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/factory")
+	registerDefinitionWorker(t, store, "conflict-webhook-worker", protocol.RepositoryRegistration{
+		Key: "factory", RemoteIdentity: repository.RemoteIdentity,
+	}, protocol.CapabilityReady, []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	automation, _, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "conflict-webhook-automation", Title: "Conflict webhook review",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerGitHubWebhook, Actions: []string{"opened"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAutomationEnabled(context.Background(), automation.Automation.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
 	delivery := GitHubPullRequestWebhook{
-		DeliveryID: "same-delivery", Action: "opened", RepositoryIdentity: "github.com/owainlewis/factory",
+		DeliveryID: "same-delivery", Action: "opened", RepositoryIdentity: repository.RemoteIdentity,
 		PullRequest: protocol.GitHubPullRequestMatch{Number: 1, URL: "https://github.com/owainlewis/factory/pull/1", BaseBranch: "main", HeadCommit: strings.Repeat("a", 40)},
 	}
 	if _, err := store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("first")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("different"))
+	_, err = store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("different"))
 	assertErrorCode(t, err, "delivery_id_conflict")
+}
+
+func TestGitHubWebhookDeliveryWithoutMatchIsNotRetained(t *testing.T) {
+	store := newTestStore(t)
+	delivery := GitHubPullRequestWebhook{
+		DeliveryID: "unmatched-delivery", Action: "opened", RepositoryIdentity: "github.com/owainlewis/unmatched",
+		PullRequest: protocol.GitHubPullRequestMatch{
+			Number: 12, URL: "https://github.com/owainlewis/unmatched/pull/12",
+			BaseBranch: "main", HeadCommit: strings.Repeat("d", 40),
+		},
+	}
+	if admitted, err := store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("unmatched")); err != nil || admitted != 0 {
+		t.Fatalf("unmatched delivery admitted=%d err=%v", admitted, err)
+	}
+	var deliveries int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM github_webhook_deliveries`).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 0 {
+		t.Fatalf("unmatched delivery count = %d", deliveries)
+	}
+}
+
+func TestPendingGitHubWebhookOccurrenceRecoversAfterDispatchInterruption(t *testing.T) {
+	store := newTestStore(t)
+	definition := createTestDefinition(t, store, "recovery-webhook-definition", "Review pull request")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/recovery")
+	registerDefinitionWorker(t, store, "recovery-webhook-worker", protocol.RepositoryRegistration{
+		Key: "recovery", RemoteIdentity: repository.RemoteIdentity,
+	}, protocol.CapabilityReady, []protocol.SourceAccess{{Provider: "github", Hostname: "github.com"}})
+	automation, _, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "recovery-webhook-automation", Title: "Recovery webhook review",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerGitHubWebhook, Actions: []string{"opened"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAutomationEnabled(context.Background(), automation.Automation.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.afterGitHubWebhookAdmission = cancel
+	delivery := GitHubPullRequestWebhook{
+		DeliveryID: "recovery-delivery", Action: "opened", RepositoryIdentity: repository.RemoteIdentity,
+		PullRequest: protocol.GitHubPullRequestMatch{
+			Number: 14, URL: "https://github.com/owainlewis/recovery/pull/14",
+			BaseBranch: "main", HeadCommit: strings.Repeat("e", 40),
+		},
+	}
+	if _, err := store.AcceptGitHubPullRequestWebhook(ctx, delivery, []byte("recovery")); err == nil {
+		t.Fatal("interrupted webhook dispatch unexpectedly succeeded")
+	}
+	store.afterGitHubWebhookAdmission = nil
+	var occurrenceID, state string
+	if err := store.db.QueryRow(`
+		SELECT occurrence.id, occurrence.state
+		FROM automation_occurrences occurrence
+		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+		WHERE webhook.delivery_id = ?
+	`, delivery.DeliveryID).Scan(&occurrenceID, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "pending" {
+		t.Fatalf("interrupted occurrence state = %q", state)
+	}
+	if err := store.dispatchPendingOccurrences(context.Background(), 100); err != nil {
+		t.Fatal(err)
+	}
+	var runID string
+	if err := store.db.QueryRow(`
+		SELECT occurrence.state, webhook.run_id
+		FROM automation_occurrences occurrence
+		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+		WHERE occurrence.id = ?
+	`, occurrenceID).Scan(&state, &runID); err != nil {
+		t.Fatal(err)
+	}
+	if state != "dispatched" || runID == "" {
+		t.Fatalf("recovered occurrence state=%q run_id=%q", state, runID)
+	}
 }
 
 func TestGitHubWebhookFanoutEnforcesOccurrenceLimitAtomically(t *testing.T) {

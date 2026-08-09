@@ -68,17 +68,6 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 	}
 	now := s.now().UnixMilli()
 	if firstDelivery {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO github_webhook_deliveries(
-				delivery_id, payload_digest, event, action, repository_identity,
-				pull_request_number, pull_request_url, pull_request_title,
-				base_branch, head_commit, state, created_at, updated_at
-			) VALUES (?, ?, 'pull_request', ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)
-		`, delivery.DeliveryID, payloadDigest[:], delivery.Action, delivery.RepositoryIdentity,
-			delivery.PullRequest.Number, delivery.PullRequest.URL, delivery.PullRequest.Title,
-			delivery.PullRequest.BaseBranch, delivery.PullRequest.HeadCommit, now, now); err != nil {
-			return 0, unavailable(err)
-		}
 		type matchingAutomation struct {
 			id, title, repositoryID, definitionID string
 			version                               int
@@ -113,12 +102,26 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 		if err := rows.Close(); err != nil {
 			return 0, unavailable(err)
 		}
+		if len(matches) == 0 {
+			return 0, nil
+		}
 		var occurrenceCount int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_occurrences`).Scan(&occurrenceCount); err != nil {
 			return 0, unavailable(err)
 		}
 		if occurrenceCount+len(matches) > maxGitHubWebhookOccurrences {
 			return 0, conflict("occurrence_limit_reached", "the durable Occurrence limit has been reached")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO github_webhook_deliveries(
+				delivery_id, payload_digest, event, action, repository_identity,
+				pull_request_number, pull_request_url, pull_request_title,
+				base_branch, head_commit, state, created_at, updated_at
+			) VALUES (?, ?, 'pull_request', ?, ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)
+		`, delivery.DeliveryID, payloadDigest[:], delivery.Action, delivery.RepositoryIdentity,
+			delivery.PullRequest.Number, delivery.PullRequest.URL, delivery.PullRequest.Title,
+			delivery.PullRequest.BaseBranch, delivery.PullRequest.HeadCommit, now, now); err != nil {
+			return 0, unavailable(err)
 		}
 		for _, match := range matches {
 			definition, err := scanDefinition(tx.QueryRowContext(ctx, definitionSelect+` WHERE id = ?`, match.definitionID))
@@ -189,7 +192,35 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 	if err := tx.Commit(); err != nil {
 		return 0, unavailable(err)
 	}
+	if s.afterGitHubWebhookAdmission != nil {
+		s.afterGitHubWebhookAdmission()
+	}
 	return s.dispatchGitHubWebhookOccurrences(ctx, delivery.DeliveryID)
+}
+
+func (s *Store) dispatchGitHubWebhookOccurrence(ctx context.Context, occurrenceID string) (bool, error) {
+	s.automationDispatchMu.Lock()
+	defer s.automationDispatchMu.Unlock()
+	var deliveryID string
+	var enabled int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT webhook.delivery_id, automation.enabled
+		FROM automation_occurrences occurrence
+		JOIN automation_github_webhook_occurrences webhook ON webhook.occurrence_id = occurrence.id
+		JOIN automations automation ON automation.id = occurrence.automation_id
+		WHERE occurrence.id = ? AND occurrence.state = 'pending'
+	`, occurrenceID).Scan(&deliveryID, &enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return true, unavailable(err)
+	}
+	if enabled == 0 {
+		return true, nil
+	}
+	_, err = s.dispatchGitHubWebhookOccurrences(ctx, deliveryID)
+	return true, err
 }
 
 func (s *Store) dispatchGitHubWebhookOccurrences(ctx context.Context, deliveryID string) (int, error) {

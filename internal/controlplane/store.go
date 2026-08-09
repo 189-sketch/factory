@@ -51,14 +51,15 @@ func invalid(code, message string) error {
 }
 
 type Store struct {
-	db                        *sql.DB
-	now                       func() time.Time
-	sweepEvery                time.Duration
-	beginLegacyResumeLink     func(context.Context) (*sql.Tx, error)
-	runJobScanCursorMu        sync.Mutex
-	runJobScanCursors         map[runJobScanCursorKey]runJobScanCursor
-	automationDispatchMu      sync.Mutex
-	afterScheduleEnabledCheck func()
+	db                          *sql.DB
+	now                         func() time.Time
+	sweepEvery                  time.Duration
+	beginLegacyResumeLink       func(context.Context) (*sql.Tx, error)
+	runJobScanCursorMu          sync.Mutex
+	runJobScanCursors           map[runJobScanCursorKey]runJobScanCursor
+	automationDispatchMu        sync.Mutex
+	afterScheduleEnabledCheck   func()
+	afterGitHubWebhookAdmission func()
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {

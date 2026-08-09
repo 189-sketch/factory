@@ -1272,7 +1272,11 @@ func (s *Store) hasDispatchableOccurrences(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) dispatchOccurrence(ctx context.Context, occurrenceID string) error {
-	handled, err := s.dispatchDefinitionScheduleOccurrence(ctx, occurrenceID)
+	handled, err := s.dispatchGitHubWebhookOccurrence(ctx, occurrenceID)
+	if handled {
+		return err
+	}
+	handled, err = s.dispatchDefinitionScheduleOccurrence(ctx, occurrenceID)
 	if handled {
 		return err
 	}
