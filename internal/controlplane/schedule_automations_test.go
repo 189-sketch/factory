@@ -557,6 +557,10 @@ func TestLegacyWorkflowScheduleCreateReplaySurvivesDefinitionScheduleMigration(t
 	`, value.Trigger.Cron, value.Trigger.Timezone); err != nil {
 		t.Fatal(err)
 	}
+	upgrade, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || upgrade.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", upgrade, err)
+	}
 	replayed, created, err := store.CreateAutomation(context.Background(), input)
 	if err != nil || created || replayed.Automation.ID != "legacy-schedule" {
 		t.Fatalf("legacy schedule replay: created=%t detail=%#v err=%v", created, replayed.Automation, err)

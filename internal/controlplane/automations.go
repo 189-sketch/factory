@@ -287,22 +287,20 @@ func (s *Store) replayLegacyScheduleAutomation(
 	input protocol.CreateAutomationRequest,
 ) (protocol.AutomationDetail, bool, error) {
 	requestKey := strings.TrimSpace(input.RequestKey)
-	var existingID, existingType, existingDefinitionID string
+	var existingID, existingType string
 	var existingDigest []byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT automation.id, automation.request_digest, automation.trigger_type,
-		       COALESCE(schedule.definition_id, '')
+		SELECT automation.id, automation.request_digest, automation.trigger_type
 		FROM automations automation
-		LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id
 		WHERE automation.request_key = ?
-	`, requestKey).Scan(&existingID, &existingDigest, &existingType, &existingDefinitionID)
+	`, requestKey).Scan(&existingID, &existingDigest, &existingType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.AutomationDetail{}, false, nil
 	}
 	if err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
-	if existingType != protocol.AutomationTriggerSchedule || existingDefinitionID != "" {
+	if existingType != protocol.AutomationTriggerSchedule {
 		return protocol.AutomationDetail{}, false, conflict("request_key_conflict", "request_key was already used for a different Automation")
 	}
 	value, _, err := normalizeAutomation(
