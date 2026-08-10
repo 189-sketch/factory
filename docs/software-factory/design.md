@@ -21,9 +21,9 @@ target, but it is not on the active roadmap.
 
 The built-in SQLite orchestration path remains the first-class V1 backend. A
 later production deployment may select Temporal or a similar durable workflow
-engine behind the same product model. Definitions and Runner behavior must not
-depend on that choice. The architecture decision, history migration, and
-same-Definition prototype remain tracked in
+engine behind the same product model. Definitions and the Runner-facing product
+contract must not depend on that choice. The architecture decision, history
+migration, and same-Definition prototype remain tracked in
 [#259](https://github.com/owainlewis/factory/issues/259); they are not part of
 this V1 implementation.
 
@@ -178,7 +178,9 @@ and recovery to Temporal. Factory remains the product and API boundary. The
 selected backend is an operational choice, not a Definition authoring choice.
 The detailed design must decide whether Runners continue to use Factory's
 lifecycle API or consume backend task queues directly while preserving
-outbound-only connections and the existing trust model.
+outbound-only connections and the existing trust model. Internal Runner
+transport and configuration may vary, but identity, capability, capacity,
+lifecycle, and trust semantics remain stable.
 
 ### Agent-owned GitHub work
 
