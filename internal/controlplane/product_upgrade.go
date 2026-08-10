@@ -17,6 +17,11 @@ const productUpgradeID = "definitions-runs-v1"
 
 const productUpgradePollingGuidance = "Retired during the V1 upgrade. Replace this poller with a scheduled Definition that uses gh, configure a GitHub webhook, or leave it retired."
 
+type productUpgradeQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func (s *Store) ProductUpgrade(ctx context.Context) (protocol.ProductUpgrade, error) {
 	var state string
 	var previewJSON, validationJSON []byte
@@ -27,7 +32,7 @@ func (s *Store) ProductUpgrade(ctx context.Context) (protocol.ProductUpgrade, er
 		FROM product_model_upgrades WHERE id = ?
 	`, productUpgradeID).Scan(&state, &previewJSON, &validationJSON, &createdAt, &updatedAt, &completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return s.previewProductUpgrade(ctx)
+		return s.previewProductUpgrade(ctx, s.db)
 	}
 	if err != nil {
 		return protocol.ProductUpgrade{}, unavailable(err)
@@ -66,7 +71,7 @@ func (s *Store) ProductUpgrade(ctx context.Context) (protocol.ProductUpgrade, er
 	return result, nil
 }
 
-func (s *Store) previewProductUpgrade(ctx context.Context) (protocol.ProductUpgrade, error) {
+func (s *Store) previewProductUpgrade(ctx context.Context, queryer productUpgradeQueryer) (protocol.ProductUpgrade, error) {
 	result := protocol.ProductUpgrade{
 		ID: productUpgradeID, State: "ready", LegacyReadOnly: false,
 		Schedules: []protocol.ProductUpgradeSchedule{},
@@ -87,16 +92,16 @@ func (s *Store) previewProductUpgrade(ctx context.Context) (protocol.ProductUpgr
 		{`SELECT COUNT(*) FROM automation_occurrences occurrence JOIN automations automation ON automation.id = occurrence.automation_id LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id WHERE occurrence.state = 'pending' AND (automation.trigger_type IN ('github_issue', 'github_pull_request') OR (automation.trigger_type = 'schedule' AND schedule.definition_id IS NULL))`, &counts.PendingOccurrences},
 	}
 	for _, item := range queries {
-		if err := s.db.QueryRowContext(ctx, item.query).Scan(item.value); err != nil {
+		if err := queryer.QueryRowContext(ctx, item.query).Scan(item.value); err != nil {
 			return result, unavailable(err)
 		}
 	}
-	active, err := s.countActiveLegacyExecutions(ctx, s.db)
+	active, err := s.countActiveLegacyExecutions(ctx, queryer)
 	if err != nil {
 		return result, err
 	}
 	counts.ActiveExecutions = active
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := queryer.QueryContext(ctx, `
 		SELECT automation.id, automation.title, automation.repository_id,
 		       schedule.cron, schedule.timezone, schedule.next_due_at, automation.enabled
 		FROM automations automation
@@ -124,7 +129,7 @@ func (s *Store) previewProductUpgrade(ctx context.Context) (protocol.ProductUpgr
 	if err := rows.Close(); err != nil {
 		return result, unavailable(err)
 	}
-	rows, err = s.db.QueryContext(ctx, `
+	rows, err = queryer.QueryContext(ctx, `
 		SELECT id, title, trigger_type FROM automations
 		WHERE trigger_type IN ('github_issue', 'github_pull_request')
 		ORDER BY created_at, id
@@ -178,8 +183,15 @@ func (s *Store) ApplyProductUpgrade(ctx context.Context, cancelActive bool) (pro
 		return current, nil
 	}
 	if current.State == "ready" {
-		if err := s.freezeLegacyProduct(ctx, current, cancelActive); err != nil {
+		if s.beforeProductUpgradeFreeze != nil {
+			s.beforeProductUpgradeFreeze()
+		}
+		frozen, err := s.freezeLegacyProduct(ctx, cancelActive)
+		if err != nil {
 			return protocol.ProductUpgrade{}, err
+		}
+		if !frozen {
+			return s.ProductUpgrade(ctx)
 		}
 		if s.afterProductUpgradeFreeze != nil {
 			s.afterProductUpgradeFreeze()
@@ -202,37 +214,44 @@ func (s *Store) ApplyProductUpgrade(ctx context.Context, cancelActive bool) (pro
 	return s.ProductUpgrade(ctx)
 }
 
-func (s *Store) freezeLegacyProduct(ctx context.Context, preview protocol.ProductUpgrade, cancelActive bool) error {
-	encoded, err := json.Marshal(preview)
-	if err != nil {
-		return unavailable(err)
-	}
+func (s *Store) freezeLegacyProduct(ctx context.Context, cancelActive bool) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	defer tx.Rollback()
+	preview, err := s.previewProductUpgrade(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if !preview.Needed {
+		return false, nil
+	}
+	encoded, err := json.Marshal(preview)
+	if err != nil {
+		return false, unavailable(err)
+	}
 	now := s.now().UnixMilli()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO product_model_upgrades(
 			id, state, cancel_active, preview_json, created_at, updated_at
 		) VALUES (?, 'draining', ?, ?, ?, ?)
 	`, productUpgradeID, boolInt(cancelActive), encoded, now, now); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	var unfinishedPollerImports int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_poller_migrations WHERE status != 'finalized'`).Scan(&unfinishedPollerImports); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if unfinishedPollerImports != 0 {
-		return conflict("legacy_poller_migration_active", "finalize the active legacy poller migration before upgrading Factory")
+		return false, conflict("legacy_poller_migration_active", "finalize the active legacy poller migration before upgrading Factory")
 	}
 	var definitionCount int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM definitions`).Scan(&definitionCount); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if definitionCount+preview.Counts.CompatibleSchedules > protocol.MaxDefinitions {
-		return conflict("definition_limit_reached", "archive Definitions or retire legacy schedules before upgrading Factory")
+		return false, conflict("definition_limit_reached", "archive Definitions or retire legacy schedules before upgrading Factory")
 	}
 	for _, schedule := range preview.Schedules {
 		_, nameKey, err := normalizeDefinitionMutation(normalizedDefinitionMutation{
@@ -242,15 +261,15 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, preview protocol.Produc
 			Inputs: map[string]string{},
 		})
 		if err != nil {
-			return err
+			return false, err
 		}
 		var conflictingID string
 		err = tx.QueryRowContext(ctx, `SELECT id FROM definitions WHERE name_key = ?`, nameKey).Scan(&conflictingID)
 		if err == nil {
-			return conflict("definition_name_conflict", "a Definition conflicts with migrated schedule "+schedule.AutomationID)
+			return false, conflict("definition_name_conflict", "a Definition conflicts with migrated schedule "+schedule.AutomationID)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return unavailable(err)
+			return false, unavailable(err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -266,13 +285,13 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, preview protocol.Produc
 		WHERE trigger_type IN ('github_issue', 'github_pull_request')
 		   OR id IN (SELECT automation_id FROM automation_schedule_triggers WHERE definition_id IS NULL)
 	`, productUpgradePollingGuidance, now); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE automation_schedule_triggers SET next_due_at = NULL
 		WHERE definition_id IS NULL
 	`); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE automation_occurrences
@@ -284,20 +303,20 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, preview protocol.Produc
 			   OR (automation.trigger_type = 'schedule' AND schedule.definition_id IS NULL)
 		)
 	`, now); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE workflows SET enabled = 0, updated_at = ? WHERE enabled = 1`, now); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
 	if cancelActive {
 		if err := cancelActiveLegacyExecutionsTx(ctx, tx, now); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return unavailable(err)
+		return false, unavailable(err)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Store) cancelActiveLegacyExecutions(ctx context.Context) error {

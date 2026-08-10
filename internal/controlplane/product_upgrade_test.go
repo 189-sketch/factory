@@ -291,6 +291,45 @@ func TestProductUpgradeRejectsDefinitionConflictBeforeFreeze(t *testing.T) {
 	}
 }
 
+func TestProductUpgradeRebuildsFrozenPreviewInsideTransaction(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "fresh-preview-workflow", "Fresh preview", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/fresh-preview")
+	scheduleID := insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, time.Now().UTC(), true)
+	const renamed = "Renamed at freeze"
+	var hookErr error
+	store.beforeProductUpgradeFreeze = func() {
+		_, hookErr = store.db.Exec(`
+			UPDATE automations SET title = ?, title_key = ?, version = version + 1, updated_at = ?
+			WHERE id = ?
+		`, renamed, normalizeTitleKey(renamed), store.now().UnixMilli(), scheduleID)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	store.beforeProductUpgradeFreeze = nil
+	if hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	if err != nil || completed.State != "completed" || len(completed.Schedules) != 1 {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	expectedName := productUpgradeDefinitionName(renamed, scheduleID)
+	if completed.Schedules[0].Title != renamed || completed.Schedules[0].DefinitionName != expectedName {
+		t.Fatalf("frozen preview was stale: %#v", completed.Schedules[0])
+	}
+	var definitionName string
+	if err := store.db.QueryRow(`
+		SELECT definition.name
+		FROM definitions definition
+		JOIN automation_schedule_triggers schedule ON schedule.definition_id = definition.id
+		WHERE schedule.automation_id = ?
+	`, scheduleID).Scan(&definitionName); err != nil {
+		t.Fatal(err)
+	}
+	if definitionName != expectedName {
+		t.Fatalf("migrated Definition name = %q, want %q", definitionName, expectedName)
+	}
+}
+
 func TestProductUpgradeReservesDefinitionNamesWhileDraining(t *testing.T) {
 	store := newTestStore(t)
 	workflow := createTestWorkflow(t, store, "reserved-upgrade-workflow", "Reserved upgrade", "Keep this schedule.")
@@ -331,6 +370,54 @@ func TestProductUpgradeReservesDefinitionNamesWhileDraining(t *testing.T) {
 	completed, err := store.ApplyProductUpgrade(context.Background(), false)
 	if err != nil || completed.State != "completed" {
 		t.Fatalf("complete product upgrade = %#v, err=%v", completed, err)
+	}
+}
+
+func TestProductUpgradeReservesDefinitionCapacityWhileDraining(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "capacity-upgrade-workflow", "Capacity upgrade", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/capacity-upgrade")
+	insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, time.Now().UTC(), true)
+	now := store.now().UnixMilli()
+	if _, err := store.db.Exec(`
+		WITH RECURSIVE sequence(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM sequence WHERE value < ?
+		)
+		INSERT INTO definitions(
+			id, name, name_key, prompt, runtime, allowed_tools, timeout_seconds,
+			inputs, generation, archived, created_at, updated_at
+		)
+		SELECT printf('capacity-%03d', value), printf('Capacity %03d', value),
+		       printf('capacity %03d', value), 'Capacity prompt.', 'codex', '[]', 600,
+		       '{}', 1, 0, ?, ?
+		FROM sequence
+	`, protocol.MaxDefinitions-1, now, now); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.afterProductUpgradeFreeze = cancel
+	if _, err := store.ApplyProductUpgrade(ctx, false); err == nil {
+		t.Fatal("interrupted product upgrade unexpectedly succeeded")
+	}
+	store.afterProductUpgradeFreeze = nil
+
+	_, _, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "capacity-after-freeze", Name: "Would exceed reserved capacity", Prompt: "Do not create.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	})
+	assertErrorCode(t, err, "definition_limit_reached")
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("complete product upgrade = %#v, err=%v", completed, err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM definitions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != protocol.MaxDefinitions {
+		t.Fatalf("Definition count = %d, want %d", count, protocol.MaxDefinitions)
 	}
 }
 

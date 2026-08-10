@@ -61,6 +61,7 @@ type Store struct {
 	afterScheduleEnabledCheck   func()
 	afterGitHubWebhookAdmission func()
 	afterGitHubWebhookRunCreate func()
+	beforeProductUpgradeFreeze  func()
 	afterProductUpgradeFreeze   func()
 }
 

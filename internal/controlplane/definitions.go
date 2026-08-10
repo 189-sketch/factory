@@ -189,7 +189,15 @@ func (s *Store) CreateDefinition(
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM definitions`).Scan(&count); err != nil {
 		return protocol.Definition{}, false, unavailable(err)
 	}
-	if count >= protocol.MaxDefinitions {
+	var reserved int
+	err = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(json_array_length(json_extract(preview_json, '$.schedules')), 0)
+		FROM product_model_upgrades WHERE state = 'draining'
+	`).Scan(&reserved)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return protocol.Definition{}, false, unavailable(err)
+	}
+	if count+reserved >= protocol.MaxDefinitions {
 		return protocol.Definition{}, false, conflict("definition_limit_reached", "the Definition limit has been reached")
 	}
 	definitionID, err = newID()
