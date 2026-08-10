@@ -282,6 +282,18 @@ func legacyAutomationDigest(value normalizedAutomation) ([]byte, error) {
 	return digest[:], nil
 }
 
+func automationUpdateDigest(value normalizedAutomation, expectedVersion int) ([]byte, error) {
+	body, err := json.Marshal(struct {
+		ExpectedVersion int                  `json:"expected_version"`
+		Automation      normalizedAutomation `json:"automation"`
+	}{ExpectedVersion: expectedVersion, Automation: value})
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(body)
+	return digest[:], nil
+}
+
 func (s *Store) replayLegacyScheduleAutomation(
 	ctx context.Context,
 	input protocol.CreateAutomationRequest,
@@ -1080,6 +1092,27 @@ func (s *Store) UpdateAutomation(
 		return protocol.AutomationDetail{}, conflict("automation_trigger_type_immutable", "trigger type is immutable; create a new Automation")
 	}
 	if currentType == protocol.AutomationTriggerSchedule && currentDefinitionID != "" && value.DefinitionID == "" {
+		digest, digestErr := automationUpdateDigest(value, input.ExpectedVersion)
+		if digestErr != nil {
+			return protocol.AutomationDetail{}, unavailable(digestErr)
+		}
+		var replayExpectedVersion int
+		var replayDigest []byte
+		replayErr := tx.QueryRowContext(ctx, `
+			SELECT expected_version, request_digest
+			FROM product_upgrade_schedule_update_replays
+			WHERE automation_id = ?
+		`, automationID).Scan(&replayExpectedVersion, &replayDigest)
+		if replayErr == nil && currentVersion == input.ExpectedVersion+2 &&
+			replayExpectedVersion == input.ExpectedVersion && bytes.Equal(replayDigest, digest) {
+			if err := tx.Commit(); err != nil {
+				return protocol.AutomationDetail{}, unavailable(err)
+			}
+			return s.Automation(ctx, automationID)
+		}
+		if replayErr != nil && !errors.Is(replayErr, sql.ErrNoRows) {
+			return protocol.AutomationDetail{}, unavailable(replayErr)
+		}
 		return protocol.AutomationDetail{}, invalid("definition_required", "definition_id is required for a scheduled Automation")
 	}
 	if (currentType == protocol.AutomationTriggerGitHubIssue && (issueTriggerCount != 1 || pullRequestTriggerCount != 0)) ||

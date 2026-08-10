@@ -381,7 +381,8 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	type schedule struct {
 		automationID, title, workflowID, repositoryID string
 		instructions, contextValue                    string
-		timeoutSeconds                                int
+		cron, timezone                                string
+		timeoutSeconds, version                       int
 		enabled                                       bool
 		nextDue                                       *time.Time
 	}
@@ -399,7 +400,8 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT automation.id, automation.title, workflow.id, automation.repository_id,
-		       revision.instructions, automation.context, automation.timeout_seconds
+		       revision.instructions, automation.context, automation.timeout_seconds,
+		       automation.version, schedule.cron, schedule.timezone
 		FROM automations automation
 		JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id
 		JOIN workflows workflow ON workflow.id = automation.workflow_id
@@ -414,7 +416,8 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	for rows.Next() {
 		var value schedule
 		if err := rows.Scan(&value.automationID, &value.title, &value.workflowID, &value.repositoryID,
-			&value.instructions, &value.contextValue, &value.timeoutSeconds); err != nil {
+			&value.instructions, &value.contextValue, &value.timeoutSeconds, &value.version,
+			&value.cron, &value.timezone); err != nil {
 			rows.Close()
 			return unavailable(err)
 		}
@@ -432,6 +435,28 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	now := s.now().UnixMilli()
 	migratedDefinitionIDs := make([]string, 0, len(schedules))
 	for _, legacy := range schedules {
+		if legacy.version > 1 {
+			updateValue, _, err := normalizeAutomation(
+				"", legacy.title, legacy.workflowID, "", legacy.contextValue,
+				legacy.timeoutSeconds,
+				protocol.AutomationTrigger{Type: protocol.AutomationTriggerSchedule, Cron: legacy.cron, Timezone: legacy.timezone},
+				"", nil, nil, 0, false, true,
+			)
+			if err != nil {
+				return err
+			}
+			digest, err := automationUpdateDigest(updateValue, legacy.version-1)
+			if err != nil {
+				return unavailable(err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO product_upgrade_schedule_update_replays(
+					automation_id, expected_version, request_digest
+				) VALUES (?, ?, ?)
+			`, legacy.automationID, legacy.version-1, digest); err != nil {
+				return unavailable(err)
+			}
+		}
 		definitionID, err := newID()
 		if err != nil {
 			return unavailable(err)

@@ -718,6 +718,40 @@ func TestProductUpgradeAllowsLegacyAutomationMutationReplaysAfterFreeze(t *testi
 	}
 }
 
+func TestProductUpgradeAllowsConvertedScheduleUpdateReplay(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "converted-update-workflow", "Converted update", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/converted-update")
+	scheduleID := insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, time.Now().UTC(), false)
+	updateRequest := protocol.UpdateAutomationRequest{
+		ExpectedVersion: 1,
+		Title:           "Updated before conversion",
+		WorkflowID:      workflow.Workflow.ID,
+		Context:         "Preserve this update replay.",
+		TimeoutSeconds:  900,
+		Trigger: protocol.AutomationTrigger{
+			Type: protocol.AutomationTriggerSchedule, Cron: "15 9 * * 2", Timezone: "Europe/London",
+		},
+	}
+	updated, err := store.UpdateAutomation(context.Background(), scheduleID, updateRequest)
+	if err != nil || updated.Automation.Version != 2 {
+		t.Fatalf("update schedule = %#v, err=%v", updated.Automation, err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	replayed, err := store.UpdateAutomation(context.Background(), scheduleID, updateRequest)
+	if err != nil || replayed.Automation.ID != scheduleID || replayed.Automation.Version != 3 ||
+		replayed.Automation.DefinitionID == "" {
+		t.Fatalf("converted schedule update replay = %#v, err=%v", replayed.Automation, err)
+	}
+	changed := updateRequest
+	changed.Context = "Different update."
+	_, err = store.UpdateAutomation(context.Background(), scheduleID, changed)
+	assertErrorCode(t, err, "definition_required")
+}
+
 func insertLegacyScheduleForUpgrade(
 	t *testing.T,
 	store *Store,

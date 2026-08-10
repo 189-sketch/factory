@@ -12,3 +12,10 @@ CREATE TABLE product_model_upgrades (
     updated_at INTEGER NOT NULL,
     completed_at INTEGER
 );
+
+CREATE TABLE product_upgrade_schedule_update_replays (
+    automation_id TEXT PRIMARY KEY
+        REFERENCES automations(id) ON DELETE CASCADE,
+    expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+    request_digest BLOB NOT NULL
+);
