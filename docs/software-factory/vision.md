@@ -131,6 +131,15 @@ scheduled path works end to end. GitHub webhook Triggers follow later.
 Kubernetes and other execution targets remain possible future Runner types,
 but they are not on the active roadmap.
 
+The built-in SQLite control plane remains a first-class deployment for local
+use and small teams. For larger production installations, the intended
+direction is an optional durable orchestration backend such as Temporal. That
+backend may own timers, retries, cancellation, fan-out, and recovery, but it
+must not change the Definition, Trigger, Run, Job, or Runner experience. The
+full boundary and migration design is tracked in
+[#259](https://github.com/owainlewis/factory/issues/259) and follows the stable
+local and VM Runner experience.
+
 ## Measures of progress
 
 The product is moving toward this vision when a team can:

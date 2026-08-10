@@ -19,6 +19,14 @@ Code are initial runtime examples. Remote VM Runners are the next scaling step.
 GitHub webhook Triggers follow later. Kubernetes is a possible future Runner
 target, but it is not on the active roadmap.
 
+The built-in SQLite orchestration path remains the first-class V1 backend. A
+later production deployment may select Temporal or a similar durable workflow
+engine behind the same product model. Definitions and Runner behavior must not
+depend on that choice. The architecture decision, history migration, and
+same-Definition prototype remain tracked in
+[#259](https://github.com/owainlewis/factory/issues/259); they are not part of
+this V1 implementation.
+
 The main tradeoff is trust. The agent uses the tools and credentials available
 on its Runner, including authenticated `gh`. Factory does not intermediate
 comments, branches, issues, or pull requests and cannot promise exactly-once
@@ -164,6 +172,14 @@ contract later. They are not active roadmap milestones.
 These paths must create the same Run and Job records. They are not different
 automation products.
 
+After the local and VM Runner experience is stable, a production-scale
+orchestration backend may move durable timers, retries, cancellation, fan-out,
+and recovery to Temporal. Factory remains the product and API boundary. The
+selected backend is an operational choice, not a Definition authoring choice.
+The detailed design must decide whether Runners continue to use Factory's
+lifecycle API or consume backend task queues directly while preserving
+outbound-only connections and the existing trust model.
+
 ### Agent-owned GitHub work
 
 The agent reads and changes GitHub through `gh`, just as it does when run
@@ -224,6 +240,22 @@ records. A Trigger decides when to admit work. It does not execute an agent.
 The Runner gives the agent a prepared repository and its configured tools.
 Factory does not become a GitHub client on behalf of the agent. This preserves
 the capability of the underlying agent and avoids a second action language.
+
+#### Backend-neutral orchestration
+
+SQLite-backed orchestration is the default and supported local product, not a
+temporary demo. A future durable backend must preserve Definition snapshots,
+Run and Job identities, idempotent admission, per-Job history, cancellation,
+and the retry warning for agent-owned external effects. Factory must keep the
+same operator API and product vocabulary across backends. Temporal workflow,
+activity, task-queue, and retry-policy concepts stay out of normal Definition
+authoring.
+
+This direction does not assert that the current store already implements a
+backend interface. [Issue #259](https://github.com/owainlewis/factory/issues/259)
+owns the architecture decision, state-ownership boundary, mixed-version
+migration and rollback plan, operational requirements, and a prototype that
+runs one unchanged Definition on both backends.
 
 ## 5. Invariants and requirements
 
@@ -426,6 +458,10 @@ and an Occurrence-linked Task through their preserved URLs and Legacy history.
 No question blocks V1. Remote credentials and public webhook deployment require
 focused designs before those later milestones start. Any future Runner target,
 including Kubernetes, requires its own accepted design before implementation.
+The optional production orchestration backend is deliberately unresolved until
+[#259](https://github.com/owainlewis/factory/issues/259) defines ownership,
+deployment, migration, rollback, and failure behavior and proves the boundary
+with a small prototype.
 
 ## 13. Out of scope
 
