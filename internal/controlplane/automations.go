@@ -282,27 +282,37 @@ func legacyAutomationDigest(value normalizedAutomation) ([]byte, error) {
 	return digest[:], nil
 }
 
+func automationUpdateDigest(value normalizedAutomation, expectedVersion int) ([]byte, error) {
+	body, err := json.Marshal(struct {
+		ExpectedVersion int                  `json:"expected_version"`
+		Automation      normalizedAutomation `json:"automation"`
+	}{ExpectedVersion: expectedVersion, Automation: value})
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(body)
+	return digest[:], nil
+}
+
 func (s *Store) replayLegacyScheduleAutomation(
 	ctx context.Context,
 	input protocol.CreateAutomationRequest,
 ) (protocol.AutomationDetail, bool, error) {
 	requestKey := strings.TrimSpace(input.RequestKey)
-	var existingID, existingType, existingDefinitionID string
+	var existingID, existingType string
 	var existingDigest []byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT automation.id, automation.request_digest, automation.trigger_type,
-		       COALESCE(schedule.definition_id, '')
+		SELECT automation.id, automation.request_digest, automation.trigger_type
 		FROM automations automation
-		LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id
 		WHERE automation.request_key = ?
-	`, requestKey).Scan(&existingID, &existingDigest, &existingType, &existingDefinitionID)
+	`, requestKey).Scan(&existingID, &existingDigest, &existingType)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.AutomationDetail{}, false, nil
 	}
 	if err != nil {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
-	if existingType != protocol.AutomationTriggerSchedule || existingDefinitionID != "" {
+	if existingType != protocol.AutomationTriggerSchedule {
 		return protocol.AutomationDetail{}, false, conflict("request_key_conflict", "request_key was already used for a different Automation")
 	}
 	value, _, err := normalizeAutomation(
@@ -384,9 +394,15 @@ func (s *Store) CreateAutomation(
 	if !errors.Is(err, sql.ErrNoRows) {
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
+	if value.DefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, false, err
+		}
+	}
 	if value.Trigger.Type == protocol.AutomationTriggerSchedule || value.Trigger.Type == protocol.AutomationTriggerGitHubWebhook {
 		if err := validateDefinitionScheduleDependencies(
 			ctx, tx, value.DefinitionID, value.RepositoryIDs, value.Parameters, false,
+			value.Trigger.Type, value.Trigger.Cron, value.Trigger.Timezone,
 		); err != nil {
 			return protocol.AutomationDetail{}, false, err
 		}
@@ -540,6 +556,7 @@ func validateDefinitionScheduleDependencies(
 	repositoryIDs []string,
 	parameters map[string]string,
 	requireRunnable bool,
+	triggerType, cron, timezone string,
 ) error {
 	definition, err := scanDefinition(tx.QueryRowContext(ctx, definitionSelect+` WHERE id = ?`, definitionID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -566,6 +583,25 @@ func validateDefinitionScheduleDependencies(
 	resolvedPrompt, err := protocol.ResolveDefinitionPrompt(definition.Prompt, resolvedParameters)
 	if err != nil {
 		return unavailable(err)
+	}
+	resolvedPrompts := []string{resolvedPrompt}
+	if triggerType == protocol.AutomationTriggerSchedule {
+		for _, occurrence := range []struct {
+			kind, identity string
+		}{
+			{kind: "scheduled", identity: "9999-12-31T23:59:59Z"},
+			// encoding/json escapes '<' as six bytes, making this the largest valid
+			// 128-byte Run now request key accepted by RunAutomationNow.
+			{kind: "run_now", identity: strings.Repeat("<", 128)},
+		} {
+			scheduledPrompt, resolveErr := protocol.ResolveDefinitionSchedulePrompt(
+				resolvedPrompt, nil, occurrence.kind, occurrence.identity, cron, timezone,
+			)
+			if resolveErr != nil {
+				return unavailable(resolveErr)
+			}
+			resolvedPrompts = append(resolvedPrompts, scheduledPrompt)
+		}
 	}
 	for _, repositoryID := range repositoryIDs {
 		var remoteIdentity string
@@ -599,8 +635,33 @@ func validateDefinitionScheduleDependencies(
 				remoteIdentity = canonical
 			}
 		}
-		if !protocol.AgentPromptFits(definition.Name, remoteIdentity, resolvedPrompt) {
-			return invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
+		repositoryPrompts := resolvedPrompts
+		if triggerType == protocol.AutomationTriggerGitHubWebhook {
+			webhookPrompt, resolveErr := protocol.ResolveGitHubWebhookPrompt(
+				resolvedPrompt,
+				strings.Repeat("<", maxGitHubWebhookDeliveryIDBytes),
+				"synchronize",
+				remoteIdentity,
+				protocol.GitHubPullRequestMatch{
+					Number:     int(^uint(0) >> 1),
+					URL:        strings.Repeat("<", maxGitHubWebhookURLBytes),
+					Title:      strings.Repeat("<", maxGitHubWebhookTitleBytes),
+					BaseBranch: strings.Repeat("<", maxGitHubWebhookBranchBytes),
+					HeadCommit: strings.Repeat("<", maxGitHubWebhookCommitBytes),
+				},
+			)
+			if resolveErr != nil {
+				return unavailable(resolveErr)
+			}
+			repositoryPrompts = append(append([]string{}, resolvedPrompts...), webhookPrompt)
+		}
+		for _, prompt := range repositoryPrompts {
+			if len([]byte(prompt)) > protocol.MaxResolvedPromptBytes {
+				return invalid("resolved_prompt_too_large", "the resolved schedule prompt exceeds the Task limit")
+			}
+			if !protocol.AgentPromptFits(definition.Name, remoteIdentity, prompt) {
+				return invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
+			}
 		}
 	}
 	return nil
@@ -1031,6 +1092,27 @@ func (s *Store) UpdateAutomation(
 		return protocol.AutomationDetail{}, conflict("automation_trigger_type_immutable", "trigger type is immutable; create a new Automation")
 	}
 	if currentType == protocol.AutomationTriggerSchedule && currentDefinitionID != "" && value.DefinitionID == "" {
+		digest, digestErr := automationUpdateDigest(value, input.ExpectedVersion)
+		if digestErr != nil {
+			return protocol.AutomationDetail{}, unavailable(digestErr)
+		}
+		var replayExpectedVersion int
+		var replayDigest []byte
+		replayErr := tx.QueryRowContext(ctx, `
+			SELECT expected_version, request_digest
+			FROM product_upgrade_schedule_update_replays
+			WHERE automation_id = ?
+		`, automationID).Scan(&replayExpectedVersion, &replayDigest)
+		if replayErr == nil && currentVersion == input.ExpectedVersion+2 &&
+			replayExpectedVersion == input.ExpectedVersion && bytes.Equal(replayDigest, digest) {
+			if err := tx.Commit(); err != nil {
+				return protocol.AutomationDetail{}, unavailable(err)
+			}
+			return s.Automation(ctx, automationID)
+		}
+		if replayErr != nil && !errors.Is(replayErr, sql.ErrNoRows) {
+			return protocol.AutomationDetail{}, unavailable(replayErr)
+		}
 		return protocol.AutomationDetail{}, invalid("definition_required", "definition_id is required for a scheduled Automation")
 	}
 	if (currentType == protocol.AutomationTriggerGitHubIssue && (issueTriggerCount != 1 || pullRequestTriggerCount != 0)) ||
@@ -1091,6 +1173,11 @@ func (s *Store) UpdateAutomation(
 		}
 		return s.Automation(ctx, automationID)
 	}
+	if currentDefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, err
+		}
+	}
 	if enabled != 0 {
 		return protocol.AutomationDetail{}, conflict("automation_enabled", "disable the Automation before editing it")
 	}
@@ -1108,6 +1195,7 @@ func (s *Store) UpdateAutomation(
 	} else if value.Trigger.Type == protocol.AutomationTriggerSchedule || value.Trigger.Type == protocol.AutomationTriggerGitHubWebhook {
 		if err := validateDefinitionScheduleDependencies(
 			ctx, tx, value.DefinitionID, value.RepositoryIDs, value.Parameters, false,
+			value.Trigger.Type, value.Trigger.Cron, value.Trigger.Timezone,
 		); err != nil {
 			return protocol.AutomationDetail{}, err
 		}
@@ -1256,6 +1344,11 @@ func (s *Store) setAutomationEnabled(
 		detail, err := s.Automation(ctx, automationID)
 		return detail, "", err
 	}
+	if definitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, "", err
+		}
+	}
 	if enabled {
 		var migrationStatus string
 		err := tx.QueryRowContext(ctx, `
@@ -1309,6 +1402,7 @@ func (s *Store) setAutomationEnabled(
 			}
 			if err := validateDefinitionScheduleDependencies(
 				ctx, tx, definitionID, repositoryIDs, parameters, true,
+				triggerType, cron, timezone,
 			); err != nil {
 				return protocol.AutomationDetail{}, "", err
 			}

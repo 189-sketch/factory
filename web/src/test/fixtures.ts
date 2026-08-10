@@ -1,4 +1,4 @@
-import type { AutomationDetail, AutomationOccurrence, Definition, LegacyPollerMigration, ManagedRepository, MetricsSummary, Run, RunDetail, Task, Worker, Workflow, WorkflowDetail } from "../types";
+import type { AutomationDetail, AutomationOccurrence, Definition, LegacyPollerMigration, ManagedRepository, MetricsSummary, ProductUpgrade, Run, RunDetail, Task, Worker, Workflow, WorkflowDetail } from "../types";
 import { vi } from "vitest";
 
 export const worker: Worker = {
@@ -257,6 +257,9 @@ export function mockControlPlane(
     workerDetailRuntimeRefresh?: boolean;
     workerOfflineAfterConnectionTest?: boolean;
     workerRuntimeRefresh?: boolean;
+	productUpgrade?: "ready" | "draining" | "completed";
+	productUpgradeCompletesAfterPoll?: boolean;
+	productUpgradeFreezesAfterPoll?: boolean;
   } = {},
 ) {
   let createFailures = options.createFailures ?? 0;
@@ -326,6 +329,51 @@ export function mockControlPlane(
     updated_at: "2026-08-06T10:00:00Z",
   }] : [];
   let runDetails: RunDetail[] = [];
+	let productUpgrade: ProductUpgrade = options.productUpgrade ? {
+		id: "definitions-runs-v1",
+		state: options.productUpgrade,
+		legacy_read_only: options.productUpgrade !== "ready",
+		needed: true,
+		counts: {
+			legacy_tasks: 5,
+			legacy_attempts: 3,
+			legacy_workflows: 1,
+			legacy_workflow_revisions: 2,
+			compatible_schedules: 1,
+			github_polling_automations: 1,
+			pending_occurrences: 0,
+			active_executions: 0,
+		},
+		schedules: [{
+			automation_id: "legacy-schedule",
+			title: "Weekly review",
+			definition_name: "Weekly review · legacy-schedule",
+			repository_id: "repo-factory",
+			cron: "0 9 * * 1",
+			timezone: "UTC",
+			next_due_at: "2026-08-17T09:00:00Z",
+			enabled: true,
+		}],
+		polling_automations: [{
+			automation_id: "legacy-poller",
+			title: "Issue triage poller",
+			trigger_type: "github_issue",
+			guidance: "Replace this poller with a scheduled Definition that uses gh, configure a GitHub webhook, or leave it retired.",
+		}],
+		decisions: ["GitHub polling Automations remain readable and retired."],
+	} : {
+		id: "definitions-runs-v1",
+		state: "ready",
+		legacy_read_only: false,
+		needed: false,
+		counts: {
+			legacy_tasks: 0, legacy_attempts: 0, legacy_workflows: 0,
+			legacy_workflow_revisions: 0, compatible_schedules: 0,
+			github_polling_automations: 0, pending_occurrences: 0, active_executions: 0,
+		},
+		schedules: [], polling_automations: [], decisions: [],
+	};
+	let productUpgradeRequests = 0;
   let workflowDetail = structuredClone(initialWorkflowDetail);
   let automationDetail = structuredClone(initialAutomationDetail);
   if (options.automationTaskState) {
@@ -417,6 +465,34 @@ export function mockControlPlane(
       const window = new URL(path, "http://factory.test").searchParams.get("window");
       return Response.json({ ...metrics, window });
     }
+	if (path === "/api/v1/migrations/product-model") {
+		productUpgradeRequests += 1;
+		if (options.productUpgradeFreezesAfterPoll && productUpgradeRequests > 1) {
+			productUpgrade = { ...productUpgrade, state: "draining", legacy_read_only: true };
+		}
+		if (options.productUpgradeCompletesAfterPoll && productUpgradeRequests > 1) {
+			productUpgrade = { ...productUpgrade, state: "completed", legacy_read_only: true };
+		}
+		return Response.json(productUpgrade);
+	}
+	if (path === "/api/v1/migrations/product-model/apply" && init?.method === "POST") {
+		productUpgrade = {
+			...productUpgrade,
+			state: "completed",
+			legacy_read_only: true,
+			validation: {
+				definitions_created: 1,
+				schedules_converted: 1,
+				polling_automations_retired: 1,
+				legacy_tasks_retained: 5,
+				legacy_occurrences_retained: 2,
+				legacy_attempts_retained: 3,
+				synthetic_runs_created: 0,
+				validated_at: "2026-08-10T10:00:00Z",
+			},
+		};
+		return Response.json(productUpgrade);
+	}
     if (path === "/api/v1/run-repositories") {
       return Response.json({
         repositories: repositoryItems

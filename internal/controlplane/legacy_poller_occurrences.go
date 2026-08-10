@@ -16,12 +16,18 @@ func (s *Store) ResumeLegacyPollerOccurrence(
 	ctx context.Context,
 	occurrenceID string,
 ) (protocol.AutomationOccurrence, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	occurrenceID = strings.TrimSpace(occurrenceID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return protocol.AutomationOccurrence{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	var requestJSON []byte
 	var repositoryID, repositoryIdentity, state string
 	err = tx.QueryRowContext(ctx, `
@@ -99,6 +105,9 @@ func (s *Store) ResumeLegacyPollerOccurrence(
 		return protocol.AutomationOccurrence{}, unavailable(err)
 	}
 	defer link.Rollback()
+	if err := s.legacyProductReadOnly(ctx, link); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	var automationID string
 	if err := link.QueryRowContext(ctx, `SELECT automation_id FROM automation_occurrences WHERE id = ?`, occurrenceID).Scan(&automationID); err != nil {
 		return protocol.AutomationOccurrence{}, unavailable(err)
@@ -135,23 +144,40 @@ func (s *Store) ResumeLegacyPollerOccurrence(
 func (s *Store) resetLegacyResume(ctx context.Context, occurrenceID, diagnostic string) {
 	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), legacyResumeCleanupTimeout)
 	defer cancel()
-	_, _ = s.db.ExecContext(cleanupContext, `
+	tx, err := s.db.BeginTx(cleanupContext, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(cleanupContext, tx); err != nil {
+		return
+	}
+	if _, err := tx.ExecContext(cleanupContext, `
 		UPDATE automation_occurrences
 		SET state = 'pending', diagnostic = ?, updated_at = ?
 		WHERE id = ? AND state = 'dispatching' AND legacy_task_request_json IS NOT NULL
-	`, diagnostic, s.now().UnixMilli(), occurrenceID)
+	`, diagnostic, s.now().UnixMilli(), occurrenceID); err != nil {
+		return
+	}
+	_ = tx.Commit()
 }
 
 func (s *Store) SkipLegacyPollerOccurrence(
 	ctx context.Context,
 	occurrenceID string,
 ) (protocol.AutomationOccurrence, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	occurrenceID = strings.TrimSpace(occurrenceID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return protocol.AutomationOccurrence{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	var state string
 	err = tx.QueryRowContext(ctx, `
 		SELECT occurrence.state

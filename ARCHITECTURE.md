@@ -278,6 +278,23 @@ Node.js is a contributor dependency only when UI source changes.
    consistent config and ledger copies plus a manifest, and unlocks imported
    Automations for operator review and enablement.
 
+### Product model upgrade
+
+1. Preview classifies legacy Tasks, Attempts, Runbooks, Occurrences, compatible
+   schedules, active executions, and GitHub polling Automations without writing.
+2. Starting the upgrade durably freezes legacy mutations, disables legacy
+   admission, and preserves pending Occurrences with an explicit cancellation
+   diagnostic before active executions drain or are explicitly cancelled.
+3. Compatible schedules become Definition-backed schedules in one transaction.
+   Their repository, prompt and context, timeout, cron, time zone, enabled state,
+   and exact next due instant are preserved.
+4. GitHub pollers are retained disabled with guidance to use a scheduled agent
+   with `gh`, a signed webhook, or retirement. Factory does not infer actions.
+5. Tasks, Attempts, Runbooks, revisions, and Occurrences retain their original
+   IDs and links. No historical Run is invented.
+6. The freeze survives restart. A stored validation report proves conversion
+   totals, retained history totals, and a zero synthetic-Run count.
+
 ### Control-plane GitHub Automation
 
 1. An operator creates a disabled Automation bound to one Workflow and one
@@ -416,6 +433,8 @@ POST   /api/v1/migrations/legacy-poller/import
 GET    /api/v1/migrations/legacy-poller/active
 GET    /api/v1/migrations/legacy-poller/{migration_id}
 POST   /api/v1/migrations/legacy-poller/{migration_id}/finalize
+GET    /api/v1/migrations/product-model
+POST   /api/v1/migrations/product-model/apply
 POST   /api/v1/occurrences/{occurrence_id}/resume
 POST   /api/v1/occurrences/{occurrence_id}/skip
 GET    /api/v1/tasks?limit={1..200}&cursor={cursor}
@@ -714,6 +733,7 @@ designs.
 | Schedule parsing and admission | `internal/controlplane/schedule_cron.go`, `schedule_runtime.go` |
 | GitHub webhook verification and admission | `internal/controlplane/github_webhook_http.go`, `github_webhooks.go` |
 | Legacy poller migration and archive | `internal/controlplane/legacy_poller_*` |
+| Product model upgrade | `internal/controlplane/product_upgrade.go` |
 | Prompt composition and complete agent input | `internal/protocol/prompt.go` |
 | Database schema | `migrations` |
 | Shared contracts and limits | `internal/protocol` |

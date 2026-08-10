@@ -163,10 +163,12 @@ export function WorkersView({
 
 export function WorkerDetail({
   id,
+  legacyReadOnly,
   onBack,
   onDelegate,
 }: {
   id: string;
+  legacyReadOnly: boolean;
   onBack: () => void;
   onDelegate: () => void;
 }) {
@@ -277,9 +279,9 @@ export function WorkerDetail({
 				{connectionTest?.status === "testing" ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}
 				Test connection
 			</button>
-          <button className="button button-primary" onClick={onDelegate}>
+          {!legacyReadOnly && <button className="button button-primary" onClick={onDelegate}>
             <Plus size={15} /> Assign work
-          </button>
+          </button>}
         </div>
       </div>
 		{connectionResult && (

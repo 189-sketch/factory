@@ -17,6 +17,9 @@ func (s *Store) ImportLegacyPoller(
 	ctx context.Context,
 	input protocol.ImportLegacyPollerRequest,
 ) (protocol.LegacyPollerMigration, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	if !input.ConfirmStopped {
 		return protocol.LegacyPollerMigration{}, invalid(
 			"legacy_poller_confirmation_required",
@@ -76,6 +79,9 @@ func (s *Store) ImportLegacyPoller(
 		return protocol.LegacyPollerMigration{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	var status, storedDigest string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT status, snapshot_digest FROM legacy_poller_migrations WHERE id = ?

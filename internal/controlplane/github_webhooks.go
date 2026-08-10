@@ -14,6 +14,14 @@ import (
 
 var maxGitHubWebhookOccurrences = protocol.MaxAutomationOccurrences
 
+const (
+	maxGitHubWebhookDeliveryIDBytes = 200
+	maxGitHubWebhookURLBytes        = 2048
+	maxGitHubWebhookTitleBytes      = 1024
+	maxGitHubWebhookBranchBytes     = 255
+	maxGitHubWebhookCommitBytes     = 64
+)
+
 type GitHubPullRequestWebhook struct {
 	DeliveryID         string
 	Action             string
@@ -46,7 +54,7 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 	delivery.DeliveryID = strings.TrimSpace(delivery.DeliveryID)
 	delivery.Action = strings.ToLower(strings.TrimSpace(delivery.Action))
 	delivery.RepositoryIdentity = strings.ToLower(strings.Trim(strings.TrimSpace(delivery.RepositoryIdentity), "/"))
-	if delivery.DeliveryID == "" || len(delivery.DeliveryID) > 200 {
+	if delivery.DeliveryID == "" || len(delivery.DeliveryID) > maxGitHubWebhookDeliveryIDBytes {
 		return 0, invalid("invalid_delivery_id", "X-GitHub-Delivery is required and limited to 200 bytes")
 	}
 	if delivery.Action != "opened" && delivery.Action != "synchronize" {
@@ -55,6 +63,12 @@ func (s *Store) AcceptGitHubPullRequestWebhook(
 	if !strings.HasPrefix(delivery.RepositoryIdentity, "github.com/") || delivery.PullRequest.Number < 1 ||
 		delivery.PullRequest.URL == "" || delivery.PullRequest.BaseBranch == "" || delivery.PullRequest.HeadCommit == "" {
 		return 0, invalid("invalid_webhook_payload", "the pull_request webhook payload is missing required repository or revision fields")
+	}
+	if len(delivery.PullRequest.URL) > maxGitHubWebhookURLBytes ||
+		len(delivery.PullRequest.Title) > maxGitHubWebhookTitleBytes ||
+		len(delivery.PullRequest.BaseBranch) > maxGitHubWebhookBranchBytes ||
+		len(delivery.PullRequest.HeadCommit) > maxGitHubWebhookCommitBytes {
+		return 0, invalid("invalid_webhook_payload", "the pull_request webhook payload exceeds Factory field limits")
 	}
 	payloadDigest := sha256.Sum256(payload)
 	tx, err := s.db.BeginTx(ctx, nil)

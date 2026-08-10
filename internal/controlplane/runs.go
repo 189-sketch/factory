@@ -109,8 +109,9 @@ func (s *Store) createScheduledRun(
 	ctx context.Context,
 	input protocol.CreateRunRequest,
 	snapshot protocol.DefinitionSnapshot,
+	resolvedPrompt string,
 ) (protocol.RunDetail, bool, error) {
-	return s.createRun(ctx, input, "schedule", &snapshot, "", "")
+	return s.createRun(ctx, input, "schedule", &snapshot, resolvedPrompt, "")
 }
 
 func (s *Store) createWebhookRun(
@@ -218,6 +219,9 @@ func (s *Store) createRun(
 		if err != nil {
 			return protocol.RunDetail{}, false, unavailable(err)
 		}
+	}
+	if len([]byte(resolvedPrompt)) > protocol.MaxResolvedPromptBytes {
+		return protocol.RunDetail{}, false, invalid("resolved_prompt_too_large", "the resolved prompt exceeds the Job limit")
 	}
 
 	type runTarget struct {

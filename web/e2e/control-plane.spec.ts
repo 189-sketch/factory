@@ -26,7 +26,7 @@ const identifiers: Record<string, string> = {};
 interface TaskDetail {
   task: { id: string; title: string; description?: string; state?: string };
   context?: string;
-  execution: { id: string; assigned_worker_id: string };
+  execution: { id: string; assigned_worker_id: string; state?: string };
   repository: { id: string };
   attempts: Array<{ id: string; state?: string; result?: string; error?: string }>;
   workflow?: { id: string; revision_id: string; name: string; revision_number: number };
@@ -863,6 +863,9 @@ test("shows ordered progress and long task detail", async ({ page }) => {
     identifiers.automationRepository,
   );
   const active = await claimAndStart(api, `claim-progress-${fixtureID}`, automationWorker);
+	identifiers.progressTask = running.task.id;
+	identifiers.progressAttempt = active.attempt.id;
+	identifiers.progressToken = active.token;
   const eventsResponse = await api.post(`/api/v1/attempts/${active.attempt.id}/events`, {
     data: {
       lease_token: active.token,
@@ -1353,6 +1356,64 @@ test("migrates a locked legacy snapshot through Resume and Finalize", async ({ p
   const tasks = await json<{ tasks: Array<{ request_key: string }> }>(await api.get("/api/v1/tasks?limit=200"));
   expect(tasks.tasks.filter((task) => task.request_key === "legacy-browser-request-187")).toHaveLength(1);
   await expect(migration.getByRole("button", { name: "Review E2E imported legacy issues" })).toBeVisible();
-  await api.dispose();
-  browser.assertClean();
+	await api.dispose();
+	browser.assertClean();
+});
+
+test("upgrades existing Factory data and keeps legacy task history browsable", async ({ page }) => {
+	const browser = observeBrowser(page);
+	const api = await request.newContext({ baseURL: "http://127.0.0.1:17437" });
+	const running = await json<TaskDetail>(await api.get(`/api/v1/tasks/${identifiers.runningTask}`));
+	if (running.execution.state === "preparing" || running.execution.state === "running") {
+		await json(await api.post(`/api/v1/attempts/${identifiers.runningAttempt}/complete`, {
+			data: {
+				lease_token: "lease-token-claim-running-0123456789abcdef0123456789",
+				state: "succeeded",
+				result: "Completed before the product upgrade browser proof.",
+			},
+		}));
+	}
+	if (identifiers.progressTask) {
+		const progress = await json<TaskDetail>(await api.get(`/api/v1/tasks/${identifiers.progressTask}`));
+		if (progress.execution.state === "preparing" || progress.execution.state === "running") {
+			await json(await api.post(`/api/v1/attempts/${identifiers.progressAttempt}/complete`, {
+				data: {
+					lease_token: identifiers.progressToken,
+					state: "succeeded",
+					result: "Completed before the product upgrade browser proof.",
+				},
+			}));
+		}
+	}
+
+	await page.goto("/");
+	const panel = page.getByRole("region", { name: "Upgrade existing Factory data" });
+	await expect(panel).toBeVisible();
+	await expect(panel.getByText("Tasks retained")).toBeVisible();
+	await panel.getByRole("button", { name: "Freeze and cancel active work" }).click();
+	const finish = panel.getByRole("button", { name: "Finish upgrade" });
+	await expect.poll(async () => {
+		if (await panel.count() === 0) return "completed";
+		return await finish.isVisible() ? "ready-to-finish" : "draining";
+	}, { timeout: 30_000 }).not.toBe("draining");
+	if (await panel.count() !== 0) await finish.click();
+	await expect(panel).toHaveCount(0);
+
+	const upgrade = await json<{
+		state: string;
+		legacy_read_only: boolean;
+		validation: { legacy_tasks_retained: number; synthetic_runs_created: number };
+	}>(await api.get("/api/v1/migrations/product-model"));
+	expect(upgrade.state).toBe("completed");
+	expect(upgrade.legacy_read_only).toBe(true);
+	expect(upgrade.validation.legacy_tasks_retained).toBeGreaterThan(0);
+	expect(upgrade.validation.synthetic_runs_created).toBe(0);
+
+	await page.getByRole("button", { name: "Work", exact: true }).click();
+	await expect(page.getByRole("heading", { name: "Legacy task history" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Delegate", exact: true })).toHaveCount(0);
+	await page.goto(`/tasks/${identifiers.failedTask}`);
+	await expect(page.getByRole("heading", { name: "Repair a failed release check" })).toBeVisible();
+	await api.dispose();
+	browser.assertClean();
 });

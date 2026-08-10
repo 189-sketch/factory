@@ -124,6 +124,9 @@ func (s *Store) PreviewLegacyPoller(
 	ctx context.Context,
 	input protocol.PreviewLegacyPollerRequest,
 ) (protocol.LegacyPollerMigration, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	if !input.ConfirmStopped {
 		return protocol.LegacyPollerMigration{}, invalid(
 			"legacy_poller_confirmation_required",
@@ -160,7 +163,15 @@ func (s *Store) PreviewLegacyPoller(
 			unimportedSubmitted += queue.SubmittedObservations
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return protocol.LegacyPollerMigration{}, unavailable(err)
+	}
+	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO legacy_poller_migrations(
 			id, snapshot_digest, config_path, data_home, working_directory,
 			data_directory, ledger_path, archive_root, status, queue_count,
@@ -173,6 +184,9 @@ func (s *Store) PreviewLegacyPoller(
 		source.snapshot.DataDirectory, source.snapshot.LedgerPath,
 		source.snapshot.ArchiveRoot, preview.Counts.Queues, preview.Counts.Supported,
 		preview.Counts.Unsupported, unimportedPending, unimportedSubmitted, now, now); err != nil {
+		return protocol.LegacyPollerMigration{}, unavailable(err)
+	}
+	if err := tx.Commit(); err != nil {
 		return protocol.LegacyPollerMigration{}, unavailable(err)
 	}
 	preview.CreatedAt, preview.UpdatedAt = fromMillis(now), fromMillis(now)

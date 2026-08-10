@@ -31,6 +31,9 @@ func (s *Store) FinalizeLegacyPoller(
 	ctx context.Context,
 	input protocol.FinalizeLegacyPollerRequest,
 ) (protocol.LegacyPollerMigration, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	if !input.ConfirmStopped {
 		return protocol.LegacyPollerMigration{}, invalid(
 			"legacy_poller_confirmation_required",
@@ -82,11 +85,22 @@ func (s *Store) FinalizeLegacyPoller(
 		}
 	}
 	now := s.now().UnixMilli()
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return protocol.LegacyPollerMigration{}, unavailable(err)
+	}
+	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE legacy_poller_migrations
 		SET status = 'finalized', archive_path = ?, finalized_at = COALESCE(finalized_at, ?), updated_at = ?
 		WHERE id = ? AND snapshot_digest = ? AND status IN ('imported', 'finalized')
 	`, archivePath, now, now, migration.ID, migration.SnapshotDigest); err != nil {
+		return protocol.LegacyPollerMigration{}, unavailable(err)
+	}
+	if err := tx.Commit(); err != nil {
 		return protocol.LegacyPollerMigration{}, unavailable(err)
 	}
 	return s.LegacyPollerMigration(ctx, migration.ID)

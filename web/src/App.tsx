@@ -85,6 +85,13 @@ export function App() {
   const workerInterval = useVisibleInterval(10_000);
   const delegateTrigger = useRef<HTMLElement | null>(null);
   const queryClient = useQueryClient();
+	const productUpgrade = useQuery({
+		queryKey: ["product-upgrade"],
+		queryFn: api.productUpgrade,
+		staleTime: 30_000,
+		refetchInterval: (query) => query.state.data && query.state.data.state !== "completed" ? 2_000 : false,
+	});
+	const legacyReadOnly = Boolean(productUpgrade.data?.legacy_read_only);
 
   useEffect(() => {
     const onPopState = () => setRoute(readRoute());
@@ -268,9 +275,9 @@ export function App() {
             {route.page === "automation" && "Automation detail"}
           </div>
           <div className="detail-actions">
-            <button className="button button-secondary" onClick={() => openDelegate()}>
-              <Plus size={16} /> Delegate task
-            </button>
+			{!legacyReadOnly && <button className="button button-secondary" onClick={() => openDelegate()}>
+				<Plus size={16} /> Delegate task
+			</button>}
             <button className="button button-primary" onClick={() => navigate({ page: "runs", create: true })}>
               <Play size={16} /> Run once
             </button>
@@ -278,7 +285,11 @@ export function App() {
         </header>
 
         <main>
-          {route.page === "overview" && <Overview onRun={(id, jobID) => navigate({ page: "run", id, jobID })} />}
+			{route.page === "overview" && <Overview
+				onRun={(id, jobID) => navigate({ page: "run", id, jobID })}
+				upgrade={productUpgrade.data}
+				upgradeError={productUpgrade.error}
+			/>}
           {route.page === "runs" && (
             <RunsView
               createOpen={Boolean(route.create)}
@@ -308,6 +319,7 @@ export function App() {
                   });
                 }
               }}
+			  legacyReadOnly={legacyReadOnly}
             />
           )}
           {route.page === "workers" && (
@@ -328,6 +340,7 @@ export function App() {
             <TaskDetail
               id={route.id}
               workers={workers.data ?? []}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "work" })}
               onDeleted={() => {
                 deletedTaskIDs.current.add(route.id);
@@ -344,6 +357,7 @@ export function App() {
           {route.page === "worker" && (
             <WorkerDetail
               id={route.id}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "workers" })}
               onDelegate={() => openDelegate(route.id)}
             />
@@ -370,17 +384,18 @@ export function App() {
             />
           )}
           {route.page === "workflows" && (
-            <WorkflowsView onWorkflow={(id) => navigate({ page: "workflow", id })} />
+            <WorkflowsView legacyReadOnly={legacyReadOnly} onWorkflow={(id) => navigate({ page: "workflow", id })} />
           )}
           {route.page === "workflow" && (
-            <WorkflowDetail id={route.id} onBack={() => navigate({ page: "workflows" })} />
+            <WorkflowDetail id={route.id} legacyReadOnly={legacyReadOnly} onBack={() => navigate({ page: "workflows" })} />
           )}
           {route.page === "automations" && (
-            <AutomationsView onAutomation={(id) => navigate({ page: "automation", id })} />
+            <AutomationsView legacyReadOnly={legacyReadOnly} onAutomation={(id) => navigate({ page: "automation", id })} />
           )}
           {route.page === "automation" && (
             <AutomationDetail
               id={route.id}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "automations" })}
               onTask={(taskID) => navigate({ page: "task", id: taskID })}
               onRun={(runID) => navigate({ page: "run", id: runID })}
@@ -396,7 +411,7 @@ export function App() {
           onClick={() => setMobileNavOpen(false)}
         />
       )}
-      {delegateRequest && (
+      {delegateRequest && !legacyReadOnly && (
         <DelegateModal
           workers={delegateWorkers}
           workersPending={workers.isPending && delegateWorkers.length === 0}

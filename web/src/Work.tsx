@@ -24,6 +24,7 @@ export function WorkView({
   hasMore,
   loadingMore,
   onLoadMore,
+	legacyReadOnly,
 }: ViewStateProps & {
   tasks?: Task[];
   workers?: Worker[];
@@ -34,6 +35,7 @@ export function WorkView({
   hasMore: boolean;
   loadingMore: boolean;
   onLoadMore: () => void;
+	legacyReadOnly: boolean;
 }) {
   if (pending) return <LoadingState label="Loading work" />;
   if (error && !tasks) return <ErrorState error={error} onRetry={onRefresh} />;
@@ -46,18 +48,22 @@ export function WorkView({
   return (
     <div className="page page-work">
       <ViewHeader
-        title="Agent work"
+		title={legacyReadOnly ? "Legacy task history" : "Agent work"}
         fetching={fetching}
         updatedAt={updatedAt}
         onRefresh={onRefresh}
       />
       {error && <StaleBanner error={error} />}
+	  {legacyReadOnly && <section className="panel legacy-history-note">
+		<strong>Read-only history</strong>
+		<p>These Tasks and Attempts keep their original IDs and links. New work starts from Runs.</p>
+	  </section>}
       {(tasks ?? []).length === 0 ? (
         <EmptyState
           icon={<ListChecks size={22} />}
           title="No work yet"
           description="Delegate the first task to a registered worker. It will stay here through restarts."
-          action={<button className="button button-primary" onClick={onDelegate}><Plus size={16} /> Delegate task</button>}
+		  action={legacyReadOnly ? undefined : <button className="button button-primary" onClick={onDelegate}><Plus size={16} /> Delegate task</button>}
         />
       ) : (
         <div className="work-board" data-testid="work-board">

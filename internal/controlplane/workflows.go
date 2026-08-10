@@ -99,6 +99,9 @@ func (s *Store) CreateWorkflow(
 		detail, err := s.Workflow(ctx, workflowID)
 		return detail, false, err
 	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
+	}
 	var conflictingID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM workflows WHERE current_title_key = ?`, titleKey).Scan(&conflictingID)
 	if err == nil {
@@ -184,6 +187,9 @@ func (s *Store) CreateWorkflowRevision(
 		}
 		detail, err := s.Workflow(ctx, replayWorkflowID)
 		return detail, false, err
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
 	}
 	var currentRevisionID string
 	var currentRevisionNumber int
@@ -385,6 +391,9 @@ func (s *Store) SetWorkflowEnabled(ctx context.Context, workflowID string, enabl
 			return protocol.WorkflowDetail{}, unavailable(err)
 		}
 		return s.Workflow(ctx, workflowID)
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflows
