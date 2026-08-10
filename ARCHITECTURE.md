@@ -9,6 +9,14 @@
 > the intended product model. This document remains the source of truth for
 > behavior that exists today.
 
+The current implementation uses one embedded SQLite orchestration path. The
+longer-term direction is to keep that path as the first-class local default and
+allow production installations to select a durable backend such as Temporal
+without changing Definitions or the Runner-facing product model. No such
+backend abstraction exists today. Its decision record, ownership boundary,
+migration plan, and prototype are tracked in
+[#259](https://github.com/owainlewis/factory/issues/259).
+
 ## 1. Executive summary
 
 Factory is the current local implementation of a control plane for running
