@@ -291,6 +291,26 @@ func TestProductUpgradeRejectsDefinitionConflictBeforeFreeze(t *testing.T) {
 	}
 }
 
+func TestProductUpgradeRejectsDefinitionMutationConflictBeforeFreeze(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "mutation-conflict-workflow", "Mutation conflict", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/mutation-conflict")
+	scheduleID := insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, time.Now().UTC(), true)
+	if _, _, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: productUpgradeDefinitionMutationKey(scheduleID), Name: "Existing mutation", Prompt: "Existing prompt.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := store.ApplyProductUpgrade(context.Background(), false)
+	assertErrorCode(t, err, "definition_request_key_conflict")
+	preview, err := store.ProductUpgrade(context.Background())
+	if err != nil || preview.State != "ready" || preview.LegacyReadOnly {
+		t.Fatalf("conflicting upgrade changed product state = %#v, err=%v", preview, err)
+	}
+}
+
 func TestProductUpgradeRebuildsFrozenPreviewInsideTransaction(t *testing.T) {
 	store := newTestStore(t)
 	workflow := createTestWorkflow(t, store, "fresh-preview-workflow", "Fresh preview", "Keep this schedule.")
@@ -347,6 +367,11 @@ func TestProductUpgradeReservesDefinitionNamesWhileDraining(t *testing.T) {
 	if err != nil || draining.State != "draining" {
 		t.Fatalf("draining product upgrade = %#v, err=%v", draining, err)
 	}
+	_, _, err = store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: productUpgradeDefinitionMutationKey(scheduleID), Name: "Reserved request key", Prompt: "Do not collide.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	})
+	assertErrorCode(t, err, "definition_request_key_reserved")
 
 	_, _, err = store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
 		RequestKey: "reserved-name-create", Name: strings.ToUpper(reservedName), Prompt: "Do not collide.",
@@ -418,6 +443,39 @@ func TestProductUpgradeReservesDefinitionCapacityWhileDraining(t *testing.T) {
 	}
 	if count != protocol.MaxDefinitions {
 		t.Fatalf("Definition count = %d, want %d", count, protocol.MaxDefinitions)
+	}
+}
+
+func TestProductUpgradeCountsFinalizedPollerOccurrencesAsRetained(t *testing.T) {
+	queueID := legacyQueueID(legacyPollerQueue{Name: "github-ready", Source: "github", Project: "example/project"})
+	fixture := newLegacyMigrationFixture(t, []legacyPollerObservation{legacyPendingRequest(t, queueID, 91)})
+	store := newTestStore(t)
+	createManagedTestRepository(t, store, "github.com/example/project")
+	selection := migrationSelection(fixture)
+	preview, err := store.PreviewLegacyPoller(context.Background(), protocol.PreviewLegacyPollerRequest{LegacyPollerSelection: selection})
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := store.ImportLegacyPoller(context.Background(), protocol.ImportLegacyPollerRequest{
+		LegacyPollerSelection: selection, MigrationID: preview.ID, SnapshotDigest: preview.SnapshotDigest,
+		Mappings: []protocol.LegacyPollerQueueMapping{{
+			QueueID: queueID, WorkflowTitle: "Retained poller workflow", AutomationTitle: "Retained poller Automation",
+		}},
+	})
+	if err != nil || len(imported.Occurrences) != 1 {
+		t.Fatalf("import legacy poller = %#v, err=%v", imported, err)
+	}
+	if _, err := store.SkipLegacyPollerOccurrence(context.Background(), imported.Occurrences[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinalizeLegacyPoller(context.Background(), protocol.FinalizeLegacyPollerRequest{
+		LegacyPollerSelection: selection, MigrationID: preview.ID, SnapshotDigest: preview.SnapshotDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.Validation == nil || completed.Validation.LegacyOccurrencesRetained != 1 {
+		t.Fatalf("completed upgrade validation = %#v, err=%v", completed.Validation, err)
 	}
 }
 

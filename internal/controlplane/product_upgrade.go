@@ -254,8 +254,9 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, cancelActive bool) (boo
 		return false, conflict("definition_limit_reached", "archive Definitions or retire legacy schedules before upgrading Factory")
 	}
 	for _, schedule := range preview.Schedules {
+		requestKey := productUpgradeDefinitionMutationKey(schedule.AutomationID)
 		_, nameKey, err := normalizeDefinitionMutation(normalizedDefinitionMutation{
-			Operation: "create", RequestKey: "product-upgrade:schedule:" + schedule.AutomationID,
+			Operation: "create", RequestKey: requestKey,
 			Name: schedule.DefinitionName, Prompt: "placeholder", Runtime: protocol.RuntimeCodex,
 			AllowedTools: []string{"git"}, TimeoutSeconds: 1,
 			Inputs: map[string]string{},
@@ -267,6 +268,16 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, cancelActive bool) (boo
 		err = tx.QueryRowContext(ctx, `SELECT id FROM definitions WHERE name_key = ?`, nameKey).Scan(&conflictingID)
 		if err == nil {
 			return false, conflict("definition_name_conflict", "a Definition conflicts with migrated schedule "+schedule.AutomationID)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, unavailable(err)
+		}
+		var conflictingDefinitionID string
+		err = tx.QueryRowContext(ctx, `
+			SELECT definition_id FROM definition_mutations WHERE request_key = ?
+		`, requestKey).Scan(&conflictingDefinitionID)
+		if err == nil {
+			return false, conflict("definition_request_key_conflict", "a Definition mutation conflicts with migrated schedule "+schedule.AutomationID)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return false, unavailable(err)
@@ -429,7 +440,7 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 			"\n\nAutomation context:\n\n" + legacy.contextValue +
 			"\n\nSchedule instruction:\n\nExecute this Definition for each scheduled occurrence. There is no provider item to revalidate."
 		value, nameKey, err := normalizeDefinitionMutation(normalizedDefinitionMutation{
-			Operation: "create", RequestKey: "product-upgrade:schedule:" + legacy.automationID,
+			Operation: "create", RequestKey: productUpgradeDefinitionMutationKey(legacy.automationID),
 			Name: name, Prompt: prompt, Runtime: protocol.RuntimeCodex,
 			AllowedTools: []string{"git"}, TimeoutSeconds: legacy.timeoutSeconds,
 			Inputs: map[string]string{},
@@ -498,7 +509,14 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks task WHERE NOT EXISTS (SELECT 1 FROM jobs job WHERE job.task_id = task.id)`).Scan(&validation.LegacyTasksRetained); err != nil {
 		return unavailable(err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM automation_occurrences WHERE workflow_revision_id IS NOT NULL`).Scan(&validation.LegacyOccurrencesRetained); err != nil {
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM automation_occurrences occurrence
+		WHERE occurrence.workflow_revision_id IS NOT NULL
+		   OR EXISTS (
+		       SELECT 1 FROM legacy_poller_observations legacy
+		       WHERE legacy.occurrence_id = occurrence.id
+		   )
+	`).Scan(&validation.LegacyOccurrencesRetained); err != nil {
 		return unavailable(err)
 	}
 	if err := tx.QueryRowContext(ctx, `
@@ -566,6 +584,10 @@ func productUpgradeDefinitionName(title, automationID string) string {
 		return truncateRunes(automationID, 100)
 	}
 	return truncateRunes(strings.TrimSpace(title), maxTitle) + suffix
+}
+
+func productUpgradeDefinitionMutationKey(automationID string) string {
+	return "product-upgrade:schedule:" + automationID
 }
 
 func truncateRunes(value string, limit int) string {

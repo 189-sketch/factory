@@ -171,6 +171,9 @@ func (s *Store) CreateDefinition(
 		return protocol.Definition{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := definitionRequestKeyAvailableDuringProductUpgrade(ctx, tx, value.RequestKey); err != nil {
+		return protocol.Definition{}, false, err
+	}
 	definitionID, replay, err := definitionMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.Definition{}, false, err
@@ -262,6 +265,9 @@ func (s *Store) UpdateDefinition(
 		return protocol.Definition{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := definitionRequestKeyAvailableDuringProductUpgrade(ctx, tx, value.RequestKey); err != nil {
+		return protocol.Definition{}, false, err
+	}
 	replayID, replay, err := definitionMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.Definition{}, false, err
@@ -530,6 +536,29 @@ func definitionNameAvailable(ctx context.Context, tx *sql.Tx, nameKey, excluding
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return unavailable(err)
+	}
+	return nil
+}
+
+func definitionRequestKeyAvailableDuringProductUpgrade(ctx context.Context, tx *sql.Tx, requestKey string) error {
+	var previewJSON []byte
+	err := tx.QueryRowContext(ctx, `
+		SELECT preview_json FROM product_model_upgrades WHERE state = 'draining'
+	`).Scan(&previewJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return unavailable(err)
+	}
+	var preview protocol.ProductUpgrade
+	if err := json.Unmarshal(previewJSON, &preview); err != nil {
+		return unavailable(err)
+	}
+	for _, schedule := range preview.Schedules {
+		if productUpgradeDefinitionMutationKey(schedule.AutomationID) == requestKey {
+			return conflict("definition_request_key_reserved", "this Definition request key is reserved while the product upgrade is draining")
+		}
 	}
 	return nil
 }
