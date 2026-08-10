@@ -390,9 +390,14 @@ func TestBlockedRunJobRoutesAndClaimsItsFrozenRepositoryIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := claimTestTask(t, store, worker.ID, "frozen-route-second", tokenB)
-	if second.Repository.ID != blocked.RepositoryID || second.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
-		t.Fatalf("materialized claim repository = %#v; want ID %q and frozen identity %q",
-			second.Repository, blocked.RepositoryID, blocked.RepositoryRemoteIdentity)
+	claims := map[string]protocol.Claim{
+		first.Repository.ID:  first,
+		second.Repository.ID: second,
+	}
+	blockedClaim, ok := claims[blocked.RepositoryID]
+	if len(claims) != 2 || !ok || blockedClaim.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
+		t.Fatalf("claims = %#v; want distinct repositories and frozen identity %q for %q",
+			claims, blocked.RepositoryRemoteIdentity, blocked.RepositoryID)
 	}
 }
 
@@ -449,9 +454,14 @@ func TestBlockedRunJobDynamicallyAcquiresItsFrozenRepositoryIdentity(t *testing.
 		t.Fatal(err)
 	}
 	second := claimTestTask(t, store, worker.ID, "dynamic-frozen-second", tokenB)
-	if second.Repository.ID != blocked.RepositoryID || second.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
-		t.Fatalf("dynamic claim repository = %#v; want ID %q and frozen identity %q",
-			second.Repository, blocked.RepositoryID, blocked.RepositoryRemoteIdentity)
+	claims := map[string]protocol.Claim{
+		first.Repository.ID:  first,
+		second.Repository.ID: second,
+	}
+	blockedClaim, ok := claims[blocked.RepositoryID]
+	if len(claims) != 2 || !ok || blockedClaim.Repository.RemoteIdentity != blocked.RepositoryRemoteIdentity {
+		t.Fatalf("dynamic claims = %#v; want distinct repositories and frozen identity %q for %q",
+			claims, blocked.RepositoryRemoteIdentity, blocked.RepositoryID)
 	}
 	var dynamic int
 	var workerIdentity string
