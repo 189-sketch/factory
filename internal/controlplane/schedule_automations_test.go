@@ -354,7 +354,7 @@ func TestDefinitionScheduleRejectsResolvedAgentPromptAboveRuntimeLimit(t *testin
 	if created {
 		t.Fatal("oversized resolved prompt created a schedule")
 	}
-	assertErrorCode(t, err, "agent_prompt_too_large")
+	assertErrorCode(t, err, "resolved_prompt_too_large")
 }
 
 func TestDefinitionScheduleAccountsForOccurrenceMetadataAtCreationAndEnablement(t *testing.T) {
@@ -420,7 +420,7 @@ func TestDefinitionScheduleAccountsForOccurrenceMetadataAtCreationAndEnablement(
 	if created {
 		t.Fatal("schedule with oversized occurrence metadata was created")
 	}
-	assertErrorCode(t, err, "agent_prompt_too_large")
+	assertErrorCode(t, err, "resolved_prompt_too_large")
 
 	enableDefinition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
 		RequestKey: "schedule-overhead-enable-definition", Name: "Enable schedule overhead", Prompt: "Short prompt.",
@@ -446,7 +446,27 @@ func TestDefinitionScheduleAccountsForOccurrenceMetadataAtCreationAndEnablement(
 		t.Fatalf("update Definition: changed=%t err=%v", changed, err)
 	}
 	_, err = store.SetAutomationEnabled(context.Background(), automation.Automation.ID, true, false)
-	assertErrorCode(t, err, "agent_prompt_too_large")
+	assertErrorCode(t, err, "resolved_prompt_too_large")
+}
+
+func TestScheduledRunRejectsOversizedFrozenResolvedPrompt(t *testing.T) {
+	store := newTestStore(t)
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/oversized-frozen-schedule")
+	definition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "oversized-frozen-definition", Name: "Oversized frozen schedule", Prompt: "Small prompt.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	})
+	if err != nil || !created {
+		t.Fatalf("create Definition: created=%t err=%v", created, err)
+	}
+	_, created, err = store.createScheduledRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "oversized-frozen-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+	}, definition.Snapshot(), string(bytes.Repeat([]byte("x"), protocol.MaxResolvedPromptBytes+1)))
+	if created {
+		t.Fatal("scheduled Run with oversized frozen prompt was created")
+	}
+	assertErrorCode(t, err, "resolved_prompt_too_large")
 }
 
 func TestLegacyWorkflowScheduleRemainsEditableAfterDefinitionScheduleMigration(t *testing.T) {

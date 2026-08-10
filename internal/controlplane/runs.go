@@ -220,6 +220,9 @@ func (s *Store) createRun(
 			return protocol.RunDetail{}, false, unavailable(err)
 		}
 	}
+	if len([]byte(resolvedPrompt)) > protocol.MaxResolvedPromptBytes {
+		return protocol.RunDetail{}, false, invalid("resolved_prompt_too_large", "the resolved prompt exceeds the Job limit")
+	}
 
 	type runTarget struct {
 		id       string

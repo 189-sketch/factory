@@ -498,6 +498,36 @@ func TestProductUpgradeAllowsPreviewedLegacyPollerMigration(t *testing.T) {
 	}
 }
 
+func TestProductUpgradeAllowsLegacyTaskRequestReplayAfterFreeze(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "upgrade-replay-workflow", "Upgrade replay", "Keep this task.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/upgrade-replay")
+	registerDefinitionWorker(t, store, "upgrade-replay-worker", protocol.RepositoryRegistration{
+		Key: "upgrade-replay", RemoteIdentity: repository.RemoteIdentity,
+	}, protocol.CapabilityReady, nil)
+	request := protocol.CreateTaskRequest{
+		RequestKey: "upgrade-replay-task", Title: "Replay after freeze",
+		WorkerID: "upgrade-replay-worker", RepositoryID: repository.ID,
+		WorkflowRevisionID: workflow.Workflow.CurrentRevision.ID,
+		Context:            "Return the committed task.", TimeoutSeconds: 600,
+	}
+	created, wasCreated, err := store.CreateTask(context.Background(), request)
+	if err != nil || !wasCreated {
+		t.Fatalf("create task: created=%t err=%v", wasCreated, err)
+	}
+	if _, err := store.CancelTask(context.Background(), created.Task.ID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	replayed, wasCreated, err := store.CreateTask(context.Background(), request)
+	if err != nil || wasCreated || replayed.Task.ID != created.Task.ID {
+		t.Fatalf("task replay after freeze = %#v, created=%t err=%v", replayed, wasCreated, err)
+	}
+}
+
 func insertLegacyScheduleForUpgrade(
 	t *testing.T,
 	store *Store,

@@ -626,6 +626,9 @@ func validateDefinitionScheduleDependencies(
 			}
 		}
 		for _, prompt := range resolvedPrompts {
+			if len([]byte(prompt)) > protocol.MaxResolvedPromptBytes {
+				return invalid("resolved_prompt_too_large", "the resolved schedule prompt exceeds the Task limit")
+			}
 			if !protocol.AgentPromptFits(definition.Name, remoteIdentity, prompt) {
 				return invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
 			}

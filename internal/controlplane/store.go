@@ -2404,9 +2404,6 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 		return protocol.TaskDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
-	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-		return protocol.TaskDetail{}, false, err
-	}
 	var existingID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE request_key = ?`, input.RequestKey).Scan(&existingID)
 	if err == nil {
@@ -2418,6 +2415,9 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return protocol.TaskDetail{}, false, unavailable(err)
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.TaskDetail{}, false, err
 	}
 	if strings.HasPrefix(input.RequestKey, "automation:") {
 		return protocol.TaskDetail{}, false, invalid(
