@@ -121,6 +121,21 @@ describe("App", () => {
 		expect(upgradeRequests.length).toBeGreaterThanOrEqual(2);
 	});
 
+	it("hides legacy controls when another operator freezes a ready upgrade", async () => {
+		window.history.replaceState({}, "", "/tasks/task-running");
+		mockControlPlane({
+			productUpgrade: "ready",
+			productUpgradeFreezesAfterPoll: true,
+		});
+		renderApp();
+
+		expect(await screen.findByRole("button", { name: "Cancel" })).toBeVisible();
+		await waitFor(
+			() => expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument(),
+			{ timeout: 3_000 },
+		);
+	});
+
   it("marks only exact navigation destinations as the current page", async () => {
     mockControlPlane();
     const user = userEvent.setup();

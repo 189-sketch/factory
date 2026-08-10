@@ -147,6 +147,45 @@ func TestProductUpgradeConvertsSchedulesAndRetainsLegacyHistory(t *testing.T) {
 	assertErrorCode(t, err, "legacy_read_only")
 }
 
+func TestProductUpgradeFailsDispatchingLegacyOccurrenceDuringFreeze(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "dispatching-upgrade-workflow", "Dispatching upgrade", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/dispatching-upgrade")
+	scheduleID := insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, store.now(), true)
+	now := store.now().UnixMilli()
+	if _, err := store.db.Exec(`
+		INSERT INTO automation_occurrences(
+			id, automation_id, automation_version, automation_title, workflow_revision_id,
+			repository_id, repository_identity, state, task_request_key,
+			diagnostic, legacy_task_request_json, created_at, updated_at
+		) VALUES (
+			'dispatching-upgrade-occurrence', ?, 1, 'Legacy weekly review', ?,
+			?, ?, 'dispatching', 'dispatching-upgrade-task',
+			'legacy_resume_in_progress', '{}', ?, ?
+		)
+	`, scheduleID, workflow.Workflow.CurrentRevision.ID, repository.ID, repository.RemoteIdentity, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := store.ProductUpgrade(context.Background())
+	if err != nil || preview.Counts.PendingOccurrences != 1 {
+		t.Fatalf("upgrade preview = %#v, err=%v", preview, err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	var state, diagnostic string
+	if err := store.db.QueryRow(`
+		SELECT state, diagnostic FROM automation_occurrences WHERE id = 'dispatching-upgrade-occurrence'
+	`).Scan(&state, &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if state != "failed" || diagnostic != "legacy_upgrade_cancelled" {
+		t.Fatalf("frozen occurrence: state=%q diagnostic=%q", state, diagnostic)
+	}
+}
+
 func TestProductUpgradeResumesAfterFreezeAndRestart(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "controlplane.sqlite3")
 	store, err := Open(context.Background(), databasePath)

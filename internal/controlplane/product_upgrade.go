@@ -89,7 +89,7 @@ func (s *Store) previewProductUpgrade(ctx context.Context, queryer productUpgrad
 		{`SELECT COUNT(*) FROM workflow_revisions`, &counts.LegacyWorkflowRevisions},
 		{`SELECT COUNT(*) FROM automation_schedule_triggers WHERE definition_id IS NULL`, &counts.CompatibleSchedules},
 		{`SELECT COUNT(*) FROM automations WHERE trigger_type IN ('github_issue', 'github_pull_request')`, &counts.GitHubPollingAutomations},
-		{`SELECT COUNT(*) FROM automation_occurrences occurrence JOIN automations automation ON automation.id = occurrence.automation_id LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id WHERE occurrence.state = 'pending' AND (automation.trigger_type IN ('github_issue', 'github_pull_request') OR (automation.trigger_type = 'schedule' AND schedule.definition_id IS NULL))`, &counts.PendingOccurrences},
+		{`SELECT COUNT(*) FROM automation_occurrences occurrence JOIN automations automation ON automation.id = occurrence.automation_id LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id WHERE occurrence.state IN ('pending', 'dispatching') AND (automation.trigger_type IN ('github_issue', 'github_pull_request') OR (automation.trigger_type = 'schedule' AND schedule.definition_id IS NULL))`, &counts.PendingOccurrences},
 	}
 	for _, item := range queries {
 		if err := queryer.QueryRowContext(ctx, item.query).Scan(item.value); err != nil {
@@ -307,7 +307,7 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, cancelActive bool) (boo
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE automation_occurrences
 		SET state = 'failed', diagnostic = 'legacy_upgrade_cancelled', retry_at = NULL, updated_at = ?
-		WHERE state = 'pending' AND automation_id IN (
+		WHERE state IN ('pending', 'dispatching') AND automation_id IN (
 			SELECT automation.id FROM automations automation
 			LEFT JOIN automation_schedule_triggers schedule ON schedule.automation_id = automation.id
 			WHERE automation.trigger_type IN ('github_issue', 'github_pull_request')

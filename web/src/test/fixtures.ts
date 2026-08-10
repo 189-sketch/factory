@@ -259,6 +259,7 @@ export function mockControlPlane(
     workerRuntimeRefresh?: boolean;
 	productUpgrade?: "ready" | "draining" | "completed";
 	productUpgradeCompletesAfterPoll?: boolean;
+	productUpgradeFreezesAfterPoll?: boolean;
   } = {},
 ) {
   let createFailures = options.createFailures ?? 0;
@@ -466,6 +467,9 @@ export function mockControlPlane(
     }
 	if (path === "/api/v1/migrations/product-model") {
 		productUpgradeRequests += 1;
+		if (options.productUpgradeFreezesAfterPoll && productUpgradeRequests > 1) {
+			productUpgrade = { ...productUpgrade, state: "draining", legacy_read_only: true };
+		}
 		if (options.productUpgradeCompletesAfterPoll && productUpgradeRequests > 1) {
 			productUpgrade = { ...productUpgrade, state: "completed", legacy_read_only: true };
 		}
