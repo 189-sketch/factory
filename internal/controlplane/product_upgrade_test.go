@@ -172,16 +172,10 @@ func TestProductUpgradeResumesAfterFreezeAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := store.now().UnixMilli()
-	if _, err := store.db.Exec(`UPDATE executions SET state = 'running' WHERE id = ?`, task.Execution.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`
-		INSERT INTO attempts(
-			id, execution_id, worker_id, attempt_number, state, lease_digest,
-			lease_expires_at, started_at, created_at
-		) VALUES ('restart-upgrade-attempt', ?, 'restart-upgrade-worker', 1, 'running', X'01', ?, ?, ?)
-	`, task.Execution.ID, now+time.Hour.Milliseconds(), now, now); err != nil {
+	claim := claimTestTask(t, store, "restart-upgrade-worker", "restart-upgrade-claim", tokenA)
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA, ProcessIdentity: "restart-upgrade-agent",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -211,7 +205,23 @@ func TestProductUpgradeResumesAfterFreezeAndRestart(t *testing.T) {
 		WorkerID: "restart-upgrade-worker", RepositoryID: repository.ID, TimeoutSeconds: 600,
 	})
 	assertErrorCode(t, err, "legacy_read_only")
-	completed, err := store.ApplyProductUpgrade(context.Background(), true)
+	draining, err = store.ApplyProductUpgrade(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draining.State != "draining" || draining.Counts.ActiveExecutions != 1 {
+		t.Fatalf("cancellation did not keep upgrade draining = %#v", draining)
+	}
+	heartbeat, err := store.Heartbeat(context.Background(), claim.Attempt.ID, tokenA)
+	if err != nil || !heartbeat.CancellationRequested {
+		t.Fatalf("cancellation heartbeat = %#v, err=%v", heartbeat, err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "cancelled", Error: "cancelled for product upgrade",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
 	}

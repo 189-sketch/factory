@@ -94,6 +94,23 @@ describe("App", () => {
 		expect(await screen.findByRole("heading", { name: "succeeded task" })).toBeVisible();
 	});
 
+	it("refreshes a draining product upgrade without a manual reload", async () => {
+		window.history.replaceState({}, "", "/");
+		const fetch = mockControlPlane({
+			productUpgrade: "draining",
+			productUpgradeCompletesAfterPoll: true,
+		});
+		renderApp();
+		expect(await screen.findByRole("region", { name: "Upgrade existing Factory data" })).toBeVisible();
+
+		await waitFor(
+			() => expect(screen.queryByRole("region", { name: "Upgrade existing Factory data" })).not.toBeInTheDocument(),
+			{ timeout: 3_000 },
+		);
+		const upgradeRequests = fetch.mock.calls.filter(([input]) => String(input).endsWith("/api/v1/migrations/product-model"));
+		expect(upgradeRequests.length).toBeGreaterThanOrEqual(2);
+	});
+
   it("marks only exact navigation destinations as the current page", async () => {
     mockControlPlane();
     const user = userEvent.setup();

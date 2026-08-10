@@ -79,6 +79,9 @@ func (s *Store) ImportLegacyPoller(
 		return protocol.LegacyPollerMigration{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	var status, storedDigest string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT status, snapshot_digest FROM legacy_poller_migrations WHERE id = ?

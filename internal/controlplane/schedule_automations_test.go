@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,6 +196,11 @@ func TestSchedulePreviewEnableDueDispatchAndIdempotencyUseFakeClock(t *testing.T
 	if run.Run.SourceKind != "schedule" || run.Run.Definition.ID != detail.Automation.DefinitionID ||
 		len(run.Jobs) != 1 || run.Parameters["scope"] != "safe" {
 		t.Fatalf("scheduled Run = %#v", run)
+	}
+	if !strings.Contains(run.Jobs[0].ResolvedPrompt, `"scheduled_at":"2026-08-01T08:00:00Z"`) ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"cron":"0 9 * * *"`) ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"timezone":"Europe/London"`) {
+		t.Fatalf("scheduled Run prompt lost occurrence metadata: %q", run.Jobs[0].ResolvedPrompt)
 	}
 	if current.Occurrences[0].RunState != "queued" {
 		t.Fatalf("scheduled occurrence Run state = %q, want queued", current.Occurrences[0].RunState)

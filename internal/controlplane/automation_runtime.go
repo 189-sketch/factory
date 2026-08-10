@@ -1470,13 +1470,17 @@ func (s *Store) dispatchDefinitionScheduleOccurrence(
 ) (bool, error) {
 	s.automationDispatchMu.Lock()
 	defer s.automationDispatchMu.Unlock()
-	var automationID, definitionID, requestKey string
+	var automationID, definitionID, requestKey, kind, cron, timezone string
 	var definitionSnapshotJSON, repositoryIDsJSON, parametersJSON []byte
+	var scheduledAt sql.NullInt64
+	var runRequestKey sql.NullString
 	var concurrencyLimit, enabled int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT occurrence.automation_id, schedule.definition_id, schedule.definition_snapshot,
 		       schedule.repository_ids_json, schedule.parameters_json,
 		       schedule.concurrency_limit, occurrence.task_request_key,
+		       schedule.kind, schedule.scheduled_at, schedule.run_request_key,
+		       schedule.cron, schedule.timezone,
 		       automation.enabled
 		FROM automation_occurrences occurrence
 		JOIN automation_schedule_occurrences schedule ON schedule.occurrence_id = occurrence.id
@@ -1485,7 +1489,8 @@ func (s *Store) dispatchDefinitionScheduleOccurrence(
 		  AND schedule.definition_id IS NOT NULL
 	`, occurrenceID).Scan(
 		&automationID, &definitionID, &definitionSnapshotJSON, &repositoryIDsJSON, &parametersJSON,
-		&concurrencyLimit, &requestKey, &enabled,
+		&concurrencyLimit, &requestKey, &kind, &scheduledAt, &runRequestKey,
+		&cron, &timezone, &enabled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -1511,11 +1516,24 @@ func (s *Store) dispatchDefinitionScheduleOccurrence(
 	if err := json.Unmarshal(parametersJSON, &parameters); err != nil {
 		return true, unavailable(err)
 	}
+	identity := runRequestKey.String
+	if kind == "scheduled" {
+		if !scheduledAt.Valid {
+			return true, unavailable(errors.New("scheduled occurrence is missing its due instant"))
+		}
+		identity = fromMillis(scheduledAt.Int64).UTC().Format(time.RFC3339)
+	}
+	resolvedPrompt, err := protocol.ResolveDefinitionSchedulePrompt(
+		definitionSnapshot.Prompt, parameters, kind, identity, cron, timezone,
+	)
+	if err != nil {
+		return true, unavailable(err)
+	}
 	run, _, err := s.createScheduledRun(ctx, protocol.CreateRunRequest{
 		RequestKey: requestKey, DefinitionID: definitionID,
 		RepositoryIDs: repositoryIDs, Parameters: parameters,
 		ConcurrencyLimit: concurrencyLimit,
-	}, definitionSnapshot)
+	}, definitionSnapshot, resolvedPrompt)
 	if err != nil {
 		var serviceErr *ServiceError
 		if errors.As(err, &serviceErr) && serviceErr.Status < 500 {

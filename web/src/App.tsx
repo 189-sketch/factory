@@ -89,6 +89,7 @@ export function App() {
 		queryKey: ["product-upgrade"],
 		queryFn: api.productUpgrade,
 		staleTime: 30_000,
+		refetchInterval: (query) => query.state.data?.state === "draining" ? 2_000 : false,
 	});
 	const legacyReadOnly = Boolean(productUpgrade.data?.legacy_read_only);
 

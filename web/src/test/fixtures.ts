@@ -258,6 +258,7 @@ export function mockControlPlane(
     workerOfflineAfterConnectionTest?: boolean;
     workerRuntimeRefresh?: boolean;
 	productUpgrade?: "ready" | "draining" | "completed";
+	productUpgradeCompletesAfterPoll?: boolean;
   } = {},
 ) {
   let createFailures = options.createFailures ?? 0;
@@ -371,6 +372,7 @@ export function mockControlPlane(
 		},
 		schedules: [], polling_automations: [], decisions: [],
 	};
+	let productUpgradeRequests = 0;
   let workflowDetail = structuredClone(initialWorkflowDetail);
   let automationDetail = structuredClone(initialAutomationDetail);
   if (options.automationTaskState) {
@@ -463,6 +465,10 @@ export function mockControlPlane(
       return Response.json({ ...metrics, window });
     }
 	if (path === "/api/v1/migrations/product-model") {
+		productUpgradeRequests += 1;
+		if (options.productUpgradeCompletesAfterPoll && productUpgradeRequests > 1) {
+			productUpgrade = { ...productUpgrade, state: "completed", legacy_read_only: true };
+		}
 		return Response.json(productUpgrade);
 	}
 	if (path === "/api/v1/migrations/product-model/apply" && init?.method === "POST") {

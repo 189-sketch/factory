@@ -323,20 +323,9 @@ func (s *Store) cancelActiveLegacyExecutions(ctx context.Context) error {
 
 func cancelActiveLegacyExecutionsTx(ctx context.Context, tx *sql.Tx, now int64) error {
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE attempts
-		SET state = 'cancelled', error = 'cancelled during the Factory product upgrade', completed_at = ?
-		WHERE state IN ('preparing', 'running')
-		  AND EXISTS (
-		      SELECT 1 FROM executions execution
-		      WHERE execution.id = attempts.execution_id
-		        AND NOT EXISTS (SELECT 1 FROM jobs job WHERE job.execution_id = execution.id)
-		  )
-	`, now); err != nil {
-		return unavailable(err)
-	}
-	if _, err := tx.ExecContext(ctx, `
 		UPDATE executions
-		SET state = 'cancelled', cancellation_requested = 1,
+		SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END,
+		    cancellation_requested = CASE WHEN state IN ('preparing', 'running') THEN 1 ELSE cancellation_requested END,
 		    updated_at = ?
 		WHERE state IN ('queued', 'preparing', 'running')
 		  AND NOT EXISTS (SELECT 1 FROM jobs job WHERE job.execution_id = executions.id)

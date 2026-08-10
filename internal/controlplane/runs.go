@@ -109,8 +109,9 @@ func (s *Store) createScheduledRun(
 	ctx context.Context,
 	input protocol.CreateRunRequest,
 	snapshot protocol.DefinitionSnapshot,
+	resolvedPrompt string,
 ) (protocol.RunDetail, bool, error) {
-	return s.createRun(ctx, input, "schedule", &snapshot, "", "")
+	return s.createRun(ctx, input, "schedule", &snapshot, resolvedPrompt, "")
 }
 
 func (s *Store) createWebhookRun(

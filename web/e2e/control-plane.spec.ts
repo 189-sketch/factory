@@ -863,6 +863,9 @@ test("shows ordered progress and long task detail", async ({ page }) => {
     identifiers.automationRepository,
   );
   const active = await claimAndStart(api, `claim-progress-${fixtureID}`, automationWorker);
+	identifiers.progressTask = running.task.id;
+	identifiers.progressAttempt = active.attempt.id;
+	identifiers.progressToken = active.token;
   const eventsResponse = await api.post(`/api/v1/attempts/${active.attempt.id}/events`, {
     data: {
       lease_token: active.token,
@@ -1370,21 +1373,30 @@ test("upgrades existing Factory data and keeps legacy task history browsable", a
 			},
 		}));
 	}
+	if (identifiers.progressTask) {
+		const progress = await json<TaskDetail>(await api.get(`/api/v1/tasks/${identifiers.progressTask}`));
+		if (progress.execution.state === "preparing" || progress.execution.state === "running") {
+			await json(await api.post(`/api/v1/attempts/${identifiers.progressAttempt}/complete`, {
+				data: {
+					lease_token: identifiers.progressToken,
+					state: "succeeded",
+					result: "Completed before the product upgrade browser proof.",
+				},
+			}));
+		}
+	}
 
 	await page.goto("/");
 	const panel = page.getByRole("region", { name: "Upgrade existing Factory data" });
 	await expect(panel).toBeVisible();
 	await expect(panel.getByText("Tasks retained")).toBeVisible();
 	await panel.getByRole("button", { name: "Freeze and cancel active work" }).click();
-	await expect.poll(async () => {
-		const state = await json<{ counts: { active_executions: number } }>(
-			await api.get("/api/v1/migrations/product-model"),
-		);
-		return state.counts.active_executions;
-	}, { timeout: 30_000 }).toBe(0);
-	await page.reload();
 	const finish = panel.getByRole("button", { name: "Finish upgrade" });
-	if (await finish.isVisible()) await finish.click();
+	await expect.poll(async () => {
+		if (await panel.count() === 0) return "completed";
+		return await finish.isVisible() ? "ready-to-finish" : "draining";
+	}, { timeout: 30_000 }).not.toBe("draining");
+	if (await panel.count() !== 0) await finish.click();
 	await expect(panel).toHaveCount(0);
 
 	const upgrade = await json<{
