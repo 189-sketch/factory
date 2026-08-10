@@ -32,11 +32,13 @@ import {
 export function TaskDetail({
   id,
   workers,
+  legacyReadOnly,
   onBack,
   onDeleted,
 }: {
   id: string;
   workers: Worker[];
+  legacyReadOnly: boolean;
   onBack: () => void;
   onDeleted: () => void;
 }) {
@@ -174,12 +176,12 @@ export function TaskDetail({
           <p>Created {new Date(data.task.created_at).toLocaleString()}</p>
         </div>
         <div className="detail-actions">
-          {active && !confirmCancel && (
+          {!legacyReadOnly && active && !confirmCancel && (
             <button className="button button-danger-secondary" onClick={() => setConfirmCancel(true)}>
               <Square size={14} /> Cancel
             </button>
           )}
-          {confirmCancel && (
+          {!legacyReadOnly && confirmCancel && (
             <div className="confirm-action" role="alert">
               <span>Cancel this task?</span>
               <button className="button button-danger" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
@@ -188,18 +190,18 @@ export function TaskDetail({
               <button className="button button-secondary" onClick={() => setConfirmCancel(false)}>Keep running</button>
             </div>
           )}
-          {retryable && (
+          {!legacyReadOnly && retryable && (
             <button className="button button-primary" onClick={() => retry.mutate()} disabled={retry.isPending}>
               <RefreshCw size={15} className={retry.isPending ? "spin" : ""} />
               {retry.isPending ? "Retrying…" : "Retry task"}
             </button>
           )}
-          {!active && !confirmDelete && (
+          {!legacyReadOnly && !active && !confirmDelete && (
             <button className="button button-danger-secondary" onClick={() => setConfirmDelete(true)}>
               <Trash2 size={14} /> Delete history
             </button>
           )}
-          {confirmDelete && (
+          {!legacyReadOnly && confirmDelete && (
             <div className="confirm-action" role="alert">
               <span>Permanently delete this task, prompt, attempts, and events?</span>
               <button

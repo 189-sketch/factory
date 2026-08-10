@@ -479,6 +479,25 @@ func TestProductUpgradeCountsFinalizedPollerOccurrencesAsRetained(t *testing.T) 
 	}
 }
 
+func TestProductUpgradeAllowsPreviewedLegacyPollerMigration(t *testing.T) {
+	queueID := legacyQueueID(legacyPollerQueue{Name: "github-ready", Source: "github", Project: "example/project"})
+	fixture := newLegacyMigrationFixture(t, []legacyPollerObservation{legacyPendingRequest(t, queueID, 92)})
+	store := newTestStore(t)
+	createManagedTestRepository(t, store, "github.com/example/project")
+	createTestWorkflow(t, store, "previewed-poller-workflow", "Previewed poller", "Keep this legacy workflow.")
+
+	preview, err := store.PreviewLegacyPoller(context.Background(), protocol.PreviewLegacyPollerRequest{
+		LegacyPollerSelection: migrationSelection(fixture),
+	})
+	if err != nil || preview.Status != "previewed" {
+		t.Fatalf("preview legacy poller = %#v, err=%v", preview, err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+}
+
 func insertLegacyScheduleForUpgrade(
 	t *testing.T,
 	store *Store,

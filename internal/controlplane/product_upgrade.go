@@ -240,7 +240,7 @@ func (s *Store) freezeLegacyProduct(ctx context.Context, cancelActive bool) (boo
 		return false, unavailable(err)
 	}
 	var unfinishedPollerImports int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_poller_migrations WHERE status != 'finalized'`).Scan(&unfinishedPollerImports); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_poller_migrations WHERE status = 'imported'`).Scan(&unfinishedPollerImports); err != nil {
 		return false, unavailable(err)
 	}
 	if unfinishedPollerImports != 0 {

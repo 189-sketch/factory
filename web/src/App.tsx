@@ -340,6 +340,7 @@ export function App() {
             <TaskDetail
               id={route.id}
               workers={workers.data ?? []}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "work" })}
               onDeleted={() => {
                 deletedTaskIDs.current.add(route.id);

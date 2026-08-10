@@ -92,6 +92,16 @@ describe("App", () => {
 		expect(screen.getByText("Read-only history")).toBeVisible();
 		await user.click(screen.getByRole("button", { name: /succeeded task/i }));
 		expect(await screen.findByRole("heading", { name: "succeeded task" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Delete history" })).not.toBeInTheDocument();
+	});
+
+	it("hides active legacy task mutations after the product upgrade freezes", async () => {
+		window.history.replaceState({}, "", "/tasks/task-running");
+		mockControlPlane({ productUpgrade: "draining" });
+		renderApp();
+
+		expect(await screen.findByRole("heading", { name: "running task" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
 	});
 
 	it("refreshes a draining product upgrade without a manual reload", async () => {
