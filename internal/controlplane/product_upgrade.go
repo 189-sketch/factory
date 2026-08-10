@@ -430,6 +430,7 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 		return unavailable(err)
 	}
 	now := s.now().UnixMilli()
+	migratedDefinitionIDs := make([]string, 0, len(schedules))
 	for _, legacy := range schedules {
 		definitionID, err := newID()
 		if err != nil {
@@ -498,6 +499,7 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 		`, legacy.automationID, legacy.repositoryID); err != nil {
 			return unavailable(err)
 		}
+		migratedDefinitionIDs = append(migratedDefinitionIDs, definitionID)
 	}
 	var validation protocol.ProductUpgradeValidation
 	validation.DefinitionsCreated = len(schedules)
@@ -526,8 +528,12 @@ func (s *Store) finishProductUpgrade(ctx context.Context) error {
 	`).Scan(&validation.LegacyAttemptsRetained); err != nil {
 		return unavailable(err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE request_key LIKE 'product-upgrade:%'`).Scan(&validation.SyntheticRunsCreated); err != nil {
-		return unavailable(err)
+	for _, definitionID := range migratedDefinitionIDs {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE definition_id = ?`, definitionID).Scan(&count); err != nil {
+			return unavailable(err)
+		}
+		validation.SyntheticRunsCreated += count
 	}
 	if validation.SyntheticRunsCreated != 0 {
 		return unavailable(errors.New("product upgrade created synthetic Runs"))

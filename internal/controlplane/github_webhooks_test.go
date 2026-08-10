@@ -174,6 +174,44 @@ func TestGitHubWebhookAutomationRequiresGitHubCLI(t *testing.T) {
 	assertErrorCode(t, err, "webhook_gh_required")
 }
 
+func TestGitHubWebhookAutomationReservesWorstCaseEnvelope(t *testing.T) {
+	store := newTestStore(t)
+	definition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "webhook-envelope-definition", Name: "Webhook envelope limit",
+		Prompt:  string(bytes.Repeat([]byte("p"), protocol.MaxDefinitionPromptBytes)),
+		Runtime: protocol.RuntimeCodex, AllowedTools: []string{"git", "gh"}, TimeoutSeconds: 600,
+		Inputs: map[string]string{},
+	})
+	if err != nil || !created {
+		t.Fatalf("create Definition: created=%t err=%v", created, err)
+	}
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/webhook-envelope")
+	_, created, err = store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "webhook-envelope-automation", Title: "Reject oversized webhook prompt",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerGitHubWebhook, Actions: []string{"opened"}},
+	})
+	if created {
+		t.Fatal("webhook Automation with oversized worst-case prompt was created")
+	}
+	assertErrorCode(t, err, "resolved_prompt_too_large")
+}
+
+func TestGitHubWebhookRejectsOversizedPromptMetadata(t *testing.T) {
+	store := newTestStore(t)
+	delivery := GitHubPullRequestWebhook{
+		DeliveryID: "oversized-webhook-metadata", Action: "opened",
+		RepositoryIdentity: "github.com/owainlewis/factory",
+		PullRequest: protocol.GitHubPullRequestMatch{
+			Number: 1, URL: "https://github.com/owainlewis/factory/pull/1",
+			Title:      strings.Repeat("x", maxGitHubWebhookTitleBytes+1),
+			BaseBranch: "main", HeadCommit: strings.Repeat("a", 40),
+		},
+	}
+	_, err := store.AcceptGitHubPullRequestWebhook(context.Background(), delivery, []byte("oversized"))
+	assertErrorCode(t, err, "invalid_webhook_payload")
+}
+
 func TestGitHubWebhookDispatchContinuesAfterOneAutomationFails(t *testing.T) {
 	store := newTestStore(t)
 	definition := createTestDefinition(t, store, "webhook-fanout-definition", "Review fanout")

@@ -528,6 +528,157 @@ func TestProductUpgradeAllowsLegacyTaskRequestReplayAfterFreeze(t *testing.T) {
 	}
 }
 
+func TestProductUpgradeIgnoresUserRunWithProductUpgradeRequestKey(t *testing.T) {
+	store := newTestStore(t)
+	createTestWorkflow(t, store, "synthetic-run-workflow", "Synthetic Run guard", "Keep this legacy workflow.")
+	definition := createTestDefinition(t, store, "synthetic-run-definition", "User Run")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/user-product-upgrade-run")
+	run, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "product-upgrade:user-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+	})
+	if err != nil || !created {
+		t.Fatalf("create user Run: created=%t err=%v", created, err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" || completed.Validation == nil ||
+		completed.Validation.SyntheticRunsCreated != 0 {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	retained, err := store.Run(context.Background(), run.Run.ID)
+	if err != nil || retained.Run.RequestKey != "product-upgrade:user-run" {
+		t.Fatalf("retained user Run = %#v, err=%v", retained.Run, err)
+	}
+}
+
+func TestProductUpgradeIgnoresUserDefinitionMutationWithGeneratedRequestKey(t *testing.T) {
+	store := newTestStore(t)
+	createTestWorkflow(t, store, "synthetic-mutation-workflow", "Synthetic mutation guard", "Keep this legacy workflow.")
+	definition := createTestDefinition(t, store, "synthetic-mutation-definition", "User scheduled Definition")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/user-product-upgrade-mutation")
+	automation, created, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "synthetic-mutation-schedule", Title: "User schedule",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+		Trigger: protocol.AutomationTrigger{
+			Type: protocol.AutomationTriggerSchedule, Cron: "0 9 * * *", Timezone: "UTC",
+		},
+	})
+	if err != nil || !created {
+		t.Fatalf("create schedule: created=%t err=%v", created, err)
+	}
+	if _, created, err := store.CreateRun(context.Background(), protocol.CreateRunRequest{
+		RequestKey: "synthetic-mutation-run", DefinitionID: definition.ID,
+		RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+	}); err != nil || !created {
+		t.Fatalf("create user Run: created=%t err=%v", created, err)
+	}
+	if _, changed, err := store.UpdateDefinition(context.Background(), definition.ID, protocol.UpdateDefinitionRequest{
+		RequestKey:         productUpgradeDefinitionMutationKey(automation.Automation.ID),
+		ExpectedGeneration: definition.Generation, Name: definition.Name,
+		Prompt: definition.Prompt, Runtime: definition.Runtime, AllowedTools: definition.AllowedTools,
+		TimeoutSeconds: definition.TimeoutSeconds, Inputs: definition.Inputs,
+	}); err != nil || !changed {
+		t.Fatalf("update Definition: changed=%t err=%v", changed, err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" || completed.Validation == nil ||
+		completed.Validation.SyntheticRunsCreated != 0 {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+}
+
+func TestProductUpgradeAllowsWorkflowMutationReplaysAfterFreeze(t *testing.T) {
+	store := newTestStore(t)
+	createRequest := protocol.CreateWorkflowRequest{
+		RequestKey: "upgrade-workflow-replay", Title: "Upgrade Workflow replay",
+		Summary: "Retain idempotency.", Instructions: "Keep this Workflow.",
+	}
+	created, wasCreated, err := store.CreateWorkflow(context.Background(), createRequest)
+	if err != nil || !wasCreated {
+		t.Fatalf("create Workflow: created=%t err=%v", wasCreated, err)
+	}
+	revisionRequest := protocol.CreateWorkflowRevisionRequest{
+		RequestKey:         "upgrade-workflow-revision-replay",
+		ExpectedRevisionID: created.Workflow.CurrentRevision.ID,
+		Title:              "Upgrade Workflow replay", Summary: "Retain revision idempotency.",
+		Instructions: "Keep this Workflow revision.",
+	}
+	revised, wasCreated, err := store.CreateWorkflowRevision(context.Background(), created.Workflow.ID, revisionRequest)
+	if err != nil || !wasCreated {
+		t.Fatalf("create Workflow revision: created=%t err=%v", wasCreated, err)
+	}
+	if _, err := store.SetWorkflowEnabled(context.Background(), created.Workflow.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	createReplay, wasCreated, err := store.CreateWorkflow(context.Background(), createRequest)
+	if err != nil || wasCreated || createReplay.Workflow.ID != created.Workflow.ID {
+		t.Fatalf("Workflow create replay = %#v, created=%t err=%v", createReplay, wasCreated, err)
+	}
+	revisionReplay, wasCreated, err := store.CreateWorkflowRevision(context.Background(), created.Workflow.ID, revisionRequest)
+	if err != nil || wasCreated || revisionReplay.Workflow.CurrentRevision.ID != revised.Workflow.CurrentRevision.ID {
+		t.Fatalf("Workflow revision replay = %#v, created=%t err=%v", revisionReplay, wasCreated, err)
+	}
+	enabledReplay, err := store.SetWorkflowEnabled(context.Background(), created.Workflow.ID, false)
+	if err != nil || enabledReplay.Workflow.Enabled {
+		t.Fatalf("Workflow enabled-state replay = %#v, err=%v", enabledReplay.Workflow, err)
+	}
+}
+
+func TestProductUpgradeAllowsLegacyAutomationMutationReplaysAfterFreeze(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "upgrade-automation-workflow", "Upgrade Automation", "Keep this Automation.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/upgrade-automation")
+	createRequest := protocol.CreateAutomationRequest{
+		RequestKey: "upgrade-automation-replay", Title: "Upgrade Automation replay",
+		WorkflowID: workflow.Workflow.ID, RepositoryID: repository.ID,
+		Context: "Retain idempotency.", TimeoutSeconds: 600,
+		Trigger: protocol.AutomationTrigger{
+			Type: protocol.AutomationTriggerGitHubIssue, State: "open", PollIntervalSeconds: 60,
+		},
+	}
+	created, wasCreated, err := store.CreateAutomation(context.Background(), createRequest)
+	if err != nil || !wasCreated {
+		t.Fatalf("create Automation: created=%t err=%v", wasCreated, err)
+	}
+	updateRequest := protocol.UpdateAutomationRequest{
+		ExpectedVersion: 1, Title: "Updated Automation replay", WorkflowID: workflow.Workflow.ID,
+		Context: "Retain updated idempotency.", TimeoutSeconds: 900,
+		Trigger: protocol.AutomationTrigger{
+			Type: protocol.AutomationTriggerGitHubIssue, State: "open", PollIntervalSeconds: 120,
+		},
+	}
+	updated, err := store.UpdateAutomation(context.Background(), created.Automation.ID, updateRequest)
+	if err != nil || updated.Automation.Version != 2 {
+		t.Fatalf("update Automation = %#v, err=%v", updated.Automation, err)
+	}
+	if _, err := store.SetAutomationEnabled(context.Background(), created.Automation.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetAutomationEnabled(context.Background(), created.Automation.ID, false, false); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("product upgrade = %#v, err=%v", completed, err)
+	}
+	createReplay, wasCreated, err := store.CreateAutomation(context.Background(), createRequest)
+	if err != nil || wasCreated || createReplay.Automation.ID != created.Automation.ID {
+		t.Fatalf("Automation create replay = %#v, created=%t err=%v", createReplay, wasCreated, err)
+	}
+	updateReplay, err := store.UpdateAutomation(context.Background(), created.Automation.ID, updateRequest)
+	if err != nil || updateReplay.Automation.Version != updated.Automation.Version {
+		t.Fatalf("Automation update replay = %#v, err=%v", updateReplay.Automation, err)
+	}
+	enabledReplay, err := store.SetAutomationEnabled(context.Background(), created.Automation.ID, false, false)
+	if err != nil || enabledReplay.Automation.Enabled {
+		t.Fatalf("Automation enabled-state replay = %#v, err=%v", enabledReplay.Automation, err)
+	}
+}
+
 func insertLegacyScheduleForUpgrade(
 	t *testing.T,
 	store *Store,

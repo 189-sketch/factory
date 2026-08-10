@@ -88,9 +88,6 @@ func (s *Store) CreateWorkflow(
 		return protocol.WorkflowDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
-	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-		return protocol.WorkflowDetail{}, false, err
-	}
 	workflowID, replay, err := workflowMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.WorkflowDetail{}, false, err
@@ -101,6 +98,9 @@ func (s *Store) CreateWorkflow(
 		}
 		detail, err := s.Workflow(ctx, workflowID)
 		return detail, false, err
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
 	}
 	var conflictingID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM workflows WHERE current_title_key = ?`, titleKey).Scan(&conflictingID)
@@ -177,9 +177,6 @@ func (s *Store) CreateWorkflowRevision(
 		return protocol.WorkflowDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
-	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-		return protocol.WorkflowDetail{}, false, err
-	}
 	replayWorkflowID, replay, err := workflowMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.WorkflowDetail{}, false, err
@@ -190,6 +187,9 @@ func (s *Store) CreateWorkflowRevision(
 		}
 		detail, err := s.Workflow(ctx, replayWorkflowID)
 		return detail, false, err
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
 	}
 	var currentRevisionID string
 	var currentRevisionNumber int
@@ -378,9 +378,6 @@ func (s *Store) SetWorkflowEnabled(ctx context.Context, workflowID string, enabl
 		return protocol.WorkflowDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
-	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-		return protocol.WorkflowDetail{}, err
-	}
 	var currentEnabled bool
 	err = tx.QueryRowContext(ctx, `SELECT enabled FROM workflows WHERE id = ?`, workflowID).Scan(&currentEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -394,6 +391,9 @@ func (s *Store) SetWorkflowEnabled(ctx context.Context, workflowID string, enabl
 			return protocol.WorkflowDetail{}, unavailable(err)
 		}
 		return s.Workflow(ctx, workflowID)
+	}
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflows

@@ -367,11 +367,6 @@ func (s *Store) CreateAutomation(
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
-	if value.DefinitionID == "" {
-		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-			return protocol.AutomationDetail{}, false, err
-		}
-	}
 	var existingID string
 	var existingDigest []byte
 	err = tx.QueryRowContext(ctx, `SELECT id, request_digest FROM automations WHERE request_key = ?`, value.RequestKey).
@@ -388,6 +383,11 @@ func (s *Store) CreateAutomation(
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return protocol.AutomationDetail{}, false, unavailable(err)
+	}
+	if value.DefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, false, err
+		}
 	}
 	if value.Trigger.Type == protocol.AutomationTriggerSchedule || value.Trigger.Type == protocol.AutomationTriggerGitHubWebhook {
 		if err := validateDefinitionScheduleDependencies(
@@ -625,7 +625,27 @@ func validateDefinitionScheduleDependencies(
 				remoteIdentity = canonical
 			}
 		}
-		for _, prompt := range resolvedPrompts {
+		repositoryPrompts := resolvedPrompts
+		if triggerType == protocol.AutomationTriggerGitHubWebhook {
+			webhookPrompt, resolveErr := protocol.ResolveGitHubWebhookPrompt(
+				resolvedPrompt,
+				strings.Repeat("<", maxGitHubWebhookDeliveryIDBytes),
+				"synchronize",
+				remoteIdentity,
+				protocol.GitHubPullRequestMatch{
+					Number:     int(^uint(0) >> 1),
+					URL:        strings.Repeat("<", maxGitHubWebhookURLBytes),
+					Title:      strings.Repeat("<", maxGitHubWebhookTitleBytes),
+					BaseBranch: strings.Repeat("<", maxGitHubWebhookBranchBytes),
+					HeadCommit: strings.Repeat("<", maxGitHubWebhookCommitBytes),
+				},
+			)
+			if resolveErr != nil {
+				return unavailable(resolveErr)
+			}
+			repositoryPrompts = append(append([]string{}, resolvedPrompts...), webhookPrompt)
+		}
+		for _, prompt := range repositoryPrompts {
 			if len([]byte(prompt)) > protocol.MaxResolvedPromptBytes {
 				return invalid("resolved_prompt_too_large", "the resolved schedule prompt exceeds the Task limit")
 			}
@@ -1058,11 +1078,6 @@ func (s *Store) UpdateAutomation(
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
-	if currentDefinitionID == "" {
-		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-			return protocol.AutomationDetail{}, err
-		}
-	}
 	if currentType != value.Trigger.Type {
 		return protocol.AutomationDetail{}, conflict("automation_trigger_type_immutable", "trigger type is immutable; create a new Automation")
 	}
@@ -1126,6 +1141,11 @@ func (s *Store) UpdateAutomation(
 			return protocol.AutomationDetail{}, unavailable(err)
 		}
 		return s.Automation(ctx, automationID)
+	}
+	if currentDefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, err
+		}
 	}
 	if enabled != 0 {
 		return protocol.AutomationDetail{}, conflict("automation_enabled", "disable the Automation before editing it")
@@ -1286,17 +1306,17 @@ func (s *Store) setAutomationEnabled(
 	if err != nil {
 		return protocol.AutomationDetail{}, "", unavailable(err)
 	}
-	if definitionID == "" {
-		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
-			return protocol.AutomationDetail{}, "", err
-		}
-	}
 	if enabled == (currentEnabled != 0) {
 		if err := tx.Commit(); err != nil {
 			return protocol.AutomationDetail{}, "", unavailable(err)
 		}
 		detail, err := s.Automation(ctx, automationID)
 		return detail, "", err
+	}
+	if definitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, "", err
+		}
 	}
 	if enabled {
 		var migrationStatus string
