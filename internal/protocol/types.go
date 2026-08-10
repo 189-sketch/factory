@@ -856,6 +856,65 @@ type ActiveLegacyPollerMigrationResponse struct {
 	Migration *LegacyPollerMigration `json:"migration"`
 }
 
+type ProductUpgradeCounts struct {
+	LegacyTasks              int `json:"legacy_tasks"`
+	LegacyAttempts           int `json:"legacy_attempts"`
+	LegacyWorkflows          int `json:"legacy_workflows"`
+	LegacyWorkflowRevisions  int `json:"legacy_workflow_revisions"`
+	CompatibleSchedules      int `json:"compatible_schedules"`
+	GitHubPollingAutomations int `json:"github_polling_automations"`
+	PendingOccurrences       int `json:"pending_occurrences"`
+	ActiveExecutions         int `json:"active_executions"`
+}
+
+type ProductUpgradeSchedule struct {
+	AutomationID   string     `json:"automation_id"`
+	Title          string     `json:"title"`
+	DefinitionName string     `json:"definition_name"`
+	RepositoryID   string     `json:"repository_id"`
+	Cron           string     `json:"cron"`
+	Timezone       string     `json:"timezone"`
+	NextDueAt      *time.Time `json:"next_due_at,omitempty"`
+	Enabled        bool       `json:"enabled"`
+}
+
+type ProductUpgradePollingAutomation struct {
+	AutomationID string `json:"automation_id"`
+	Title        string `json:"title"`
+	TriggerType  string `json:"trigger_type"`
+	Guidance     string `json:"guidance"`
+}
+
+type ProductUpgradeValidation struct {
+	DefinitionsCreated        int       `json:"definitions_created"`
+	SchedulesConverted        int       `json:"schedules_converted"`
+	PollingAutomationsRetired int       `json:"polling_automations_retired"`
+	LegacyTasksRetained       int       `json:"legacy_tasks_retained"`
+	LegacyOccurrencesRetained int       `json:"legacy_occurrences_retained"`
+	LegacyAttemptsRetained    int       `json:"legacy_attempts_retained"`
+	SyntheticRunsCreated      int       `json:"synthetic_runs_created"`
+	ValidatedAt               time.Time `json:"validated_at"`
+}
+
+type ProductUpgrade struct {
+	ID             string                            `json:"id"`
+	State          string                            `json:"state"`
+	LegacyReadOnly bool                              `json:"legacy_read_only"`
+	Needed         bool                              `json:"needed"`
+	Counts         ProductUpgradeCounts              `json:"counts"`
+	Schedules      []ProductUpgradeSchedule          `json:"schedules"`
+	Polling        []ProductUpgradePollingAutomation `json:"polling_automations"`
+	Decisions      []string                          `json:"decisions"`
+	Validation     *ProductUpgradeValidation         `json:"validation,omitempty"`
+	CreatedAt      *time.Time                        `json:"created_at,omitempty"`
+	UpdatedAt      *time.Time                        `json:"updated_at,omitempty"`
+	CompletedAt    *time.Time                        `json:"completed_at,omitempty"`
+}
+
+type ApplyProductUpgradeRequest struct {
+	CancelActive bool `json:"cancel_active"`
+}
+
 type AutomationDetail struct {
 	Automation  Automation             `json:"automation"`
 	Occurrences []AutomationOccurrence `json:"occurrences"`

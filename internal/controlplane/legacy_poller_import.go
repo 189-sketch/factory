@@ -17,6 +17,9 @@ func (s *Store) ImportLegacyPoller(
 	ctx context.Context,
 	input protocol.ImportLegacyPollerRequest,
 ) (protocol.LegacyPollerMigration, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.LegacyPollerMigration{}, err
+	}
 	if !input.ConfirmStopped {
 		return protocol.LegacyPollerMigration{}, invalid(
 			"legacy_poller_confirmation_required",

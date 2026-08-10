@@ -72,6 +72,28 @@ describe("App", () => {
     expect(window.location.search).toBe("?job=job-health-failed");
   });
 
+	it("upgrades existing data and keeps legacy task history browsable", async () => {
+		window.history.replaceState({}, "", "/");
+		mockControlPlane({ productUpgrade: "ready" });
+		const user = userEvent.setup();
+		renderApp();
+
+		const panel = await screen.findByRole("region", { name: "Upgrade existing Factory data" });
+		expect(within(within(panel).getByText("Schedules to convert").parentElement!).getByText("1")).toBeVisible();
+		expect(within(within(panel).getByText("Tasks retained").parentElement!).getByText("5")).toBeVisible();
+		await user.click(within(panel).getByText("Review upgrade decisions"));
+		expect(within(panel).getByText(/configure a GitHub webhook/)).toBeVisible();
+		await user.click(within(panel).getByRole("button", { name: "Upgrade Factory" }));
+		await waitFor(() => expect(screen.queryByRole("region", { name: "Upgrade existing Factory data" })).not.toBeInTheDocument());
+		expect(screen.queryByRole("button", { name: "Delegate task" })).not.toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: /^Work$/ }));
+		expect(await screen.findByRole("heading", { name: "Legacy task history" })).toBeVisible();
+		expect(screen.getByText("Read-only history")).toBeVisible();
+		await user.click(screen.getByRole("button", { name: /succeeded task/i }));
+		expect(await screen.findByRole("heading", { name: "succeeded task" })).toBeVisible();
+	});
+
   it("marks only exact navigation destinations as the current page", async () => {
     mockControlPlane();
     const user = userEvent.setup();

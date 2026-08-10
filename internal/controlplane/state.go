@@ -638,6 +638,9 @@ func (s *Store) CancelTask(ctx context.Context, taskID string) (protocol.TaskDet
 		return protocol.TaskDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.TaskDetail{}, err
+	}
 	var executionID, state string
 	var runJob int
 	err = tx.QueryRowContext(ctx, `
@@ -679,6 +682,9 @@ func (s *Store) RetryExecution(ctx context.Context, executionID string) (protoco
 		return protocol.TaskDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.TaskDetail{}, err
+	}
 	var taskID, state, workerID, repositoryID, requiredRuntime, workerRuntime string
 	var runJob int
 	var encodedCapabilities []byte

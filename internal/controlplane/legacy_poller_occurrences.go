@@ -16,6 +16,9 @@ func (s *Store) ResumeLegacyPollerOccurrence(
 	ctx context.Context,
 	occurrenceID string,
 ) (protocol.AutomationOccurrence, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	occurrenceID = strings.TrimSpace(occurrenceID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -146,6 +149,9 @@ func (s *Store) SkipLegacyPollerOccurrence(
 	ctx context.Context,
 	occurrenceID string,
 ) (protocol.AutomationOccurrence, error) {
+	if err := s.legacyProductReadOnly(ctx, s.db); err != nil {
+		return protocol.AutomationOccurrence{}, err
+	}
 	occurrenceID = strings.TrimSpace(occurrenceID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

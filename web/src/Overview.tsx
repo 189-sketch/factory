@@ -1,11 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
-import { Gauge, Users } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { DatabaseBackup, Gauge, Users } from "lucide-react";
 import { useState } from "react";
 import { api } from "./api";
 import { duration, timeAgo } from "./format";
 import { useVisibleInterval } from "./polling";
-import type { JobState, MetricsFilters, MetricsSummary, MetricsWindow, RunMetricJob } from "./types";
-import { ErrorState, LoadingState, PanelHeading, StaleBanner, StatusBadge, ViewHeader } from "./ui";
+import type { JobState, MetricsFilters, MetricsSummary, MetricsWindow, ProductUpgrade, RunMetricJob } from "./types";
+import { ErrorState, InlineError, LoadingState, PanelHeading, StaleBanner, StatusBadge, ViewHeader } from "./ui";
 
 const windows: Array<{ value: MetricsWindow; label: string }> = [
   { value: "24h", label: "24 hours" },
@@ -16,7 +16,11 @@ const windows: Array<{ value: MetricsWindow; label: string }> = [
 
 type JobView = "all" | "active" | "blocked" | "succeeded" | "failed" | "finished" | "started" | "terminal";
 
-export function Overview({ onRun }: { onRun: (id: string, jobID?: string) => void }) {
+export function Overview({ onRun, upgrade, upgradeError }: {
+	onRun: (id: string, jobID?: string) => void;
+	upgrade?: ProductUpgrade;
+	upgradeError: Error | null;
+}) {
   const [window, setWindow] = useState<MetricsWindow>("7d");
   const [filters, setFilters] = useState<MetricsFilters>({});
   const [jobView, setJobView] = useState<JobView>("all");
@@ -41,6 +45,7 @@ export function Overview({ onRun }: { onRun: (id: string, jobID?: string) => voi
         onRefresh={() => void metrics.refetch()}
       />
       {metrics.error && <StaleBanner error={metrics.error} />}
+	  <ProductUpgradePanel upgrade={upgrade} error={upgradeError} />
       <div className="metrics-toolbar">
         <span>Job admission window</span>
         <div className="window-picker" aria-label="Metrics window">
@@ -61,6 +66,44 @@ export function Overview({ onRun }: { onRun: (id: string, jobID?: string) => voi
       />}
     </div>
   );
+}
+
+function ProductUpgradePanel({ upgrade, error }: { upgrade?: ProductUpgrade; error: Error | null }) {
+	const queryClient = useQueryClient();
+	const apply = useMutation({
+		mutationFn: api.applyProductUpgrade,
+		onSuccess: async (result) => {
+			queryClient.setQueryData(["product-upgrade"], result);
+			await queryClient.invalidateQueries();
+		},
+	});
+	if (!upgrade?.needed || upgrade.state === "completed") return error ? <InlineError error={error} /> : null;
+	const draining = upgrade.state === "draining";
+	return <section className="panel product-upgrade" aria-label="Upgrade existing Factory data">
+		<PanelHeading title="Upgrade existing Factory data" aside={draining ? "Legacy writes frozen" : "Preview ready"} />
+		<p>Move compatible schedules to Definitions and Runs while keeping old Tasks, Attempts, Occurrences, and polling configuration as readable history.</p>
+		<div className="product-upgrade-counts">
+			<div><strong>{upgrade.counts.compatible_schedules}</strong><span>Schedules to convert</span></div>
+			<div><strong>{upgrade.counts.github_polling_automations}</strong><span>Pollers to retire</span></div>
+			<div><strong>{upgrade.counts.legacy_tasks}</strong><span>Tasks retained</span></div>
+			<div><strong>{upgrade.counts.active_executions}</strong><span>Active legacy work</span></div>
+		</div>
+		<details>
+			<summary>Review upgrade decisions</summary>
+			<ul>{upgrade.decisions.map((decision) => <li key={decision}>{decision}</li>)}</ul>
+			{upgrade.polling_automations.map((automation) => <p key={automation.automation_id}><strong>{automation.title}</strong>: {automation.guidance}</p>)}
+		</details>
+		{(error || apply.error) && <InlineError error={(error || apply.error) as Error} />}
+		<div className="product-upgrade-actions">
+			{!draining && <button className="button button-primary" disabled={apply.isPending} onClick={() => apply.mutate(false)}>
+				<DatabaseBackup size={16} /> {upgrade.counts.active_executions > 0 ? "Freeze and drain" : "Upgrade Factory"}
+			</button>}
+			{upgrade.counts.active_executions > 0 && <button className="button button-secondary" disabled={apply.isPending} onClick={() => apply.mutate(true)}>
+				Freeze and cancel active work
+			</button>}
+			{draining && upgrade.counts.active_executions === 0 && <button className="button button-primary" disabled={apply.isPending} onClick={() => apply.mutate(false)}>Finish upgrade</button>}
+		</div>
+	</section>;
 }
 
 function RunMetrics({

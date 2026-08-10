@@ -118,6 +118,8 @@ func NewHandlerWithAutomation(store *Store, logger *slog.Logger, automations *Au
 	mux.HandleFunc("GET /api/v1/migrations/legacy-poller/active", api.activeLegacyPollerMigration)
 	mux.HandleFunc("GET /api/v1/migrations/legacy-poller/{migration_id}", api.getLegacyPollerMigration)
 	mux.HandleFunc("POST /api/v1/migrations/legacy-poller/{migration_id}/finalize", api.finalizeLegacyPoller)
+	mux.HandleFunc("GET /api/v1/migrations/product-model", api.getProductUpgrade)
+	mux.HandleFunc("POST /api/v1/migrations/product-model/apply", api.applyProductUpgrade)
 	mux.HandleFunc("POST /api/v1/occurrences/{occurrence_id}/resume", api.resumeLegacyPollerOccurrence)
 	mux.HandleFunc("POST /api/v1/occurrences/{occurrence_id}/skip", api.skipLegacyPollerOccurrence)
 	mux.HandleFunc("GET /api/v1/metrics/summary", api.getMetrics)

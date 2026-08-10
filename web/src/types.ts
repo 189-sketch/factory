@@ -555,6 +555,50 @@ export interface APIErrorBody {
   error: { code: string; message: string };
 }
 
+export interface ProductUpgrade {
+  id: string;
+  state: "ready" | "draining" | "completed";
+  legacy_read_only: boolean;
+  needed: boolean;
+  counts: {
+    legacy_tasks: number;
+    legacy_attempts: number;
+    legacy_workflows: number;
+    legacy_workflow_revisions: number;
+    compatible_schedules: number;
+    github_polling_automations: number;
+    pending_occurrences: number;
+    active_executions: number;
+  };
+  schedules: Array<{
+    automation_id: string;
+    title: string;
+    definition_name: string;
+    repository_id: string;
+    cron: string;
+    timezone: string;
+    next_due_at?: string;
+    enabled: boolean;
+  }>;
+  polling_automations: Array<{
+    automation_id: string;
+    title: string;
+    trigger_type: string;
+    guidance: string;
+  }>;
+  decisions: string[];
+  validation?: {
+    definitions_created: number;
+    schedules_converted: number;
+    polling_automations_retired: number;
+    legacy_tasks_retained: number;
+    legacy_occurrences_retained: number;
+    legacy_attempts_retained: number;
+    synthetic_runs_created: number;
+    validated_at: string;
+  };
+}
+
 interface CreateTaskBaseInput {
   request_key: string;
   title: string;

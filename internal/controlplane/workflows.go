@@ -88,6 +88,9 @@ func (s *Store) CreateWorkflow(
 		return protocol.WorkflowDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
+	}
 	workflowID, replay, err := workflowMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.WorkflowDetail{}, false, err
@@ -174,6 +177,9 @@ func (s *Store) CreateWorkflowRevision(
 		return protocol.WorkflowDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, false, err
+	}
 	replayWorkflowID, replay, err := workflowMutationReplay(ctx, tx, value.RequestKey, digest)
 	if err != nil {
 		return protocol.WorkflowDetail{}, false, err
@@ -372,6 +378,9 @@ func (s *Store) SetWorkflowEnabled(ctx context.Context, workflowID string, enabl
 		return protocol.WorkflowDetail{}, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.WorkflowDetail{}, err
+	}
 	var currentEnabled bool
 	err = tx.QueryRowContext(ctx, `SELECT enabled FROM workflows WHERE id = ?`, workflowID).Scan(&currentEnabled)
 	if errors.Is(err, sql.ErrNoRows) {

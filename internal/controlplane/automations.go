@@ -367,6 +367,11 @@ func (s *Store) CreateAutomation(
 		return protocol.AutomationDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if value.DefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, false, err
+		}
+	}
 	var existingID string
 	var existingDigest []byte
 	err = tx.QueryRowContext(ctx, `SELECT id, request_digest FROM automations WHERE request_key = ?`, value.RequestKey).
@@ -1027,6 +1032,11 @@ func (s *Store) UpdateAutomation(
 	if err != nil {
 		return protocol.AutomationDetail{}, unavailable(err)
 	}
+	if currentDefinitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, err
+		}
+	}
 	if currentType != value.Trigger.Type {
 		return protocol.AutomationDetail{}, conflict("automation_trigger_type_immutable", "trigger type is immutable; create a new Automation")
 	}
@@ -1248,6 +1258,11 @@ func (s *Store) setAutomationEnabled(
 	}
 	if err != nil {
 		return protocol.AutomationDetail{}, "", unavailable(err)
+	}
+	if definitionID == "" {
+		if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+			return protocol.AutomationDetail{}, "", err
+		}
 	}
 	if enabled == (currentEnabled != 0) {
 		if err := tx.Commit(); err != nil {

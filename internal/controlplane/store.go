@@ -61,6 +61,7 @@ type Store struct {
 	afterScheduleEnabledCheck   func()
 	afterGitHubWebhookAdmission func()
 	afterGitHubWebhookRunCreate func()
+	afterProductUpgradeFreeze   func()
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -2402,6 +2403,9 @@ func (s *Store) CreateTask(ctx context.Context, input protocol.CreateTaskRequest
 		return protocol.TaskDetail{}, false, unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return protocol.TaskDetail{}, false, err
+	}
 	var existingID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM tasks WHERE request_key = ?`, input.RequestKey).Scan(&existingID)
 	if err == nil {
@@ -2737,6 +2741,9 @@ func (s *Store) DeleteTask(ctx context.Context, taskID string) error {
 		return unavailable(err)
 	}
 	defer tx.Rollback()
+	if err := s.legacyProductReadOnly(ctx, tx); err != nil {
+		return err
+	}
 
 	var executionID, state string
 	var runJob int

@@ -85,6 +85,12 @@ export function App() {
   const workerInterval = useVisibleInterval(10_000);
   const delegateTrigger = useRef<HTMLElement | null>(null);
   const queryClient = useQueryClient();
+	const productUpgrade = useQuery({
+		queryKey: ["product-upgrade"],
+		queryFn: api.productUpgrade,
+		staleTime: 30_000,
+	});
+	const legacyReadOnly = Boolean(productUpgrade.data?.legacy_read_only);
 
   useEffect(() => {
     const onPopState = () => setRoute(readRoute());
@@ -268,9 +274,9 @@ export function App() {
             {route.page === "automation" && "Automation detail"}
           </div>
           <div className="detail-actions">
-            <button className="button button-secondary" onClick={() => openDelegate()}>
-              <Plus size={16} /> Delegate task
-            </button>
+			{!legacyReadOnly && <button className="button button-secondary" onClick={() => openDelegate()}>
+				<Plus size={16} /> Delegate task
+			</button>}
             <button className="button button-primary" onClick={() => navigate({ page: "runs", create: true })}>
               <Play size={16} /> Run once
             </button>
@@ -278,7 +284,11 @@ export function App() {
         </header>
 
         <main>
-          {route.page === "overview" && <Overview onRun={(id, jobID) => navigate({ page: "run", id, jobID })} />}
+			{route.page === "overview" && <Overview
+				onRun={(id, jobID) => navigate({ page: "run", id, jobID })}
+				upgrade={productUpgrade.data}
+				upgradeError={productUpgrade.error}
+			/>}
           {route.page === "runs" && (
             <RunsView
               createOpen={Boolean(route.create)}
@@ -308,6 +318,7 @@ export function App() {
                   });
                 }
               }}
+			  legacyReadOnly={legacyReadOnly}
             />
           )}
           {route.page === "workers" && (

@@ -32,6 +32,7 @@ import type {
   RunDetail,
   RunPage,
   RunRepository,
+  ProductUpgrade,
 } from "./types";
 
 export class APIError extends Error {
@@ -76,6 +77,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+	productUpgrade: () => request<ProductUpgrade>("/api/v1/migrations/product-model"),
+	applyProductUpgrade: (cancelActive: boolean) =>
+		request<ProductUpgrade>("/api/v1/migrations/product-model/apply", {
+			method: "POST",
+			body: JSON.stringify({ cancel_active: cancelActive }),
+		}),
   metrics: (window: MetricsWindow, filters: MetricsFilters = {}, jobView = "all") => {
     const query = new URLSearchParams({ window });
     if (filters.definition_id) query.set("definition_id", filters.definition_id);
