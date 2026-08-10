@@ -291,6 +291,49 @@ func TestProductUpgradeRejectsDefinitionConflictBeforeFreeze(t *testing.T) {
 	}
 }
 
+func TestProductUpgradeReservesDefinitionNamesWhileDraining(t *testing.T) {
+	store := newTestStore(t)
+	workflow := createTestWorkflow(t, store, "reserved-upgrade-workflow", "Reserved upgrade", "Keep this schedule.")
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/reserved-upgrade")
+	scheduleID := insertLegacyScheduleForUpgrade(t, store, workflow.Workflow.ID, repository.ID, time.Now().UTC(), true)
+	reservedName := productUpgradeDefinitionName("Legacy weekly review", scheduleID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	store.afterProductUpgradeFreeze = cancel
+	if _, err := store.ApplyProductUpgrade(ctx, false); err == nil {
+		t.Fatal("interrupted product upgrade unexpectedly succeeded")
+	}
+	store.afterProductUpgradeFreeze = nil
+	draining, err := store.ProductUpgrade(context.Background())
+	if err != nil || draining.State != "draining" {
+		t.Fatalf("draining product upgrade = %#v, err=%v", draining, err)
+	}
+
+	_, _, err = store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "reserved-name-create", Name: strings.ToUpper(reservedName), Prompt: "Do not collide.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	})
+	assertErrorCode(t, err, "definition_name_reserved")
+	definition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "reserved-name-update-base", Name: "Available name", Prompt: "Safe.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{},
+	})
+	if err != nil || !created {
+		t.Fatalf("create Definition for rename: created=%t err=%v", created, err)
+	}
+	_, _, err = store.UpdateDefinition(context.Background(), definition.ID, protocol.UpdateDefinitionRequest{
+		RequestKey: "reserved-name-update", ExpectedGeneration: definition.Generation,
+		Name: reservedName, Prompt: definition.Prompt, Runtime: definition.Runtime,
+		AllowedTools: definition.AllowedTools, TimeoutSeconds: definition.TimeoutSeconds, Inputs: definition.Inputs,
+	})
+	assertErrorCode(t, err, "definition_name_reserved")
+
+	completed, err := store.ApplyProductUpgrade(context.Background(), false)
+	if err != nil || completed.State != "completed" {
+		t.Fatalf("complete product upgrade = %#v, err=%v", completed, err)
+	}
+}
+
 func insertLegacyScheduleForUpgrade(
 	t *testing.T,
 	store *Store,

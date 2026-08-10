@@ -509,6 +509,20 @@ func definitionNameAvailable(ctx context.Context, tx *sql.Tx, nameKey, excluding
 	if !errors.Is(err, sql.ErrNoRows) {
 		return unavailable(err)
 	}
+	var reserved int
+	err = tx.QueryRowContext(ctx, `
+		SELECT 1
+		FROM product_model_upgrades upgrade, json_each(upgrade.preview_json, '$.schedules') schedule
+		WHERE upgrade.state = 'draining'
+		  AND lower(trim(json_extract(schedule.value, '$.definition_name'))) = ?
+		LIMIT 1
+	`, nameKey).Scan(&reserved)
+	if err == nil {
+		return conflict("definition_name_reserved", "this Definition name is reserved while the product upgrade is draining")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return unavailable(err)
+	}
 	return nil
 }
 

@@ -129,7 +129,7 @@ func createScheduleAutomationFixture(
 	detail, created, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
 		RequestKey: "schedule-create", Title: "Daily maintenance",
 		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID},
-		Parameters: map[string]string{"scope": "safe"}, ConcurrencyLimit: 2,
+		ConcurrencyLimit: 2,
 		Trigger: protocol.AutomationTrigger{
 			Type: protocol.AutomationTriggerSchedule, Cron: "0 9 * * *", Timezone: "Europe/London",
 		},
@@ -199,7 +199,8 @@ func TestSchedulePreviewEnableDueDispatchAndIdempotencyUseFakeClock(t *testing.T
 	}
 	if !strings.Contains(run.Jobs[0].ResolvedPrompt, `"scheduled_at":"2026-08-01T08:00:00Z"`) ||
 		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"cron":"0 9 * * *"`) ||
-		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"timezone":"Europe/London"`) {
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"timezone":"Europe/London"`) ||
+		!strings.Contains(run.Jobs[0].ResolvedPrompt, `"scope":"safe"`) {
 		t.Fatalf("scheduled Run prompt lost occurrence metadata: %q", run.Jobs[0].ResolvedPrompt)
 	}
 	if current.Occurrences[0].RunState != "queued" {
@@ -353,6 +354,98 @@ func TestDefinitionScheduleRejectsResolvedAgentPromptAboveRuntimeLimit(t *testin
 	if created {
 		t.Fatal("oversized resolved prompt created a schedule")
 	}
+	assertErrorCode(t, err, "agent_prompt_too_large")
+}
+
+func TestDefinitionScheduleAccountsForOccurrenceMetadataAtCreationAndEnablement(t *testing.T) {
+	store := newTestStore(t)
+	repository := createManagedTestRepository(t, store, "github.com/owainlewis/schedule-overhead")
+	const (
+		definitionName = "Schedule overhead"
+		cron           = "0 9 * * *"
+		timezone       = "UTC"
+	)
+	prompt := string(bytes.Repeat([]byte("p"), protocol.MaxDefinitionPromptBytes))
+	var inputValue string
+	found := false
+	for size := 0; size <= maxDefinitionInputBytes; size++ {
+		candidate := string(bytes.Repeat([]byte("x"), size))
+		resolved, resolveErr := protocol.ResolveDefinitionPrompt(prompt, map[string]string{
+			"scope_a": string(bytes.Repeat([]byte("a"), maxDefinitionInputBytes)),
+			"scope_b": candidate,
+		})
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		scheduled, resolveErr := protocol.ResolveDefinitionSchedulePrompt(
+			resolved, nil, "scheduled", "9999-12-31T23:59:59Z", cron, timezone,
+		)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		runNow, resolveErr := protocol.ResolveDefinitionSchedulePrompt(
+			resolved, nil, "run_now", strings.Repeat("<", 128), cron, timezone,
+		)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if protocol.AgentPromptFits(definitionName, repository.RemoteIdentity, resolved) &&
+			protocol.AgentPromptFits(definitionName, repository.RemoteIdentity, scheduled) &&
+			!protocol.AgentPromptFits(definitionName, repository.RemoteIdentity, runNow) {
+			inputValue = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("could not construct a prompt that only escaped Run now metadata makes oversized")
+	}
+	inputs := map[string]string{
+		"scope_a": string(bytes.Repeat([]byte("a"), maxDefinitionInputBytes)),
+		"scope_b": inputValue,
+	}
+	definition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "schedule-overhead-definition", Name: definitionName, Prompt: prompt,
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600,
+		Inputs: inputs,
+	})
+	if err != nil || !created {
+		t.Fatalf("create Definition: created=%t err=%v", created, err)
+	}
+	_, created, err = store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "schedule-overhead-create", Title: "Schedule overhead create",
+		DefinitionID: definition.ID, RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerSchedule, Cron: cron, Timezone: timezone},
+	})
+	if created {
+		t.Fatal("schedule with oversized occurrence metadata was created")
+	}
+	assertErrorCode(t, err, "agent_prompt_too_large")
+
+	enableDefinition, created, err := store.CreateDefinition(context.Background(), protocol.CreateDefinitionRequest{
+		RequestKey: "schedule-overhead-enable-definition", Name: "Enable schedule overhead", Prompt: "Short prompt.",
+		Runtime: protocol.RuntimeCodex, TimeoutSeconds: 600, Inputs: map[string]string{"scope_a": "", "scope_b": ""},
+	})
+	if err != nil || !created {
+		t.Fatalf("create enable Definition: created=%t err=%v", created, err)
+	}
+	automation, created, err := store.CreateAutomation(context.Background(), protocol.CreateAutomationRequest{
+		RequestKey: "schedule-overhead-enable", Title: "Schedule overhead enable",
+		DefinitionID: enableDefinition.ID, RepositoryIDs: []string{repository.ID}, ConcurrencyLimit: 1,
+		Trigger: protocol.AutomationTrigger{Type: protocol.AutomationTriggerSchedule, Cron: cron, Timezone: timezone},
+	})
+	if err != nil || !created {
+		t.Fatalf("create disabled schedule: created=%t err=%v", created, err)
+	}
+	_, changed, err := store.UpdateDefinition(context.Background(), enableDefinition.ID, protocol.UpdateDefinitionRequest{
+		RequestKey: "schedule-overhead-enable-update", ExpectedGeneration: enableDefinition.Generation,
+		Name: "Enable schedule overhead", Prompt: prompt, Runtime: protocol.RuntimeCodex,
+		TimeoutSeconds: 600, Inputs: inputs,
+	})
+	if err != nil || !changed {
+		t.Fatalf("update Definition: changed=%t err=%v", changed, err)
+	}
+	_, err = store.SetAutomationEnabled(context.Background(), automation.Automation.ID, true, false)
 	assertErrorCode(t, err, "agent_prompt_too_large")
 }
 

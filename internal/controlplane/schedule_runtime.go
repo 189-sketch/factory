@@ -236,6 +236,7 @@ func (s *Store) admitDueSchedule(ctx context.Context, automationID string) error
 		if snapshot.definitionID != "" {
 			if dependencyErr := validateDefinitionScheduleDependencies(
 				ctx, tx, snapshot.definitionID, snapshot.repositoryIDs, snapshot.parameters, true,
+				protocol.AutomationTriggerSchedule, snapshot.cron, snapshot.timezone,
 			); dependencyErr != nil {
 				serviceErr, durable := durableScheduleDependencyFailure(dependencyErr)
 				if !durable {
@@ -341,6 +342,7 @@ func (s *Store) RunAutomationNow(
 	if snapshot.definitionID != "" {
 		if err := validateDefinitionScheduleDependencies(
 			ctx, tx, snapshot.definitionID, snapshot.repositoryIDs, snapshot.parameters, true,
+			protocol.AutomationTriggerSchedule, snapshot.cron, snapshot.timezone,
 		); err != nil {
 			return protocol.AutomationDetail{}, err
 		}

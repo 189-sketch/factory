@@ -392,6 +392,7 @@ func (s *Store) CreateAutomation(
 	if value.Trigger.Type == protocol.AutomationTriggerSchedule || value.Trigger.Type == protocol.AutomationTriggerGitHubWebhook {
 		if err := validateDefinitionScheduleDependencies(
 			ctx, tx, value.DefinitionID, value.RepositoryIDs, value.Parameters, false,
+			value.Trigger.Type, value.Trigger.Cron, value.Trigger.Timezone,
 		); err != nil {
 			return protocol.AutomationDetail{}, false, err
 		}
@@ -545,6 +546,7 @@ func validateDefinitionScheduleDependencies(
 	repositoryIDs []string,
 	parameters map[string]string,
 	requireRunnable bool,
+	triggerType, cron, timezone string,
 ) error {
 	definition, err := scanDefinition(tx.QueryRowContext(ctx, definitionSelect+` WHERE id = ?`, definitionID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -571,6 +573,25 @@ func validateDefinitionScheduleDependencies(
 	resolvedPrompt, err := protocol.ResolveDefinitionPrompt(definition.Prompt, resolvedParameters)
 	if err != nil {
 		return unavailable(err)
+	}
+	resolvedPrompts := []string{resolvedPrompt}
+	if triggerType == protocol.AutomationTriggerSchedule {
+		for _, occurrence := range []struct {
+			kind, identity string
+		}{
+			{kind: "scheduled", identity: "9999-12-31T23:59:59Z"},
+			// encoding/json escapes '<' as six bytes, making this the largest valid
+			// 128-byte Run now request key accepted by RunAutomationNow.
+			{kind: "run_now", identity: strings.Repeat("<", 128)},
+		} {
+			scheduledPrompt, resolveErr := protocol.ResolveDefinitionSchedulePrompt(
+				resolvedPrompt, nil, occurrence.kind, occurrence.identity, cron, timezone,
+			)
+			if resolveErr != nil {
+				return unavailable(resolveErr)
+			}
+			resolvedPrompts = append(resolvedPrompts, scheduledPrompt)
+		}
 	}
 	for _, repositoryID := range repositoryIDs {
 		var remoteIdentity string
@@ -604,8 +625,10 @@ func validateDefinitionScheduleDependencies(
 				remoteIdentity = canonical
 			}
 		}
-		if !protocol.AgentPromptFits(definition.Name, remoteIdentity, resolvedPrompt) {
-			return invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
+		for _, prompt := range resolvedPrompts {
+			if !protocol.AgentPromptFits(definition.Name, remoteIdentity, prompt) {
+				return invalid("agent_prompt_too_large", "the complete agent prompt exceeds 72 KiB")
+			}
 		}
 	}
 	return nil
@@ -1118,6 +1141,7 @@ func (s *Store) UpdateAutomation(
 	} else if value.Trigger.Type == protocol.AutomationTriggerSchedule || value.Trigger.Type == protocol.AutomationTriggerGitHubWebhook {
 		if err := validateDefinitionScheduleDependencies(
 			ctx, tx, value.DefinitionID, value.RepositoryIDs, value.Parameters, false,
+			value.Trigger.Type, value.Trigger.Cron, value.Trigger.Timezone,
 		); err != nil {
 			return protocol.AutomationDetail{}, err
 		}
@@ -1324,6 +1348,7 @@ func (s *Store) setAutomationEnabled(
 			}
 			if err := validateDefinitionScheduleDependencies(
 				ctx, tx, definitionID, repositoryIDs, parameters, true,
+				triggerType, cron, timezone,
 			); err != nil {
 				return protocol.AutomationDetail{}, "", err
 			}

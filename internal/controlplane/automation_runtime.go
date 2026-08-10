@@ -1516,6 +1516,13 @@ func (s *Store) dispatchDefinitionScheduleOccurrence(
 	if err := json.Unmarshal(parametersJSON, &parameters); err != nil {
 		return true, unavailable(err)
 	}
+	resolvedParameters := make(map[string]string, len(definitionSnapshot.Inputs))
+	for key, value := range definitionSnapshot.Inputs {
+		resolvedParameters[key] = value
+	}
+	for key, value := range parameters {
+		resolvedParameters[key] = value
+	}
 	identity := runRequestKey.String
 	if kind == "scheduled" {
 		if !scheduledAt.Valid {
@@ -1524,7 +1531,7 @@ func (s *Store) dispatchDefinitionScheduleOccurrence(
 		identity = fromMillis(scheduledAt.Int64).UTC().Format(time.RFC3339)
 	}
 	resolvedPrompt, err := protocol.ResolveDefinitionSchedulePrompt(
-		definitionSnapshot.Prompt, parameters, kind, identity, cron, timezone,
+		definitionSnapshot.Prompt, resolvedParameters, kind, identity, cron, timezone,
 	)
 	if err != nil {
 		return true, unavailable(err)
