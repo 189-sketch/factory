@@ -136,6 +136,69 @@ describe("App", () => {
 		);
 	});
 
+	it("hides legacy assignment controls on Runner detail after upgrade", async () => {
+		window.history.replaceState({}, "", "/workers/worker-online");
+		mockControlPlane({ productUpgrade: "completed" });
+		renderApp();
+
+		expect(await screen.findByRole("heading", { name: "Build Mac" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Assign work" })).not.toBeInTheDocument();
+	});
+
+	it("keeps upgraded runbooks browsable without mutation controls", async () => {
+		window.history.replaceState({}, "", "/workflows");
+		mockControlPlane({ productUpgrade: "completed" });
+		const user = userEvent.setup();
+		renderApp();
+
+		expect(await screen.findByRole("heading", { name: "Runbooks" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Create runbook" })).not.toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: /Implement/ }));
+		expect(await screen.findByRole("heading", { name: "Implement" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "New revision" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Disable" })).not.toBeInTheDocument();
+	});
+
+	it("hides legacy Automation mutations while preserving Definition Automation creation", async () => {
+		window.history.replaceState({}, "", "/automations");
+		mockControlPlane({ productUpgrade: "completed" });
+		const user = userEvent.setup();
+		renderApp();
+
+		expect(await screen.findByRole("heading", { name: "Automations" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Migrate legacy poller" })).not.toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Create Automation" }));
+		const create = screen.getByRole("dialog", { name: "Create Automation" });
+		expect(within(create).getByLabelText("Trigger")).toHaveValue("schedule");
+		expect(within(create).queryByRole("option", { name: "GitHub issue" })).not.toBeInTheDocument();
+		await user.click(within(create).getByRole("button", { name: "Close" }));
+
+		await user.click(screen.getByRole("button", { name: /Ready issues/ }));
+		expect(await screen.findByRole("heading", { name: "Ready issues" })).toBeVisible();
+		expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Enable" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Check now" })).not.toBeInTheDocument();
+	});
+
+	it("resets an open legacy Automation form when another operator freezes Factory", async () => {
+		window.history.replaceState({}, "", "/automations");
+		mockControlPlane({
+			productUpgrade: "ready",
+			productUpgradeFreezesAfterPoll: true,
+		});
+		const user = userEvent.setup();
+		renderApp();
+
+		await user.click(await screen.findByRole("button", { name: "Create Automation" }));
+		expect(screen.getByRole("dialog", { name: "Create Automation" })).toBeVisible();
+		await waitFor(
+			() => expect(within(screen.getByRole("dialog", { name: "Create Automation" })).getByLabelText("Trigger")).toHaveValue("schedule"),
+			{ timeout: 3_000 },
+		);
+		const productForm = screen.getByRole("dialog", { name: "Create Automation" });
+		expect(within(productForm).queryByRole("option", { name: "GitHub issue" })).not.toBeInTheDocument();
+	});
+
   it("marks only exact navigation destinations as the current page", async () => {
     mockControlPlane();
     const user = userEvent.setup();

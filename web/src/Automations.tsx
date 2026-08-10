@@ -41,7 +41,7 @@ import {
   ViewHeader,
 } from "./ui";
 
-export function AutomationsView({ onAutomation }: { onAutomation: (id: string) => void }) {
+export function AutomationsView({ legacyReadOnly, onAutomation }: { legacyReadOnly: boolean; onAutomation: (id: string) => void }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [migrationOpen, setMigrationOpen] = useState(false);
   const [repositoryFilter, setRepositoryFilter] = useState("all");
@@ -79,7 +79,6 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
     if (statusFilter === "disabled" && automation.enabled) return false;
     return true;
   });
-
   if (query.isPending) return <LoadingState label="Loading Automations" />;
   if (!query.data) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
 
@@ -95,9 +94,9 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
       <div className="view-toolbar">
         <p>Run shared agent Definitions on demand, on a schedule, or from signed GitHub events.</p>
         <div className="detail-actions">
-          <button className="button button-secondary" onClick={() => setMigrationOpen(true)}>
+          {!legacyReadOnly && <button className="button button-secondary" onClick={() => setMigrationOpen(true)}>
             <DatabaseBackup size={15} /> Migrate legacy poller
-          </button>
+          </button>}
           <button className="button button-primary" onClick={() => setCreateOpen(true)}>
             <Plus size={15} /> Create Automation
           </button>
@@ -181,7 +180,9 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
       {loadMore.error && <InlineError error={loadMore.error} />}
       {createOpen && (
         <AutomationForm
+          key={legacyReadOnly ? "product-automation" : "legacy-automation"}
           mode="create"
+          legacyReadOnly={legacyReadOnly}
           onClose={() => setCreateOpen(false)}
           onSaved={(detail) => {
             setCreateOpen(false);
@@ -189,7 +190,7 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
           }}
         />
       )}
-      {migrationOpen && (
+      {migrationOpen && !legacyReadOnly && (
         <LegacyPollerMigrationDialog
           onClose={() => setMigrationOpen(false)}
           onAutomation={onAutomation}
@@ -201,11 +202,13 @@ export function AutomationsView({ onAutomation }: { onAutomation: (id: string) =
 
 export function AutomationDetail({
   id,
+  legacyReadOnly,
   onBack,
   onTask,
   onRun,
 }: {
   id: string;
+  legacyReadOnly: boolean;
   onBack: () => void;
   onTask: (id: string) => void;
   onRun: (id: string) => void;
@@ -285,6 +288,7 @@ export function AutomationDetail({
   if (!detail.data) return <ErrorState error={detail.error} onRetry={() => void detail.refetch()} />;
   const data = detail.data;
   const automation = data.automation;
+  const legacyLocked = legacyReadOnly && !automation.definition_id;
   const occurrenceItems = mergeOccurrences(occurrences.data?.occurrences ?? data.occurrences, occurrenceHistory);
   const latestRun = automation.latest_run ?? occurrenceItems[0];
   const latestRunState = latestRun ? automationRunState(latestRun) : undefined;
@@ -301,7 +305,7 @@ export function AutomationDetail({
           <h1>{automation.title}</h1>
           <p>{triggerSummary(automation)} · {automationRepositorySummary(automation)}</p>
         </div>
-        <div className="detail-actions">
+        {!legacyLocked && <div className="detail-actions">
           {automation.trigger.type !== "github_webhook" && <button className="button button-secondary" onClick={() => test.mutate()} disabled={test.isPending}>
             {test.isPending ? <LoaderCircle size={14} className="spin" /> : <FlaskConical size={14} />} Test trigger
           </button>}
@@ -324,14 +328,14 @@ export function AutomationDetail({
             {automation.enabled ? <PowerOff size={14} /> : <Power size={14} />}
             {automation.enabled ? "Disable" : "Enable"}
           </button>
-        </div>
+        </div>}
       </div>
       {detail.error && <StaleBanner error={detail.error} />}
       {setEnabled.error && <InlineError error={setEnabled.error} />}
       {test.error && <InlineError error={test.error} />}
       {check.error && <InlineError error={check.error} />}
       {run.error && <InlineError error={run.error} />}
-      {confirmEnabled !== undefined && (
+      {!legacyLocked && confirmEnabled !== undefined && (
         <div className="confirm-action automation-confirm" role="alert">
           <div>
             <strong>{confirmEnabled ? "Enable this Automation?" : "Disable this Automation?"}</strong>
@@ -496,9 +500,10 @@ export function AutomationDetail({
         )}
         {(occurrences.error || loadMoreOccurrences.error) && <InlineError error={(occurrences.error || loadMoreOccurrences.error) as Error} />}
       </section>
-      {editing && (
+      {editing && !legacyLocked && (
         <AutomationForm
           mode="edit"
+          legacyReadOnly={legacyReadOnly}
           detail={data}
           onClose={() => setEditing(false)}
           onSaved={(next) => {
@@ -741,11 +746,13 @@ function LegacyPollerMigrationDialog({
 
 function AutomationForm({
   mode,
+  legacyReadOnly,
   detail,
   onClose,
   onSaved,
 }: {
   mode: "create" | "edit";
+  legacyReadOnly: boolean;
   detail?: AutomationDetailType;
   onClose: () => void;
   onSaved: (detail: AutomationDetailType) => void;
@@ -778,7 +785,7 @@ function AutomationForm({
   const definitions = useQuery({ queryKey: ["definitions", "automation-form"], queryFn: api.allDefinitions });
   const runRepositories = useQuery({ queryKey: ["run-repositories", "automation-form"], queryFn: api.runRepositories });
   const current = detail?.automation;
-  const [triggerType, setTriggerType] = useState<AutomationTrigger["type"]>(current?.trigger.type ?? "github_issue");
+  const [triggerType, setTriggerType] = useState<AutomationTrigger["type"]>(current?.trigger.type ?? (legacyReadOnly ? "schedule" : "github_issue"));
   const [workflowSelection, setWorkflowSelection] = useState(current?.workflow_id ?? "");
   const [definitionSelection, setDefinitionSelection] = useState(current?.definition_id ?? "");
   const [parameterOverrides, setParameterOverrides] = useState<Record<string, string>>(current?.parameters ?? {});
@@ -1071,8 +1078,8 @@ function AutomationForm({
                     disabled={mode === "edit"}
                     onChange={(event) => setTriggerType(event.target.value as AutomationTrigger["type"])}
                   >
-                    <option value="github_issue">GitHub issue</option>
-                    <option value="github_pull_request">GitHub pull request</option>
+                    {!legacyReadOnly && <option value="github_issue">GitHub issue</option>}
+                    {!legacyReadOnly && <option value="github_pull_request">GitHub pull request</option>}
                     <option value="schedule">Schedule</option>
                     <option value="github_webhook">GitHub webhook</option>
                   </select>

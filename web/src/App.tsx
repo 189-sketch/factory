@@ -357,6 +357,7 @@ export function App() {
           {route.page === "worker" && (
             <WorkerDetail
               id={route.id}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "workers" })}
               onDelegate={() => openDelegate(route.id)}
             />
@@ -383,17 +384,18 @@ export function App() {
             />
           )}
           {route.page === "workflows" && (
-            <WorkflowsView onWorkflow={(id) => navigate({ page: "workflow", id })} />
+            <WorkflowsView legacyReadOnly={legacyReadOnly} onWorkflow={(id) => navigate({ page: "workflow", id })} />
           )}
           {route.page === "workflow" && (
-            <WorkflowDetail id={route.id} onBack={() => navigate({ page: "workflows" })} />
+            <WorkflowDetail id={route.id} legacyReadOnly={legacyReadOnly} onBack={() => navigate({ page: "workflows" })} />
           )}
           {route.page === "automations" && (
-            <AutomationsView onAutomation={(id) => navigate({ page: "automation", id })} />
+            <AutomationsView legacyReadOnly={legacyReadOnly} onAutomation={(id) => navigate({ page: "automation", id })} />
           )}
           {route.page === "automation" && (
             <AutomationDetail
               id={route.id}
+              legacyReadOnly={legacyReadOnly}
               onBack={() => navigate({ page: "automations" })}
               onTask={(taskID) => navigate({ page: "task", id: taskID })}
               onRun={(runID) => navigate({ page: "run", id: runID })}
@@ -409,7 +411,7 @@ export function App() {
           onClick={() => setMobileNavOpen(false)}
         />
       )}
-      {delegateRequest && (
+      {delegateRequest && !legacyReadOnly && (
         <DelegateModal
           workers={delegateWorkers}
           workersPending={workers.isPending && delegateWorkers.length === 0}

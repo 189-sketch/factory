@@ -24,7 +24,7 @@ import {
   ViewHeader,
 } from "./ui";
 
-export function WorkflowsView({ onWorkflow }: { onWorkflow: (id: string) => void }) {
+export function WorkflowsView({ legacyReadOnly, onWorkflow }: { legacyReadOnly: boolean; onWorkflow: (id: string) => void }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [history, setHistory] = useState<Workflow[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>();
@@ -69,16 +69,16 @@ export function WorkflowsView({ onWorkflow }: { onWorkflow: (id: string) => void
       {workflows.error && <StaleBanner error={workflows.error} />}
       <div className="view-toolbar">
         <p>Reusable Markdown instructions for tasks and Automations, with immutable numbered revisions.</p>
-        <button className="button button-primary" onClick={() => setCreateOpen(true)}>
+        {!legacyReadOnly && <button className="button button-primary" onClick={() => setCreateOpen(true)}>
           <Plus size={15} /> Create runbook
-        </button>
+        </button>}
       </div>
       {items.length === 0 ? (
         <EmptyState
           icon={<BookOpenText size={22} />}
           title="No runbooks yet"
           description="Create trusted instructions once, then pin them when delegating tasks."
-          action={<button className="button button-primary" onClick={() => setCreateOpen(true)}>Create runbook</button>}
+          action={legacyReadOnly ? undefined : <button className="button button-primary" onClick={() => setCreateOpen(true)}>Create runbook</button>}
         />
       ) : (
         <div className="workflow-list">
@@ -114,7 +114,7 @@ export function WorkflowsView({ onWorkflow }: { onWorkflow: (id: string) => void
         </div>
       )}
       {loadMore.error && <InlineError error={loadMore.error} />}
-      {createOpen && <WorkflowForm mode="create" onClose={() => setCreateOpen(false)} onSaved={(detail) => {
+      {createOpen && !legacyReadOnly && <WorkflowForm mode="create" onClose={() => setCreateOpen(false)} onSaved={(detail) => {
         setCreateOpen(false);
         onWorkflow(detail.workflow.id);
       }} />}
@@ -122,7 +122,7 @@ export function WorkflowsView({ onWorkflow }: { onWorkflow: (id: string) => void
   );
 }
 
-export function WorkflowDetail({ id, onBack }: { id: string; onBack: () => void }) {
+export function WorkflowDetail({ id, legacyReadOnly, onBack }: { id: string; legacyReadOnly: boolean; onBack: () => void }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [confirmEnabled, setConfirmEnabled] = useState<boolean>();
@@ -151,7 +151,7 @@ export function WorkflowDetail({ id, onBack }: { id: string; onBack: () => void 
           <h1>{current.title}</h1>
           <p>Revision {current.revision_number} · updated {new Date(data.workflow.updated_at).toLocaleString()}</p>
         </div>
-        <div className="detail-actions">
+        {!legacyReadOnly && <div className="detail-actions">
           <button className="button button-secondary" onClick={() => setEditing(true)}>
             <Pencil size={14} /> New revision
           </button>
@@ -162,11 +162,11 @@ export function WorkflowDetail({ id, onBack }: { id: string; onBack: () => void 
             {data.workflow.enabled ? <PowerOff size={14} /> : <Power size={14} />}
             {data.workflow.enabled ? "Disable" : "Enable"}
           </button>
-        </div>
+        </div>}
       </div>
       {detail.error && <StaleBanner error={detail.error} />}
       {enabled.error && <InlineError error={enabled.error} />}
-      {confirmEnabled !== undefined && (
+      {!legacyReadOnly && confirmEnabled !== undefined && (
         <div className="confirm-action workflow-confirm" role="alert">
           <span>{confirmEnabled ? "Enable this runbook for new tasks?" : "Disable it for new tasks? Existing tasks and retries keep their snapshot."}</span>
           <button
@@ -209,7 +209,7 @@ export function WorkflowDetail({ id, onBack }: { id: string; onBack: () => void 
           ))}
         </div>
       </section>
-      {editing && <WorkflowForm mode="revise" detail={data} onClose={() => setEditing(false)} onSaved={(next) => {
+      {editing && !legacyReadOnly && <WorkflowForm mode="revise" detail={data} onClose={() => setEditing(false)} onSaved={(next) => {
         queryClient.setQueryData(["workflow", id], next);
         setEditing(false);
         void invalidateControlPlane(queryClient);
