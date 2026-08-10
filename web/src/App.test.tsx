@@ -136,6 +136,18 @@ describe("App", () => {
 		);
 	});
 
+	it("notices a product freeze after initially finding no legacy data", async () => {
+		window.history.replaceState({}, "", "/tasks/task-running");
+		mockControlPlane({ productUpgradeFreezesAfterPoll: true });
+		renderApp();
+
+		expect(await screen.findByRole("button", { name: "Cancel" })).toBeVisible();
+		await waitFor(
+			() => expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument(),
+			{ timeout: 3_000 },
+		);
+	});
+
 	it("hides legacy assignment controls on Runner detail after upgrade", async () => {
 		window.history.replaceState({}, "", "/workers/worker-online");
 		mockControlPlane({ productUpgrade: "completed" });
