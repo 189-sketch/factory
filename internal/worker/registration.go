@@ -82,12 +82,6 @@ func (manager *Manager) finishHealthCheckLocked() {
 	manager.healthCheckDone = nil
 }
 
-func (manager *Manager) registration() protocol.WorkerRegistration {
-	manager.stateMutex.Lock()
-	defer manager.stateMutex.Unlock()
-	return manager.registrationLocked()
-}
-
 func (manager *Manager) registrationSnapshot() (protocol.WorkerRegistration, uint64) {
 	manager.stateMutex.Lock()
 	defer manager.stateMutex.Unlock()
@@ -120,6 +114,7 @@ func (manager *Manager) registrationLocked() protocol.WorkerRegistration {
 		Name:                       strings.TrimSpace(manager.config.Name),
 		Labels:                     manager.config.Labels,
 		WorkerVersion:              manager.options.WorkerVersion,
+		WorkClaimProtocolVersion:   protocol.WorkClaimProtocolVersion,
 		Runtime:                    manager.config.Runtime,
 		RuntimeVersion:             manager.health.RuntimeVersion,
 		Capabilities:               append([]protocol.Capability(nil), manager.health.Capabilities...),
