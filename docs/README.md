@@ -23,6 +23,13 @@ Start with the root [README](../README.md) to run Factory.
 - [Security policy](../SECURITY.md): reporting and the current trust model.
 - [Contributing](../CONTRIBUTING.md): setup, checks, and pull request standards.
 
+## Project operations
+
+- [Repository best-practices setup](resources/github/01-repository-best-practices.md):
+  pasteable prompt for a safe, documented, agent-ready GitHub repository.
+- [Issue-tracker setup](resources/github/02-issue-tracker.md): pasteable prompt
+  for issue forms, labels, and a GitHub Project delivery board.
+
 ## Active design work
 
 - [Coding automation experience](automation-experience/design.md): current
