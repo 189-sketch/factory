@@ -219,6 +219,15 @@ func TestHTTPMetricsUseABoundedWindowContract(t *testing.T) {
 	if body := decodeResponse[protocol.ErrorBody](t, response); body.Error.Code != "invalid_metrics_filter" {
 		t.Fatalf("duplicate metrics filter error = %#v", body)
 	}
+	response = fixture.request(
+		http.MethodGet,
+		"/api/v1/metrics/summary?runner_id=legacy",
+		"", "", nil,
+	)
+	requireStatus(t, response, http.StatusBadRequest)
+	if body := decodeResponse[protocol.ErrorBody](t, response); body.Error.Code != "invalid_metrics_filter" {
+		t.Fatalf("unsupported metrics filter error = %#v", body)
+	}
 }
 
 func TestHTTPWorkerRegistrationSupportsLegacyAndRuntimeAwareContracts(t *testing.T) {
@@ -378,7 +387,7 @@ func TestWaitForWorkerRegistrationRequiresAFreshHeartbeat(t *testing.T) {
 	})
 }
 
-func TestHTTPWorkerHeartbeatPreservesRunnerRegistration(t *testing.T) {
+func TestHTTPWorkerHeartbeatPreservesWorkerRegistration(t *testing.T) {
 	fixture := newHTTPFixture(t)
 	worker := registerHTTPWorker(t, fixture, workerA, "factory", "github.com/example/factory", 1)
 	time.Sleep(2 * time.Millisecond)
