@@ -34,7 +34,10 @@ const (
 	MaxEventPageSize          = 500
 	MinWorkerCapacity         = 1
 	MaxWorkerCapacity         = 100
-	WorkClaimProtocolVersion  = 1
+	// ClaimProtocolVersion moved to 2 when the claim payload replaced its
+	// target field with session. A Worker registered under version 1 cannot
+	// decode a version 2 claim, so it must re-register before it can claim.
+	ClaimProtocolVersion = 2
 )
 
 func SupportedRuntime(value string) bool {
@@ -81,7 +84,7 @@ type WorkerRegistration struct {
 	Name                       string                   `json:"name"`
 	Labels                     map[string]string        `json:"labels,omitempty"`
 	WorkerVersion              string                   `json:"worker_version"`
-	WorkClaimProtocolVersion   int                      `json:"work_claim_protocol_version,omitempty"`
+	ClaimProtocolVersion       int                      `json:"claim_protocol_version,omitempty"`
 	Runtime                    string                   `json:"runtime"`
 	RuntimeVersion             string                   `json:"runtime_version"`
 	Capabilities               []Capability             `json:"capabilities,omitempty"`
@@ -164,7 +167,7 @@ type Worker struct {
 	AcceptsManagedRepositories bool               `json:"accepts_managed_repositories,omitempty"`
 	RepositoryCacheCount       int                `json:"repository_cache_count,omitempty"`
 	RetainedWorktrees          []RetainedWorktree `json:"retained_worktrees"`
-	CurrentWorkTitle           string             `json:"current_work_title,omitempty"`
+	CurrentRunTitle            string             `json:"current_run_title,omitempty"`
 	RegisteredAt               time.Time          `json:"registered_at"`
 	LastHeartbeat              time.Time          `json:"last_heartbeat"`
 }
@@ -212,10 +215,10 @@ type ClaimRequest struct {
 }
 
 type Claim struct {
-	Attempt    Attempt           `json:"attempt"`
-	Execution  WorkExecution     `json:"execution"`
-	Target     ClaimedWorkTarget `json:"target"`
-	Repository Repository        `json:"repository"`
+	Attempt    Attempt          `json:"attempt"`
+	Execution  SessionExecution `json:"execution"`
+	Session    ClaimedSession   `json:"session"`
+	Repository Repository       `json:"repository"`
 }
 
 type LeaseRequest struct {
