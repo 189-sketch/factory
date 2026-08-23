@@ -75,10 +75,35 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
+	beforeRuntime, err := store.Work(context.Background(), work.ID)
+	if err != nil || beforeRuntime.State != protocol.WorkRunning ||
+		beforeRuntime.PendingResumeSHA != testCheckpointSHA {
+		t.Fatalf("pre-runtime continuation = %#v, error %v", beforeRuntime, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: resumeToken, StartedFromSHA: testCheckpointSHA, RuntimeStarted: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	started, err := store.Work(context.Background(), work.ID)
 	if err != nil || started.State != protocol.WorkRunning || started.PendingResumeSHA != "" ||
 		started.CheckpointSHA != testCheckpointSHA {
 		t.Fatalf("started continuation = %#v, error %v", started, err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: resumeToken, State: "failed", Error: "continuation failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RetrySession(context.Background(), run.Run.ID, work.ID); err != nil {
+		t.Fatal(err)
+	}
+	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "post-continuation-retry-claim", LeaseToken: strings.Repeat("c", 64),
+	})
+	if err != nil || retryClaim == nil || retryClaim.Session.PendingResumeSHA != "" ||
+		!retryClaim.Session.CheckpointPublished {
+		t.Fatalf("post-continuation retry claim = %#v, error %v", retryClaim, err)
 	}
 }
 
@@ -139,6 +164,62 @@ func TestFailedReadyPostflightRetainsTrustedPRRecoveryEvidence(t *testing.T) {
 	}
 }
 
+func TestFailedNeedsInputPostflightRetainsAuthoritativeCheckpoint(t *testing.T) {
+	store := newTestStore(t)
+	worker := registerTestWorker(t, store, workerA, 10, protocol.RepositoryRegistration{
+		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
+	})
+	task, err := store.CreateTask(context.Background(), protocol.SaveTaskRequest{
+		Name: "Checkpoint recovery", Prompt: "Ask when blocked.", Runtime: protocol.RuntimeCodex,
+		RepositoryIDs: []string{worker.Repositories[0].ID}, OutcomeContract: protocol.OutcomeAgentUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := store.RunTask(context.Background(), task.ID, protocol.RunTaskRequest{RequestKey: "checkpoint-recovery"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "checkpoint-recovery-claim", LeaseToken: tokenA,
+	})
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, error %v", claim, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{LeaseToken: tokenA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendAgentUpdate(context.Background(), claim.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: tokenA, RequestID: "63500000-0000-4000-8000-000000000001",
+		Status: protocol.WorkUpdateNeedsInput, Message: "Which behavior?",
+		CheckpointSHA: testCheckpointSHA, CheckpointPublished: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const postflightFailure = "Checkpoint could not be revalidated after the agent process stopped."
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "failed", Error: postflightFailure,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.Work(context.Background(), run.Sessions[0].ID)
+	if err != nil || failed.State != protocol.WorkFailed || failed.FailureReason != postflightFailure ||
+		failed.CheckpointSHA != testCheckpointSHA || failed.PendingResumeSHA != testCheckpointSHA ||
+		!failed.CheckpointPublished || failed.Question != "" {
+		t.Fatalf("failed needs-input Work = %#v, error %v", failed, err)
+	}
+	if _, err := store.RetrySession(context.Background(), run.Run.ID, failed.ID); err != nil {
+		t.Fatal(err)
+	}
+	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "checkpoint-recovery-retry-claim", LeaseToken: resumeToken,
+	})
+	if err != nil || retryClaim == nil || retryClaim.Session.PendingResumeSHA != testCheckpointSHA ||
+		!retryClaim.Session.CheckpointPublished {
+		t.Fatalf("checkpoint recovery claim = %#v, error %v", retryClaim, err)
+	}
+}
+
 func TestPendingResumeSurvivesAnswerCancellationPreparationFailureAndRetry(t *testing.T) {
 	store, worker, run, work := needsInputWork(t)
 	if _, err := store.AnswerWork(context.Background(), work.ID, protocol.WorkAnswerRequest{
@@ -166,6 +247,11 @@ func TestPendingResumeSurvivesAnswerCancellationPreparationFailureAndRetry(t *te
 	if err != nil || claim == nil {
 		t.Fatalf("preparation claim = %#v, error %v", claim, err)
 	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: resumeToken, StartedFromSHA: testCheckpointSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
 		LeaseToken: resumeToken, State: "failed", Error: "checkpoint ref moved",
 	}); err != nil {
@@ -179,7 +265,7 @@ func TestPendingResumeSurvivesAnswerCancellationPreparationFailureAndRetry(t *te
 		t.Fatal(err)
 	}
 	retriedAgain, err := store.Work(context.Background(), work.ID)
-	if err != nil || retriedAgain.PendingResumeSHA != testCheckpointSHA {
+	if err != nil || retriedAgain.PendingResumeSHA != testCheckpointSHA || !retriedAgain.RetryMayRepeatEffects {
 		t.Fatalf("second retry Work = %#v, error %v", retriedAgain, err)
 	}
 }

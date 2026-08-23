@@ -257,9 +257,9 @@ protocol. V1 does not treat the agent process as isolated from other files and
 services available to the Worker operating-system user. The Worker does not
 decide whether the engineering task is semantically complete.
 
-The implementation increments `ClaimProtocolVersion` from 2 to 3 because the
-claim and completion contract now includes frozen outcome behavior, scoped
-updates, checkpoints, and post-stop validation. The control plane rejects an
+The implementation requires `ClaimProtocolVersion` 4. Version 3 introduced
+frozen outcome behavior and scoped updates; version 4 adds authoritative resume
+start evidence to the claim and completion contract. The control plane rejects an
 older registration or claim with `worker_upgrade_required`; an old Worker can
 never claim `agent_update` Work. V1 requires the server and all Workers to be
 upgraded together. A server-first upgrade pauses claims from older Workers,
@@ -874,9 +874,9 @@ updates, known branch, checkpoint SHA, and PR metadata. Worktree preparation sta
 exact checkpoint. A missing or unreachable checkpoint fails preparation visibly
 instead of falling back to the publish ref or repository base. Cancellation,
 failed preparation, and explicit retry retain `pending_resume_sha`. It is cleared
-only after an Attempt successfully starts from that commit; the historical
-`checkpoint_sha` and update remain stored. Archiving a Procedure prevents new
-Runs but does not cancel admitted Work.
+only after the supervisor starts the runtime child and the Worker acknowledges
+that exact commit; the historical `checkpoint_sha` and update remain stored.
+Archiving a Procedure prevents new Runs but does not cancel admitted Work.
 
 Every assembled agent prompt remains within the existing 72 KiB byte limit.
 For `agent_update` Work, admission requires the frozen Procedure, original
@@ -981,7 +981,7 @@ remains visible and never silently drops an outcome.
   stored agent update is retried after its lease expires.
 - `AC-12`: Local and enrolled VM Workers use the same scoped update protocol
   without transmitting the operator credential, Worker credential, or Attempt
-  lease token in that protocol. Claim protocol version 3 is required; older
+  lease token in that protocol. Claim protocol version 4 is required; older
   Workers receive `worker_upgrade_required` and cannot claim Work.
 - `AC-13`: Restarting the control plane or Worker preserves Work, updates,
   questions, results, and retained recovery state.
@@ -1050,7 +1050,7 @@ limit with a reserved outcome slot, dirty needs-input rejection, pushed and
 unchanged checkpoints, answer continuation, answer then cancellation or failed
 preparation then retry with moved and missing refs, maximum question and answer
 sizes, bounded multi-Attempt history with UTF-8 truncation and omission digests,
-claim protocol version 3 acceptance, older-Worker rejection before any Work
+claim protocol version 4 acceptance, older-Worker rejection before any Work
 claim, outcome-aware worktree retention and cleanup.
 They verify `AC-5`, `AC-7`, `AC-8`, `AC-10`, `AC-12`, and `AC-13`, including
 the race detector.

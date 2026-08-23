@@ -226,16 +226,17 @@ static repository paths remain readable through Worker configuration.
     at runtime.
 11. Finite `factory` commands accept only an explicit-port plain HTTP loopback
     endpoint and read current state through bounded API routes.
-12. Claim protocol version 3 gates every persistent Worker claim. Older Workers
+12. Claim protocol version 4 gates every persistent Worker claim. Older Workers
     receive `worker_upgrade_required`, including for process-exit Work.
 13. Build admission is all-or-none. Exact request-key replay wins before mutable
     configuration reads, and one Run cannot contain a duplicate target.
 14. An implicit Build key is written durably before HTTP submission and is not
     removed until an authoritative admitted, replayed, or pre-commit rejection
     result has been written and flushed.
-15. A pending resume SHA is authoritative until an Attempt reports that it
-    started from that exact commit. Answer, cancellation, failed preparation,
-    and retry do not clear it or fall back to another ref.
+15. A pending resume SHA is authoritative until the supervisor starts the
+    runtime and the Worker reports that it started from that exact commit.
+    Answer, cancellation, failed preparation, and retry do not clear it or fall
+    back to another ref.
 16. Agent-owned `needs-input` requires a clean worktree and a checkpoint
     revalidated after process stop. Changed Work must match the immutable
     publish ref. Operator-owned Work cannot create this outcome.
@@ -408,8 +409,10 @@ security headers. Node.js is needed only when UI source changes.
 6. An operator answer stores bounded trusted context and requeues the same
    Work. The next claim contains a bounded continuation prompt and prepares
    from the pending SHA.
-7. The server clears the pending SHA only when the Worker starts the Attempt
-   and reports that exact starting commit. The historical checkpoint remains.
+7. The server first validates the prepared commit while moving the Attempt to
+   running. The supervisor then reports that the runtime child started, and a
+   second leased acknowledgement clears the pending SHA for that exact commit.
+   The historical checkpoint remains.
 
 ### Cancellation, lease loss, and retry
 

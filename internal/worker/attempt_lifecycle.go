@@ -255,6 +255,19 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
 		return
 	}
+	if err := manager.awaitRuntimeStarted(process); err != nil {
+		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+		return
+	}
+	if _, err := manager.client.start(handle.context, claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: token, StartedFromSHA: value.BaseCommit, RuntimeStarted: true,
+	}); err != nil {
+		handle.stop("failed")
+		message := manager.waitForSupervisor(process)
+		manager.finishWithWorktree(claim, token, handle, repository, value,
+			terminalState(message), message.Result, firstNonEmpty(err.Error(), message.Error))
+		return
+	}
 	manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
 		"process", processSummary(process))
 	sender := newEventSender(handle.context, manager.client, claim.Attempt.ID, token, claim.Execution.RequiredRuntime)
@@ -295,9 +308,6 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	}
 	if claim.Session.PendingResumeSHA != "" && !commitPattern.MatchString(claim.Session.PendingResumeSHA) {
 		return errors.New("claim pending resume SHA is not a full commit ID")
-	}
-	if claim.Session.CheckpointPublished && claim.Session.PendingResumeSHA == "" {
-		return errors.New("claim marks a checkpoint published without a pending resume SHA")
 	}
 	if claim.Session.PullRequestHeadSHA != "" && !commitPattern.MatchString(claim.Session.PullRequestHeadSHA) {
 		return errors.New("claim pull request recovery SHA is not a full commit ID")
@@ -487,11 +497,22 @@ func (manager *Manager) waitForSupervisor(process *supervisorProcess) supervisor
 	}
 }
 
+func (manager *Manager) awaitRuntimeStarted(process *supervisorProcess) error {
+	message := manager.waitForSupervisorMessage(process)
+	if message.Type == "started" {
+		return nil
+	}
+	if message.Type == "exit" {
+		return errors.New(firstNonEmpty(message.Error, "attempt runtime exited before reporting startup"))
+	}
+	return errors.New("attempt supervisor returned invalid runtime startup evidence")
+}
+
 func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) supervisorMessage {
 	for {
 		select {
 		case message := <-process.messages:
-			if message.Type == "exit" || message.Type == "output" {
+			if message.Type == "started" || message.Type == "exit" || message.Type == "output" {
 				if message.Type == "exit" {
 					_ = process.closeControl()
 					if message.StopUnverified {
@@ -505,7 +526,7 @@ func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) sup
 		case err := <-process.decodeErrors:
 			select {
 			case message := <-process.messages:
-				if message.Type == "exit" || message.Type == "output" {
+				if message.Type == "started" || message.Type == "exit" || message.Type == "output" {
 					if message.Type == "exit" {
 						if message.StopUnverified {
 							manager.emergencyStop(process, errors.New(firstNonEmpty(message.Error, "process stop was not verified")))

@@ -302,6 +302,9 @@ func resolveRecoveryCommit(
 	repository Repository,
 	recovery worktreeRecovery,
 ) (string, string, error) {
+	if err := validateRegisteredOrigin(ctx, gitExecutable, repository); err != nil {
+		return "", "", err
+	}
 	if recovery.PendingResumeSHA != "" {
 		if !commitPattern.MatchString(recovery.PendingResumeSHA) {
 			return "", "", errors.New("pending resume SHA is not a full commit ID")

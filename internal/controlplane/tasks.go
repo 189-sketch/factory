@@ -1655,15 +1655,17 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 	var targetKind, sourceKind, sourceKey string
 	var owner protocol.ExecutionOwner
 	var previouslyStarted sql.NullInt64
+	var retryMayRepeatEffects int
 	var profileVersion int
 	err = tx.QueryRowContext(ctx, `
 		SELECT run_id, state, repository_id, repository_identity, required_runtime,
 		       execution_backend, execution_profile_id, execution_profile_version,
-		       target_kind, source_kind, source_key, execution_owner, started_at
+		       target_kind, source_kind, source_key, execution_owner, started_at,
+		       retry_may_repeat_effects
 		FROM sessions WHERE id = ? AND run_id = ?
 	`, sessionID, expectedRunID).Scan(&runID, &state, &repositoryID, &identity, &runtime,
 		&backend, &profileID, &profileVersion, &targetKind, &sourceKind, &sourceKey, &owner,
-		&previouslyStarted)
+		&previouslyStarted, &retryMayRepeatEffects)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.RunDetail{}, ErrNotFound
 	}
@@ -1760,7 +1762,7 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 		       started_at = NULL, terminal_at = NULL, result = NULL, failure_reason = NULL,
 		       terminal_message = '', waiting_reason = '', execution_owner = 'none'
 		WHERE id = ?
-	`, assignedWorkerID, previouslyStarted.Valid, sessionID); err != nil {
+	`, assignedWorkerID, previouslyStarted.Valid || retryMayRepeatEffects != 0, sessionID); err != nil {
 		return protocol.RunDetail{}, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET updated_at = ?, terminal_at = NULL WHERE id = ?`, now, runID); err != nil {

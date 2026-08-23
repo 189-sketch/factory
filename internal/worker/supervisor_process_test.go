@@ -275,6 +275,9 @@ func TestRunSupervisorDefaultsToCodex(t *testing.T) {
 	session := startSupervisorSession(t, init)
 	session.awaitReady()
 	session.send("start")
+	if started := session.await("runtime startup"); started.Type != "started" {
+		t.Fatalf("runtime startup message = %+v", started)
+	}
 	exit, err := session.awaitExit()
 	if err != nil {
 		t.Fatal(err)
@@ -683,6 +686,9 @@ func TestRunSupervisorForwardsRuntimeOutputAsEvents(t *testing.T) {
 		message := session.await("runtime output")
 		if message.Type == "exit" {
 			break
+		}
+		if message.Type == "started" {
+			continue
 		}
 		if message.Type != "output" {
 			t.Fatalf("unexpected message %+v", message)

@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -24,9 +25,15 @@ func TestWorkAnswerHTTPStoresTrustedContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := http.Post(
-		server.URL+"/api/v1/work/"+work.ID+"/answer", "application/json", bytes.NewReader(body),
+	request, err := http.NewRequestWithContext(
+		context.Background(), http.MethodPost,
+		server.URL+"/api/v1/work/"+work.ID+"/answer", bytes.NewReader(body),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

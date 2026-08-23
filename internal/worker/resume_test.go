@@ -196,6 +196,59 @@ func TestRecoveryPreparationPrefersPendingSHAAndRequiresExactRestoredRef(t *test
 	}
 }
 
+func TestRecoveryCommitRejectsChangedRegisteredOrigin(t *testing.T) {
+	root, checkout, repository, base := resumeTestRepository(t)
+	otherRemote := filepath.Join(root, "other.git")
+	runTestCommand(t, root, "git", "init", "--bare", otherRemote)
+	runTestCommand(t, checkout, "git", "remote", "set-url", "origin", otherRemote)
+	for name, recovery := range map[string]worktreeRecovery{
+		"pending checkpoint": {
+			WorkID: testWorkID, PublishBranch: "factory/work-1111111111111111", PendingResumeSHA: base,
+		},
+		"known pull request": {
+			WorkID: testWorkID, PublishBranch: "factory/work-1111111111111111",
+			PullRequestURL: "https://github.com/owainlewis/factory/pull/343", PullRequestHeadSHA: base,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := resolveRecoveryCommit(context.Background(), "git", repository, recovery); err == nil ||
+				!strings.Contains(err.Error(), "repository origin changed") {
+				t.Fatalf("changed origin recovery error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPublishCommitRejectsRefMovementDuringFetch(t *testing.T) {
+	root, checkout, repository, base := resumeTestRepository(t)
+	const publishBranch = "factory/work-1111111111111111"
+	runTestCommand(t, checkout, "git", "push", "origin", base+":refs/heads/"+publishBranch)
+	if err := os.WriteFile(filepath.Join(checkout, "moved.txt"), []byte("moved\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runTestCommand(t, checkout, "git", "add", "moved.txt")
+	runTestCommand(t, checkout, "git", "commit", "-m", "test: move publish ref")
+	moved := strings.TrimSpace(runTestCommand(t, checkout, "git", "rev-parse", "HEAD"))
+	runTestCommand(t, checkout, "git", "push", "origin", moved+":refs/heads/moved-source")
+	remote := filepath.Join(root, "remote.git")
+	gitWrapper := filepath.Join(root, "git-wrapper")
+	script := "#!/bin/sh\n" +
+		"git \"$@\"\n" +
+		"status=$?\n" +
+		"if [ \"$status\" -eq 0 ] && [ \"$1\" = fetch ]; then\n" +
+		"  git --git-dir=\"" + remote + "\" update-ref refs/heads/" + publishBranch + " " + moved + "\n" +
+		"fi\n" +
+		"exit \"$status\"\n"
+	if err := os.WriteFile(gitWrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := remotePublishCommitOptional(
+		context.Background(), gitWrapper, repository, publishBranch,
+	); err == nil || !strings.Contains(err.Error(), "publish branch moved during validation") {
+		t.Fatalf("moving publish ref error = %v", err)
+	}
+}
+
 func resumeTestRepository(t *testing.T) (string, string, Repository, string) {
 	t.Helper()
 	root := t.TempDir()

@@ -804,6 +804,14 @@ func TestUnverifiedSupervisorExitDoesNotMarkProcessStopped(t *testing.T) {
 	}
 }
 
+func TestAwaitRuntimeStartedConsumesSupervisorAcknowledgement(t *testing.T) {
+	process := newTestSupervisorProcess()
+	process.messages <- supervisorMessage{Type: "started"}
+	if err := (&Manager{}).awaitRuntimeStarted(process); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAwaitReady(t *testing.T) {
 	t.Run("valid readiness", func(t *testing.T) {
 		process := newTestSupervisorProcess()

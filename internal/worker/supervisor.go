@@ -263,6 +263,15 @@ func superviseRuntime(
 		stderrWriter.Close()
 		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("start %s: %w", displayName, err))
 	}
+	if err := writer.send(supervisorMessage{Type: "started"}); err != nil {
+		stdout.Close()
+		stdoutWriter.Close()
+		stderr.Close()
+		stderrWriter.Close()
+		_ = stopStartedSupervisorGroup(anchor, anchorIdentity, terminationGrace)
+		_ = command.Wait()
+		return fmt.Errorf("report runtime startup: %w", err)
+	}
 	stdoutWriter.Close()
 	stderrWriter.Close()
 	defer stdout.Close()

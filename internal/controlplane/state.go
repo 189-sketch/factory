@@ -395,21 +395,24 @@ func (s *Store) StartAttempt(ctx context.Context, attemptID string, input protoc
 	if err := verifyActiveLease(lease, input.LeaseToken, now); err != nil {
 		return protocol.Attempt{}, err
 	}
+	var pendingResumeSHA string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT session.pending_resume_sha
+		FROM sessions session
+		JOIN executions execution ON execution.session_id = session.id
+		WHERE execution.id = ?
+	`, lease.executionID).Scan(&pendingResumeSHA); err != nil {
+		return protocol.Attempt{}, unavailable(err)
+	}
+	if pendingResumeSHA != "" && input.StartedFromSHA != pendingResumeSHA {
+		return protocol.Attempt{}, conflict(
+			"resume_commit_mismatch",
+			"the Attempt did not start from the authoritative pending resume commit",
+		)
+	}
 	if lease.attemptState == "preparing" {
-		var pendingResumeSHA string
-		if err := tx.QueryRowContext(ctx, `
-			SELECT session.pending_resume_sha
-			FROM sessions session
-			JOIN executions execution ON execution.session_id = session.id
-			WHERE execution.id = ?
-		`, lease.executionID).Scan(&pendingResumeSHA); err != nil {
-			return protocol.Attempt{}, unavailable(err)
-		}
-		if pendingResumeSHA != "" && input.StartedFromSHA != pendingResumeSHA {
-			return protocol.Attempt{}, conflict(
-				"resume_commit_mismatch",
-				"the Attempt did not start from the authoritative pending resume commit",
-			)
+		if input.RuntimeStarted {
+			return protocol.Attempt{}, conflict("invalid_transition", "the runtime cannot start before the Attempt")
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE attempts SET state = 'running', supervisor_pid = ?, process_identity = ?,
@@ -425,14 +428,22 @@ func (s *Store) StartAttempt(ctx context.Context, attemptID string, input protoc
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET state = 'running', started_at = COALESCE(started_at, ?),
-			       execution_owner = 'worker_attempt',
-			       pending_resume_sha = CASE WHEN pending_resume_sha = ? THEN '' ELSE pending_resume_sha END
+			       execution_owner = 'worker_attempt'
 			WHERE id = (SELECT session_id FROM executions WHERE id = ?) AND state = 'preparing'
-		`, now, input.StartedFromSHA, lease.executionID); err != nil {
+		`, now, lease.executionID); err != nil {
 			return protocol.Attempt{}, unavailable(err)
 		}
 	} else if lease.attemptState != "running" {
 		return protocol.Attempt{}, conflict("invalid_transition", "attempt cannot be started from its current state")
+	}
+	if input.RuntimeStarted {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE sessions
+			SET pending_resume_sha = CASE WHEN pending_resume_sha = ? THEN '' ELSE pending_resume_sha END
+			WHERE id = (SELECT session_id FROM executions WHERE id = ?) AND state = 'running'
+		`, input.StartedFromSHA, lease.executionID); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return protocol.Attempt{}, unavailable(err)
@@ -718,6 +729,18 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 			  AND state = 'running'
 		`, workState, now, nullString(failureReason), terminalMessage, outcome.PullRequestURL,
 			outcome.PullRequestHeadBranch, outcome.PullRequestHeadSHA, lease.executionID); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
+	} else if hasOutcome && outcome.Status == protocol.WorkUpdateNeedsInput {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE sessions SET state = ?, terminal_at = ?, result = ?, failure_reason = ?,
+			       terminal_message = ?, checkpoint_sha = ?, pending_resume_sha = ?,
+			       checkpoint_published = ?, execution_owner = 'none'
+			WHERE id = (SELECT session_id FROM executions WHERE id = ?)
+			  AND state IN ('preparing', 'running')
+		`, workState, now, nullString(input.Result), nullString(failureReason), terminalMessage,
+			outcome.CheckpointSHA, outcome.CheckpointSHA, outcome.CheckpointPublished,
+			lease.executionID); err != nil {
 			return protocol.Attempt{}, unavailable(err)
 		}
 	} else if hasOutcome && outcome.Status == protocol.WorkUpdateReady {

@@ -483,6 +483,15 @@ func remotePublishCommitOptional(
 		return "", false, commandFailure("fetch publish branch", stdout, stderr, err)
 	}
 	stdout, stderr, err = runGitCommand(ctx, gitExecutable, repository.Path, 64<<10,
+		"ls-remote", "--refs", "origin", "refs/heads/"+branch)
+	if err != nil {
+		return "", false, commandFailure("recheck publish branch", stdout, stderr, err)
+	}
+	current := strings.Fields(string(stdout))
+	if len(current) != 2 || current[1] != "refs/heads/"+branch || current[0] != commit {
+		return "", false, errors.New("publish branch moved during validation")
+	}
+	stdout, stderr, err = runGitCommand(ctx, gitExecutable, repository.Path, 64<<10,
 		"rev-parse", "--verify", commit+"^{commit}")
 	if err != nil || strings.TrimSpace(string(stdout)) != commit {
 		if err == nil {
