@@ -27,13 +27,16 @@ type attemptHandle struct {
 	expiry        time.Time
 	supervisor    *supervisorProcess
 	manifestReady bool
+	outcome       *protocol.WorkUpdate
+	deadline      time.Time
 }
 
 func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim, token string) {
+	sessionDeadline := claim.Attempt.CreatedAt.Add(time.Duration(claim.Session.TimeoutSeconds) * time.Second)
 	attemptContext, cancel := context.WithCancel(parent)
 	handle := &attemptHandle{
 		context: attemptContext, cancel: cancel, done: make(chan struct{}),
-		heartbeatDone: make(chan struct{}), expiry: claim.Attempt.LeaseExpiresAt,
+		heartbeatDone: make(chan struct{}), expiry: claim.Attempt.LeaseExpiresAt, deadline: sessionDeadline,
 	}
 	manager.stateMutex.Lock()
 	manager.active[claim.Attempt.ID] = handle
@@ -50,7 +53,6 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}()
 	go manager.heartbeatAttempt(handle, claim.Attempt.ID, token)
 
-	sessionDeadline := claim.Attempt.CreatedAt.Add(time.Duration(claim.Session.TimeoutSeconds) * time.Second)
 	sessionTimer := time.AfterFunc(time.Until(sessionDeadline), func() {
 		handle.stop("timeout")
 	})
@@ -156,6 +158,15 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		return
 	}
 	defer os.Remove(path)
+	var updateServer *agentUpdateServer
+	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+		updateServer, err = manager.startAgentUpdateServer(claim, token, handle, repository, value)
+		if err != nil {
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		defer updateServer.close()
+	}
 	process, err := startSupervisor(manager.options.SupervisorCommand, supervisorInit{
 		Runtime:           claim.Execution.RequiredRuntime,
 		RuntimeExecutable: manager.runtimeExecutable(claim.Execution.RequiredRuntime),
@@ -165,6 +176,9 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		TimeoutSeconds:    remainingTimeoutSeconds(sessionDeadline),
 		RunID:             claim.Session.RunID,
 		SessionID:         claim.Session.ID,
+		AttemptID:         updateServerAttemptID(updateServer, claim.Attempt.ID),
+		UpdateSocket:      updateServerSocket(updateServer),
+		UpdateToken:       updateServerToken(updateServer),
 	}, os.Stderr)
 	if err != nil {
 		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
@@ -237,6 +251,9 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	sender := newEventSender(handle.context, manager.client, claim.Attempt.ID, token, claim.Execution.RequiredRuntime)
 	message := manager.waitForSupervisorWithEvents(process, sender)
 	sender.closeAndWait(5 * time.Second)
+	if reason := attemptStopReasonForSupervisor(message.Reason); reason != "" {
+		handle.stop(reason)
+	}
 	manager.finishWithWorktree(claim, token, handle, repository, value,
 		terminalState(message), message.Result, message.Error)
 }
@@ -396,6 +413,33 @@ func (handle *attemptHandle) stopReason() string {
 	return handle.reason
 }
 
+func (handle *attemptHandle) recordOutcome(update protocol.WorkUpdate) {
+	handle.mutex.Lock()
+	if handle.outcome == nil {
+		copy := update
+		handle.outcome = &copy
+	}
+	handle.mutex.Unlock()
+}
+
+func (handle *attemptHandle) stopForOutcome() {
+	handle.mutex.Lock()
+	process := handle.supervisor
+	handle.mutex.Unlock()
+	if process != nil {
+		_ = process.send("outcome_reported")
+	}
+}
+
+func (handle *attemptHandle) reportedOutcome() (protocol.WorkUpdate, bool) {
+	handle.mutex.Lock()
+	defer handle.mutex.Unlock()
+	if handle.outcome == nil {
+		return protocol.WorkUpdate{}, false
+	}
+	return *handle.outcome, true
+}
+
 func (manager *Manager) waitForSupervisorWithEvents(
 	process *supervisorProcess,
 	sender *eventSender,
@@ -426,7 +470,11 @@ func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) sup
 			if message.Type == "exit" || message.Type == "output" {
 				if message.Type == "exit" {
 					_ = process.closeControl()
-					process.markStopped()
+					if message.StopUnverified {
+						manager.emergencyStop(process, errors.New(firstNonEmpty(message.Error, "process stop was not verified")))
+					} else {
+						process.markStopped()
+					}
 				}
 				return message
 			}
@@ -435,7 +483,11 @@ func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) sup
 			case message := <-process.messages:
 				if message.Type == "exit" || message.Type == "output" {
 					if message.Type == "exit" {
-						process.markStopped()
+						if message.StopUnverified {
+							manager.emergencyStop(process, errors.New(firstNonEmpty(message.Error, "process stop was not verified")))
+						} else {
+							process.markStopped()
+						}
 					}
 					return message
 				}
@@ -506,7 +558,32 @@ func (manager *Manager) finishWithWorktree(
 ) {
 	manager.beginCapacityHandoff()
 	defer manager.finishCapacityHandoff(handle)
+	if handle.processStillActive() {
+		reason := firstNonEmpty(errorText, "Attempt process-group shutdown could not be verified.")
+		manager.markUnhealthy("process_group_stop", errors.New(reason))
+		manager.retain(claim, repository, value, reason)
+		return
+	}
 
+	outcome, reported := handle.reportedOutcome()
+	if reported && handle.stopReasonAt(time.Now()) == "" {
+		state, result, errorText = "succeeded", "", ""
+		if outcome.Status == protocol.WorkUpdateReady {
+			validationContext, cancelValidation := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
+			evidence, validationErr := manager.validateReadyDelivery(
+				validationContext, claim, repository, value, outcome.PullRequestURL,
+			)
+			cancelValidation()
+			if validationErr != nil || evidence.HeadBranch != outcome.PullRequestHeadBranch ||
+				evidence.HeadSHA != outcome.PullRequestHeadSHA {
+				state = "failed"
+				errorText = "Delivery evidence could not be revalidated after the agent process stopped."
+			}
+		}
+	}
+	state, result, errorText = terminalForFinalStop(
+		handle.stopReasonAt(time.Now()), state, result, errorText,
+	)
 	result = boundedText(result, protocol.MaxResultBytes)
 	errorText = boundedText(errorText, protocol.MaxErrorBytes)
 	if err := manager.persistLifecycle(claim.Attempt.ID, manifestCompleted, func(manifest *attemptManifest) {
@@ -516,8 +593,9 @@ func (manager *Manager) finishWithWorktree(
 		manager.markUnhealthy("manifest_write", err)
 		errorText = firstNonEmpty(errorText, err.Error())
 	}
-	completed := manager.complete(claim.Attempt.ID, token, state, result, errorText, handle)
-	if completed && state == "succeeded" {
+	completedAttempt, completed := manager.complete(claim.Attempt.ID, token, state, result, errorText, handle)
+	retainReportedFailure := reported && outcome.Status == protocol.WorkUpdateFailed
+	if shouldCleanCompletedWorktree(completed, completedAttempt.State, retainReportedFailure) {
 		err := manager.cleanCompletedWorktree(claim.Attempt.ID)
 		if err == nil {
 			if err := manager.recordDisposed(claim.Attempt.ID); err != nil {
@@ -539,6 +617,10 @@ func (manager *Manager) finishWithWorktree(
 	}
 	reason := firstNonEmpty(errorText, state+" attempt retained for inspection")
 	manager.retain(claim, repository, value, reason)
+}
+
+func shouldCleanCompletedWorktree(completed bool, authoritativeState string, retainReportedFailure bool) bool {
+	return completed && authoritativeState == "succeeded" && !retainReportedFailure
 }
 
 func (manager *Manager) registerAfterAttempt(handle *attemptHandle) {
@@ -571,6 +653,17 @@ func (handle *attemptHandle) processStillActive() bool {
 	return process != nil && !process.isStopped()
 }
 
+func (handle *attemptHandle) stopReasonAt(now time.Time) string {
+	handle.mutex.Lock()
+	reason := handle.reason
+	deadline := handle.deadline
+	handle.mutex.Unlock()
+	if reason == "" && !deadline.IsZero() && !now.Before(deadline) {
+		handle.stop("timeout")
+	}
+	return handle.stopReason()
+}
+
 func (manager *Manager) complete(
 	attemptID string,
 	token string,
@@ -578,7 +671,7 @@ func (manager *Manager) complete(
 	result string,
 	errorText string,
 	handle *attemptHandle,
-) bool {
+) (protocol.Attempt, bool) {
 	timeout := requestTimeout
 	if remaining := time.Until(handle.leaseExpiry()); remaining > 0 && remaining < timeout {
 		timeout = remaining
@@ -589,11 +682,11 @@ func (manager *Manager) complete(
 			"attempt_id", attemptID,
 			"error_class", "lease_expired",
 		)
-		return false
+		return protocol.Attempt{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	_, err := manager.client.complete(ctx, attemptID, protocol.CompleteAttemptRequest{
+	completed, err := manager.client.complete(ctx, attemptID, protocol.CompleteAttemptRequest{
 		LeaseToken: token, State: state, Result: result, Error: errorText,
 	})
 	if err != nil {
@@ -602,10 +695,10 @@ func (manager *Manager) complete(
 			"attempt_id", attemptID,
 			"error_class", apiErrorClass(err),
 		)
-		return false
+		return protocol.Attempt{}, false
 	}
 	manager.logger.Info("attempt_completed", "attempt_id", attemptID, "state", state)
-	return true
+	return completed, true
 }
 
 func (manager *Manager) retain(claim protocol.Claim, repository Repository, value worktree, reason string) {
@@ -682,17 +775,75 @@ func terminalState(message supervisorMessage) string {
 	if message.Reason == "exited" && message.ExitCode == 0 {
 		return "succeeded"
 	}
+	if message.Reason == "outcome_reported" {
+		return "succeeded"
+	}
 	return "failed"
 }
 
+func terminalForFinalStop(reason, state, result, errorText string) (string, string, string) {
+	switch reason {
+	case "cancelled":
+		return "cancelled", "", "attempt cancelled"
+	case "timeout":
+		return "failed", "", "Session timeout reached"
+	case "lease_lost":
+		return "failed", "", "control-plane lease was lost"
+	case "failed":
+		return "failed", result, firstNonEmpty(errorText, "attempt stopped before completion")
+	default:
+		return state, result, errorText
+	}
+}
+
+func attemptStopReasonForSupervisor(reason string) string {
+	switch reason {
+	case "cancelled", "lease_lost", "timeout":
+		return reason
+	case "parent_lost", "supervisor_error":
+		return "failed"
+	default:
+		return ""
+	}
+}
+
 func buildPrompt(claim protocol.Claim, value worktree) string {
-	return protocol.FormatAgentPrompt(
+	prompt := protocol.FormatAgentPrompt(
 		claim.Session.TaskName,
 		claim.Repository.RemoteIdentity,
 		value.Branch,
 		value.BaseBranch,
 		claim.Session.Prompt,
 	)
+	if claim.Session.OutcomeContract != protocol.OutcomeAgentUpdate {
+		return prompt
+	}
+	return prompt + "\n\nFactory update contract:\n" +
+		"This Work is unfinished until you call factory update. Use status running for useful progress only. " +
+		"Before exiting, report exactly one available outcome: ready, failed, or no-change. " +
+		"Ready requires --pr with the GitHub pull request URL. Needs-input is unavailable until verified checkpoint support is enabled. " +
+		"Always include a concise non-empty --message."
+}
+
+func updateServerSocket(server *agentUpdateServer) string {
+	if server == nil {
+		return ""
+	}
+	return server.socketPath
+}
+
+func updateServerAttemptID(server *agentUpdateServer, attemptID string) string {
+	if server == nil {
+		return ""
+	}
+	return attemptID
+}
+
+func updateServerToken(server *agentUpdateServer) string {
+	if server == nil {
+		return ""
+	}
+	return server.token
 }
 
 func apiErrorClass(err error) string {
