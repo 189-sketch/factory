@@ -1,6 +1,6 @@
 export type Runtime = "pi" | "codex" | "claude-code";
 export type ExecutionBackend = "persistent" | "fake_cloud_run";
-export type SessionState = "blocked" | "queued" | "preparing" | "running" | "succeeded" | "failed" | "cancelled";
+export type SessionState = "blocked" | "queued" | "preparing" | "running" | "needs-input" | "ready" | "succeeded" | "failed" | "no-change" | "cancelled";
 export type RunState = "blocked" | "queued" | "running" | "succeeded" | "failed" | "partial" | "cancelled";
 
 export interface ExecutionProfile {
@@ -58,6 +58,8 @@ export interface Task {
   timeout_seconds: number;
   concurrency_limit: number;
   generation: number;
+  pipeline_id?: string;
+  pipeline_name?: string;
   archived: boolean;
   read_only: boolean;
   repositories: TaskRepository[] | null;
@@ -78,6 +80,36 @@ export interface SaveTaskInput {
   repository_ids: string[];
   schedule: { enabled: boolean; cron?: string; timezone?: string };
   expected_generation?: number;
+  pipeline_id?: string;
+}
+
+export interface PipelineStage {
+  position: number;
+  name: string;
+  prompt: string;
+}
+
+export interface Pipeline {
+  id: string;
+  name: string;
+  generation: number;
+  stages: PipelineStage[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SavePipelineInput {
+  name: string;
+  stages: Array<{ name: string; prompt: string }>;
+  expected_generation?: number;
+}
+
+export interface StageRun extends PipelineStage {
+  state: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+  result?: string;
+  error?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 export interface TaskSnapshot {
@@ -92,6 +124,12 @@ export interface TaskSnapshot {
   repositories: TaskRepository[] | null;
   cron?: string;
   timezone?: string;
+  pipeline?: {
+    id: string;
+    name: string;
+    generation: number;
+    stages: PipelineStage[];
+  };
 }
 
 export interface Attempt {
@@ -127,6 +165,7 @@ export interface Session {
   terminal_at?: string;
   result?: string;
   failure_reason?: string;
+  stages?: StageRun[] | null;
   attempts?: Attempt[] | null;
 }
 
@@ -141,6 +180,9 @@ export interface Run {
   needs_attention: boolean;
   session_count: number;
   succeeded_count: number;
+  ready_count: number;
+  needs_input_count: number;
+  no_change_count: number;
   failed_count: number;
   cancelled_count: number;
   active_count: number;

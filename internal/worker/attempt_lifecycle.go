@@ -150,15 +150,6 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
 		return
 	}
-	prompt := buildPrompt(claim, value)
-	if len([]byte(value.Branch)) > protocol.MaxAgentBranchBytes ||
-		len([]byte(value.BaseBranch)) > protocol.MaxAgentBranchBytes ||
-		len([]byte(prompt)) > protocol.MaxAgentPromptBytes {
-		err := errors.New("worktree branch metadata makes the agent prompt exceed its 72 KiB bound")
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-
 	path, err := resultPath(manager.dataDirectory, claim.Attempt.ID)
 	if err != nil {
 		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
@@ -174,110 +165,185 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		}
 		defer updateServer.close()
 	}
-	process, err := startSupervisor(manager.options.SupervisorCommand, supervisorInit{
-		Runtime:           claim.Execution.RequiredRuntime,
-		RuntimeExecutable: manager.runtimeExecutable(claim.Execution.RequiredRuntime),
-		Worktree:          value.Path,
-		ResultPath:        path,
-		Prompt:            prompt,
-		TimeoutSeconds:    remainingTimeoutSeconds(sessionDeadline),
-		RunID:             claim.Session.RunID,
-		SessionID:         claim.Session.ID,
-		AttemptID:         updateServerAttemptID(updateServer, claim.Attempt.ID),
-		UpdateSocket:      updateServerSocket(updateServer),
-		UpdateToken:       updateServerToken(updateServer),
-	}, os.Stderr)
-	if err != nil {
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-	if err := process.awaitReady(handle.context); err != nil {
-		_ = process.closeControl()
-		manager.finishWithWorktree(claim, token, handle, repository, value,
-			terminalForStop(handle), "", stoppedAttemptError(handle, err).Error())
-		return
-	}
-	if _, err := manager.manifests.update(claim.Attempt.ID, func(manifest *attemptManifest) error {
-		manifest.SupervisorPID = process.supervisorPID
-		manifest.SupervisorIdentity = process.supervisorIdentity
-		manifest.ProcessGroupID = process.processGroupID
-		manifest.ProcessGroupIdentity = process.groupIdentity
-		manifest.ProcessActive = true
-		manifest.LeaseDeadline = handle.leaseExpiry()
-		manifest.Lifecycle = manifestSupervisorReady
-		return nil
-	}); err != nil {
-		manager.emergencyStop(process, err)
-		manager.markUnhealthy("manifest_write", err)
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-	handle.setSupervisor(process)
-
-	started, err := manager.client.start(
-		handle.context, claim.Attempt.ID, supervisorStartRequest(process, token, value.BaseCommit),
-	)
-	if err != nil {
-		reason := handle.stopReason()
-		var apiError *APIError
-		if errors.As(err, &apiError) && apiError.Code == "lease_not_owner" {
-			reason = "lease_lost"
-		}
-		if reason == "" {
-			reason = "failed"
-		}
-		handle.stop(reason)
-		message := manager.waitForSupervisor(process)
-		errorText := err.Error()
-		if reason == "timeout" {
-			errorText = "Session timeout reached"
-		}
-		manager.finishWithWorktree(claim, token, handle, repository, value,
-			terminalState(message), message.Result, firstNonEmpty(errorText, message.Error))
-		return
-	}
-	if started.State != "running" {
-		handle.stop("lease_lost")
-		message := manager.waitForSupervisor(process)
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", message.Result,
-			"control plane did not accept the running transition")
-		return
-	}
-	if err := manager.persistLifecycle(claim.Attempt.ID, manifestRunning, nil); err != nil {
-		handle.stop("failed")
-		manager.emergencyStop(process, err)
-		manager.markUnhealthy("manifest_write", err)
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-	if err := process.send("start"); err != nil {
-		manager.emergencyStop(process, err)
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-	if err := manager.awaitRuntimeStarted(process); err != nil {
-		manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
-		return
-	}
-	if _, err := manager.client.start(handle.context, claim.Attempt.ID, protocol.StartAttemptRequest{
-		LeaseToken: token, StartedFromSHA: value.BaseCommit, RuntimeStarted: true,
-	}); err != nil {
-		handle.stop("failed")
-		message := manager.waitForSupervisor(process)
-		manager.finishWithWorktree(claim, token, handle, repository, value,
-			terminalState(message), message.Result, firstNonEmpty(err.Error(), message.Error))
-		return
-	}
-	manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
-		"process", processSummary(process))
 	sender := newEventSender(handle.context, manager.client, claim.Attempt.ID, token, claim.Execution.RequiredRuntime)
-	message := manager.waitForSupervisorWithEvents(process, sender)
+	stages := claim.Session.Stages
+	if len(stages) == 0 {
+		stages = []protocol.StageRun{{Position: 0, Name: "Do the task", Prompt: claim.Session.Prompt}}
+	}
+	lastResult := ""
+	var finalMessage supervisorMessage
+	for index, stage := range stages {
+		if stage.State == protocol.StageSucceeded {
+			lastResult = stage.Result
+			continue
+		}
+		if reason := handle.stopReasonAt(time.Now()); reason != "" {
+			sender.closeAndWait(5 * time.Second)
+			err := stoppedAttemptError(handle, errors.New("Attempt stopped before the next Pipeline stage."))
+			manager.finishWithWorktree(claim, token, handle, repository, value,
+				terminalForStop(handle), "", err.Error())
+			return
+		}
+		finalStage := index == len(stages)-1
+		prompt := buildStagePrompt(claim, value, stage, finalStage)
+		if len([]byte(value.Branch)) > protocol.MaxAgentBranchBytes ||
+			len([]byte(value.BaseBranch)) > protocol.MaxAgentBranchBytes ||
+			len([]byte(prompt)) > protocol.MaxAgentPromptBytes {
+			sender.closeAndWait(5 * time.Second)
+			err := errors.New("worktree branch metadata makes the agent prompt exceed its 72 KiB bound")
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		stageUpdateServer := (*agentUpdateServer)(nil)
+		if finalStage {
+			stageUpdateServer = updateServer
+		}
+		process, err := startSupervisor(manager.options.SupervisorCommand, supervisorInit{
+			Runtime: claim.Execution.RequiredRuntime, RuntimeExecutable: manager.runtimeExecutable(claim.Execution.RequiredRuntime),
+			Worktree: value.Path, ResultPath: path, Prompt: prompt,
+			TimeoutSeconds: remainingTimeoutSeconds(sessionDeadline), RunID: claim.Session.RunID, SessionID: claim.Session.ID,
+			AttemptID:    updateServerAttemptID(stageUpdateServer, claim.Attempt.ID),
+			UpdateSocket: updateServerSocket(stageUpdateServer), UpdateToken: updateServerToken(stageUpdateServer),
+		}, os.Stderr)
+		if err != nil {
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		if err := process.awaitReady(handle.context); err != nil {
+			_ = process.closeControl()
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value,
+				terminalForStop(handle), "", stoppedAttemptError(handle, err).Error())
+			return
+		}
+		if _, err := manager.manifests.update(claim.Attempt.ID, func(manifest *attemptManifest) error {
+			manifest.SupervisorPID = process.supervisorPID
+			manifest.SupervisorIdentity = process.supervisorIdentity
+			manifest.ProcessGroupID = process.processGroupID
+			manifest.ProcessGroupIdentity = process.groupIdentity
+			manifest.ProcessActive = true
+			manifest.LeaseDeadline = handle.leaseExpiry()
+			manifest.Lifecycle = manifestSupervisorReady
+			return nil
+		}); err != nil {
+			manager.emergencyStop(process, err)
+			manager.markUnhealthy("manifest_write", err)
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		handle.setSupervisor(process)
+		if index == 0 {
+			started, err := manager.client.start(
+				handle.context, claim.Attempt.ID, supervisorStartRequest(process, token, value.BaseCommit),
+			)
+			if err != nil {
+				reason := handle.stopReason()
+				var apiError *APIError
+				if errors.As(err, &apiError) && apiError.Code == "lease_not_owner" {
+					reason = "lease_lost"
+				}
+				if reason == "" {
+					reason = "failed"
+				}
+				handle.stop(reason)
+				message := manager.waitForSupervisor(process)
+				sender.closeAndWait(5 * time.Second)
+				errorText := err.Error()
+				if reason == "timeout" {
+					errorText = "Session timeout reached"
+				}
+				manager.finishWithWorktree(claim, token, handle, repository, value,
+					terminalState(message), message.Result, firstNonEmpty(errorText, message.Error))
+				return
+			}
+			if started.State != "running" {
+				handle.stop("lease_lost")
+				message := manager.waitForSupervisor(process)
+				sender.closeAndWait(5 * time.Second)
+				manager.finishWithWorktree(claim, token, handle, repository, value, "failed", message.Result,
+					"control plane did not accept the running transition")
+				return
+			}
+		}
+		_, err = manager.client.startStage(handle.context, claim.Attempt.ID, stage.Position, stageStartRequest(process, token))
+		if err != nil {
+			reason := stageStartFailureReason(handle.stopReason(), err)
+			handle.stop(reason)
+			message := manager.waitForSupervisor(process)
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, terminalState(message), message.Result, err.Error())
+			return
+		}
+		if err := manager.persistLifecycle(claim.Attempt.ID, manifestRunning, nil); err != nil {
+			handle.stop("failed")
+			manager.emergencyStop(process, err)
+			manager.markUnhealthy("manifest_write", err)
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		if err := process.send("start"); err != nil {
+			manager.emergencyStop(process, err)
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		if err := manager.awaitRuntimeStarted(process); err != nil {
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		if index == 0 {
+			if _, err := manager.client.start(handle.context, claim.Attempt.ID, protocol.StartAttemptRequest{
+				LeaseToken: token, StartedFromSHA: value.BaseCommit, RuntimeStarted: true,
+			}); err != nil {
+				handle.stop("failed")
+				message := manager.waitForSupervisor(process)
+				sender.closeAndWait(5 * time.Second)
+				manager.finishWithWorktree(claim, token, handle, repository, value,
+					terminalState(message), message.Result, firstNonEmpty(err.Error(), message.Error))
+				return
+			}
+			manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
+				"process", processSummary(process))
+		}
+		manager.logger.Info("pipeline_stage_started", "attempt_id", claim.Attempt.ID, "stage", stage.Name, "position", stage.Position)
+		message := manager.waitForSupervisorWithEvents(process, sender)
+		stageState := protocol.StageSucceeded
+		if terminalState(message) == "cancelled" {
+			stageState = protocol.StageCancelled
+		} else if terminalState(message) != "succeeded" {
+			stageState = protocol.StageFailed
+		}
+		_, completeErr := manager.client.completeStage(handle.context, claim.Attempt.ID, stage.Position, protocol.CompleteStageRequest{
+			LeaseToken: token, State: stageState, Result: message.Result, Error: message.Error,
+		})
+		if completeErr != nil || stageState != protocol.StageSucceeded {
+			var apiError *APIError
+			if errors.As(completeErr, &apiError) && apiError.Code == "lease_not_owner" {
+				handle.stop("lease_lost")
+			}
+			sender.closeAndWait(5 * time.Second)
+			attemptState := terminalState(message)
+			if completeErr != nil && attemptState == "succeeded" {
+				attemptState = "failed"
+			}
+			manager.finishWithWorktree(claim, token, handle, repository, value,
+				attemptState, message.Result, firstNonEmpty(errorString(completeErr), message.Error))
+			return
+		}
+		lastResult = message.Result
+		finalMessage = message
+		manager.logger.Info("pipeline_stage_completed", "attempt_id", claim.Attempt.ID, "stage", stage.Name, "position", stage.Position)
+	}
 	sender.closeAndWait(5 * time.Second)
-	if reason := attemptStopReasonForSupervisor(message.Reason); reason != "" {
+	if reason := attemptStopReasonForSupervisor(finalMessage.Reason); reason != "" {
 		handle.stop(reason)
 	}
 	manager.finishWithWorktree(claim, token, handle, repository, value,
-		terminalState(message), message.Result, message.Error)
+		terminalState(finalMessage), lastResult, finalMessage.Error)
 }
 
 func (manager *Manager) validateClaim(claim protocol.Claim) error {
@@ -297,15 +363,23 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	if claim.Session.TimeoutSeconds < 1 || claim.Session.TimeoutSeconds > int(protocol.MaxTimeout/time.Second) {
 		return errors.New("claim timeout is outside the supported range")
 	}
-	promptFits := protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt)
-	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
-		promptFits = protocol.AgentUpdatePromptFits(
-			claim.Session.TaskName, claim.Repository.RemoteIdentity,
-			claim.Session.Target.PublishBranch, claim.Session.Prompt,
-		)
+	stages := claim.Session.Stages
+	if len(stages) == 0 {
+		stages = []protocol.StageRun{{Prompt: claim.Session.Prompt}}
+	} else if len(stages) > protocol.MaxPipelineStages {
+		return errors.New("claim Pipeline must contain 1 through 20 stages")
 	}
-	if !promptFits {
-		return errors.New("claim agent prompt exceeds 72 KiB")
+	for index, stage := range stages {
+		promptFits := protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, stage.Prompt)
+		if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate && index == len(stages)-1 {
+			promptFits = protocol.AgentUpdatePromptFits(
+				claim.Session.TaskName, claim.Repository.RemoteIdentity,
+				claim.Session.Target.PublishBranch, stage.Prompt,
+			)
+		}
+		if !promptFits {
+			return errors.New("claim Pipeline stage prompt exceeds 72 KiB")
+		}
 	}
 	if claim.Session.PendingResumeSHA != "" && !commitPattern.MatchString(claim.Session.PendingResumeSHA) {
 		return errors.New("claim pending resume SHA is not a full commit ID")
@@ -838,6 +912,22 @@ func terminalState(message supervisorMessage) string {
 	return "failed"
 }
 
+func stageStartFailureReason(current string, err error) string {
+	if current != "" {
+		return current
+	}
+	var apiError *APIError
+	if errors.As(err, &apiError) {
+		switch apiError.Code {
+		case "lease_not_owner":
+			return "lease_lost"
+		case "cancellation_requested":
+			return "cancelled"
+		}
+	}
+	return "failed"
+}
+
 func terminalForFinalStop(reason, state, result, errorText string) (string, string, string) {
 	switch reason {
 	case "cancelled":
@@ -864,15 +954,15 @@ func attemptStopReasonForSupervisor(reason string) string {
 	}
 }
 
-func buildPrompt(claim protocol.Claim, value worktree) string {
-	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+func buildStagePrompt(claim protocol.Claim, value worktree, stage protocol.StageRun, finalStage bool) string {
+	if finalStage && claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
 		return protocol.FormatAgentUpdatePrompt(
 			claim.Session.TaskName,
 			claim.Repository.RemoteIdentity,
 			value.Branch,
 			value.BaseBranch,
 			claim.Session.Target.PublishBranch,
-			claim.Session.Prompt,
+			stage.Prompt,
 		)
 	}
 	return protocol.FormatAgentPrompt(
@@ -880,7 +970,7 @@ func buildPrompt(claim protocol.Claim, value worktree) string {
 		claim.Repository.RemoteIdentity,
 		value.Branch,
 		value.BaseBranch,
-		claim.Session.Prompt,
+		stage.Prompt,
 	)
 }
 
@@ -903,6 +993,24 @@ func updateServerToken(server *agentUpdateServer) string {
 		return ""
 	}
 	return server.token
+}
+
+func buildPrompt(claim protocol.Claim, value worktree) string {
+	return buildStagePrompt(claim, value, protocol.StageRun{Prompt: claim.Session.Prompt}, true)
+}
+
+func stageStartRequest(process *supervisorProcess, token string) protocol.StartStageRequest {
+	return protocol.StartStageRequest{
+		LeaseToken: token, SupervisorPID: &process.supervisorPID,
+		ProcessIdentity: process.supervisorIdentity, ProcessGroupID: &process.processGroupID,
+	}
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func apiErrorClass(err error) string {

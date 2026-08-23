@@ -1,4 +1,4 @@
--- Resume questions keep both the latest answer on Work and every historical
+-- Migration 34 keeps both the latest answer on Work and every historical
 -- answer as trusted operator context. Checkpoint publication is stored
 -- explicitly so a Worker can distinguish an unchanged base checkpoint from a
 -- commit that must remain reachable through the immutable publish ref.

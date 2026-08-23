@@ -151,13 +151,14 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	if err != nil || claim == nil {
 		t.Fatalf("continuation claim = %#v, error %v", claim, err)
 	}
+	continuationPrompt := claim.Session.Stages[len(claim.Session.Stages)-1].Prompt
 	if claim.Session.PendingResumeSHA != testCheckpointSHA || !claim.Session.CheckpointPublished ||
-		!strings.Contains(claim.Session.Prompt, "Which behavior should be preserved?") ||
-		!strings.Contains(claim.Session.Prompt, answer.Message) ||
-		!strings.Contains(claim.Session.Prompt, "Stored history records: 2") ||
+		!strings.Contains(continuationPrompt, "Which behavior should be preserved?") ||
+		!strings.Contains(continuationPrompt, answer.Message) ||
+		!strings.Contains(continuationPrompt, "Stored history records: 2") ||
 		!protocol.AgentUpdatePromptFits(
 			claim.Session.TaskName, claim.Repository.RemoteIdentity,
-			claim.Session.Target.PublishBranch, claim.Session.Prompt,
+			claim.Session.Target.PublishBranch, continuationPrompt,
 		) {
 		t.Fatalf("continuation claim = %#v", claim.Session)
 	}
@@ -284,7 +285,7 @@ func TestContinuationPreservesEveryTrustedAnswerAcrossQuestionRounds(t *testing.
 	if err != nil || finalClaim == nil {
 		t.Fatalf("third claim = %#v, error %v", finalClaim, err)
 	}
-	prompt := finalClaim.Session.Prompt
+	prompt := finalClaim.Session.Stages[len(finalClaim.Session.Stages)-1].Prompt
 	header := strings.Index(prompt, "Prior Work history")
 	if header < 0 || !protocol.AgentUpdatePromptFits(
 		finalClaim.Session.TaskName, finalClaim.Repository.RemoteIdentity,

@@ -1,6 +1,9 @@
 # Agent-directed software factory
 
-> **Status:** Proposed for review
+> **Status:** Proposed for review. The implemented linear Pipeline model in
+> [the current architecture](../../ARCHITECTURE.md) supersedes this proposal's
+> single-Procedure execution model. The remaining Work-item and agent-update
+> sections are still future direction.
 
 ## 1. Executive summary
 
@@ -257,9 +260,10 @@ protocol. V1 does not treat the agent process as isolated from other files and
 services available to the Worker operating-system user. The Worker does not
 decide whether the engineering task is semantically complete.
 
-The implementation requires `ClaimProtocolVersion` 4. Version 3 introduced
-frozen outcome behavior and scoped updates; version 4 adds authoritative resume
-start evidence to the claim and completion contract. The control plane rejects an
+The implementation requires `ClaimProtocolVersion` 5. Version 3 introduced
+frozen outcome behavior and scoped updates, version 4 added frozen Pipeline
+stages, and version 5 adds authoritative resume start evidence to the combined
+claim and completion contract. The control plane rejects an
 older registration or claim with `worker_upgrade_required`; an old Worker can
 never claim `agent_update` Work. V1 requires the server and all Workers to be
 upgraded together. A server-first upgrade pauses claims from older Workers,
@@ -982,7 +986,7 @@ remains visible and never silently drops an outcome.
   stored agent update is retried after its lease expires.
 - `AC-12`: Local and enrolled VM Workers use the same scoped update protocol
   without transmitting the operator credential, Worker credential, or Attempt
-  lease token in that protocol. Claim protocol version 4 is required; older
+  lease token in that protocol. Claim protocol version 5 is required; older
   Workers receive `worker_upgrade_required` and cannot claim Work.
 - `AC-13`: Restarting the control plane or Worker preserves Work, updates,
   questions, results, and retained recovery state.
@@ -1051,7 +1055,7 @@ limit with a reserved outcome slot, dirty needs-input rejection, pushed and
 unchanged checkpoints, answer continuation, answer then cancellation or failed
 preparation then retry with moved and missing refs, maximum question and answer
 sizes, bounded multi-Attempt history with UTF-8 truncation and omission digests,
-claim protocol version 4 acceptance, older-Worker rejection before any Work
+claim protocol version 5 acceptance, older-Worker rejection before any Work
 claim, outcome-aware worktree retention and cleanup.
 They verify `AC-5`, `AC-7`, `AC-8`, `AC-10`, `AC-12`, and `AC-13`, including
 the race detector.
@@ -1145,8 +1149,7 @@ validated through use:
 ## 13. Out of scope
 
 - A Factory coding agent, model loop, context manager, or subagent framework.
-- Ordered Stage graphs, arbitrary DAGs, visual pipeline editing, or workflow
-  chaining.
+- Branching or parallel Stage graphs and arbitrary DAGs.
 - Central CI polling, webhook-driven continuation, or long-lived wait state.
 - Automatic merge, release, deployment, or production monitoring.
 - Linear, Jira, or generic provider clients and plugin interfaces.

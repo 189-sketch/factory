@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,30 @@ func TestBuildPromptIncludesGrammaticalSafetyInstruction(t *testing.T) {
 	}
 }
 
+func TestStageStartFailureReasonHonorsCancellation(t *testing.T) {
+	tests := []struct {
+		name, current, code, want string
+		err                       error
+	}{
+		{name: "cancelled by control plane", code: "cancellation_requested", want: "cancelled"},
+		{name: "lease lost", code: "lease_not_owner", want: "lease_lost"},
+		{name: "other API error", code: "stage_not_pending", want: "failed"},
+		{name: "transport error", err: errors.New("connection closed"), want: "failed"},
+		{name: "existing timeout wins", current: "timeout", code: "cancellation_requested", want: "timeout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.err
+			if err == nil {
+				err = &APIError{Code: test.code}
+			}
+			if got := stageStartFailureReason(test.current, err); got != test.want {
+				t.Fatalf("reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestBuildPromptAddsUpdateContractOnlyForAgentUpdateWork(t *testing.T) {
 	claim := protocol.Claim{
 		Session: protocol.ClaimedSession{
@@ -55,6 +80,23 @@ func TestBuildPromptAddsUpdateContractOnlyForAgentUpdateWork(t *testing.T) {
 	claim.Session.OutcomeContract = protocol.OutcomeProcessExit
 	if legacy := buildPrompt(claim, worktree{Branch: "factory/local", BaseBranch: "main"}); strings.Contains(legacy, "factory update") {
 		t.Fatalf("legacy prompt received update contract: %s", legacy)
+	}
+}
+
+func TestBuildStagePromptExposesUpdatesOnlyToFinalStage(t *testing.T) {
+	claim := protocol.Claim{
+		Session: protocol.ClaimedSession{
+			TaskName: "Review the work", OutcomeContract: protocol.OutcomeAgentUpdate,
+		},
+		Repository: protocol.Repository{RemoteIdentity: "github.com/owainlewis/factory"},
+	}
+	stage := protocol.StageRun{Prompt: "Inspect the current branch."}
+	value := worktree{Branch: "factory/local", BaseBranch: "main"}
+	if prompt := buildStagePrompt(claim, value, stage, false); strings.Contains(prompt, "factory update") {
+		t.Fatalf("intermediate stage received update contract: %s", prompt)
+	}
+	if prompt := buildStagePrompt(claim, value, stage, true); !strings.Contains(prompt, "factory update") {
+		t.Fatalf("final stage missing update contract: %s", prompt)
 	}
 }
 

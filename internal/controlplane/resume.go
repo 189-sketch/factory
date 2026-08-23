@@ -120,7 +120,10 @@ func loadContinuationState(
 	var retry int
 	err := queryer.QueryRowContext(ctx, `
 		SELECT json_extract(run.task_snapshot, '$.name'), session.repository_identity,
-		       session.resolved_prompt, session.publish_branch, session.question,
+		       COALESCE(
+		           (SELECT prompt FROM session_stages WHERE session_id = session.id ORDER BY position DESC LIMIT 1),
+		           session.resolved_prompt
+		       ), session.publish_branch, session.question,
 		       session.answer, session.checkpoint_sha, session.pull_request_url,
 		       session.pull_request_head_branch, session.pull_request_head_sha,
 		       session.retry_may_repeat_effects
@@ -454,6 +457,14 @@ func (s *Store) AnswerWork(
 		WHERE id = ? AND state = 'needs-input'
 	`, workState, nullableString(blockedReason), nullableString(assignedWorkerID),
 		boundedUTF8Bytes(blockedReason, protocol.MaxWaitingReasonBytes), input.Message, workID); err != nil {
+		return protocol.WorkAnswer{}, unavailable(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE session_stages SET state = 'pending', result = '', error = '',
+		       started_at = NULL, completed_at = NULL
+		WHERE session_id = ?
+		  AND position = (SELECT MAX(position) FROM session_stages WHERE session_id = ?)
+	`, workID, workID); err != nil {
 		return protocol.WorkAnswer{}, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET updated_at = ?, terminal_at = NULL WHERE id = ?`, now, runID); err != nil {

@@ -96,6 +96,11 @@ func (s *Store) AdmitBuild(ctx context.Context, input protocol.BuildRequest) (pr
 		OutcomeContract:    protocol.OutcomeAgentUpdate,
 		ExecutionProfileID: protocol.PersistentAutoProfileID,
 	}
+	pipeline, err := loadPipelineSnapshot(ctx, tx, protocol.DefaultPipelineID)
+	if err != nil {
+		return protocol.BuildAdmission{}, err
+	}
+	snapshot.Pipeline = pipeline
 	seenRepositories := make(map[string]bool, len(targets))
 	for _, target := range targets {
 		if !seenRepositories[target.repository.ID] {
@@ -150,13 +155,9 @@ func (s *Store) AdmitBuild(ctx context.Context, input protocol.BuildRequest) (pr
 			PublishBranch:   workPublishBranch(workID),
 		}
 		resolvedPrompt := resolveStandardBuildPrompt(frozen)
-		if !agentContinuationReserveFits(
-			snapshot.Name, frozen.RepositoryIdentity, resolvedPrompt, frozen.PublishBranch,
-		) {
-			return protocol.BuildAdmission{}, conflict(
-				"agent_prompt_too_large",
-				"the frozen standard-build Procedure and work-item context cannot fit the Worker request with recovery reserves",
-			)
+		resolvedStages, err := resolveSessionStages(snapshot, resolvedPrompt, runID, frozen)
+		if err != nil {
+			return protocol.BuildAdmission{}, err
 		}
 		state, blockedReason := "blocked", taskConcurrencyBlockedReason
 		var assigned any
@@ -192,6 +193,9 @@ func (s *Store) AdmitBuild(ctx context.Context, input protocol.BuildRequest) (pr
 			nullableString(target.predecessor), protocol.ExecutionOwnerNone,
 			boundedUTF8Bytes(blockedReason, protocol.MaxWaitingReasonBytes)); err != nil {
 			return protocol.BuildAdmission{}, unavailable(err)
+		}
+		if err := insertSessionStages(ctx, tx, workID, resolvedStages); err != nil {
+			return protocol.BuildAdmission{}, err
 		}
 		if state == "queued" {
 			executionID, err := newID()

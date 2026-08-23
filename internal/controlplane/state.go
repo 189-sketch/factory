@@ -310,10 +310,41 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 	claim.Session.AdmittedAt = fromMillis(admittedAt)
 	claim.Session.Target.ID = claim.Session.ID
 	claim.Session.Target.RepositoryID = claim.Session.RepositoryID
+	stageRows, err := s.db.QueryContext(ctx, `
+		SELECT position, name, prompt, state, result, error, started_at, completed_at
+		FROM session_stages WHERE session_id = ? ORDER BY position
+	`, claim.Session.ID)
+	if err != nil {
+		return claim, unavailable(err)
+	}
+	for stageRows.Next() {
+		stage, err := scanStageRun(stageRows)
+		if err != nil {
+			stageRows.Close()
+			return claim, unavailable(err)
+		}
+		claim.Session.Stages = append(claim.Session.Stages, stage)
+	}
+	if err := stageRows.Err(); err != nil {
+		stageRows.Close()
+		return claim, unavailable(err)
+	}
+	if err := stageRows.Close(); err != nil {
+		return claim, unavailable(err)
+	}
+	if len(claim.Session.Stages) == 0 {
+		claim.Session.Stages = []protocol.StageRun{{Position: 0, Name: "Do the task", Prompt: claim.Session.Prompt, State: protocol.StagePending}}
+	} else {
+		claim.Session.Prompt = ""
+	}
 	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
-		claim.Session.Prompt, err = s.continuationPrompt(ctx, claim.Session.ID)
+		continuationPrompt, err := s.continuationPrompt(ctx, claim.Session.ID)
 		if err != nil {
 			return claim, err
+		}
+		claim.Session.Stages[len(claim.Session.Stages)-1].Prompt = continuationPrompt
+		if claim.Session.Prompt != "" {
+			claim.Session.Prompt = continuationPrompt
 		}
 	}
 	err = s.db.QueryRowContext(ctx, `
@@ -666,6 +697,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 	failureReason := input.Error
 	var outcome protocol.WorkUpdate
 	hasOutcome := false
+	missingOutcomeFailure := false
 	if lease.outcomeContract == protocol.OutcomeAgentUpdate {
 		outcome, hasOutcome, err = attemptOutcome(ctx, tx, attemptID)
 		if err != nil {
@@ -681,6 +713,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 			const missingOutcome = "Agent exited without reporting an outcome."
 			input.State, input.Result, input.Error = "failed", "", missingOutcome
 			workState, failureReason, terminalMessage = protocol.WorkFailed, missingOutcome, missingOutcome
+			missingOutcomeFailure = true
 		} else if input.State == "succeeded" {
 			// The Attempt succeeded because the agent completed its reporting
 			// contract. Work state remains the semantic outcome reported by the
@@ -703,6 +736,60 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 	}
 	if input.State == "succeeded" && lease.attemptState != "running" {
 		return protocol.Attempt{}, conflict("invalid_transition", "only a running attempt can succeed")
+	}
+	var sessionID string
+	if err := tx.QueryRowContext(ctx, `SELECT session_id FROM executions WHERE id = ?`, lease.executionID).Scan(&sessionID); err != nil {
+		return protocol.Attempt{}, unavailable(err)
+	}
+	if missingOutcomeFailure {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE session_stages
+			SET state = 'failed', error = ?, completed_at = ?
+			WHERE session_id = ?
+			  AND position = (SELECT MAX(position) FROM session_stages WHERE session_id = ?)
+			  AND state = 'succeeded'
+		`, input.Error, now, sessionID, sessionID); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
+	}
+	var stageCount, succeededStages int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(state = 'succeeded'), 0) FROM session_stages WHERE session_id = ?
+	`, sessionID).Scan(&stageCount, &succeededStages); err != nil {
+		return protocol.Attempt{}, unavailable(err)
+	}
+	// A one-stage Pipeline is the compatibility path for the former single
+	// prompt model. Accept direct Attempt completion from older test clients
+	// and synthetic backends while multi-stage Pipelines remain explicit.
+	if input.State == "succeeded" && stageCount == 1 && succeededStages == 0 {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE session_stages SET state = 'succeeded', result = ?, error = '',
+			       started_at = COALESCE(started_at, ?), completed_at = ?
+			WHERE session_id = ? AND position = 0 AND state IN ('pending', 'running')
+		`, input.Result, now, now, sessionID)
+		if err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
+		changed, _ := result.RowsAffected()
+		succeededStages += int(changed)
+	}
+	if input.State == "succeeded" && stageCount > 0 && succeededStages != stageCount {
+		return protocol.Attempt{}, conflict("pipeline_incomplete", "all Pipeline stages must succeed before the Attempt can succeed")
+	}
+	if input.State != "succeeded" && stageCount > 0 {
+		stageState := protocol.StageFailed
+		if input.State == "cancelled" {
+			stageState = protocol.StageCancelled
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE session_stages
+			SET state = CASE WHEN state = 'running' THEN ? ELSE 'cancelled' END,
+			    error = CASE WHEN state = 'running' THEN ? ELSE error END,
+			    completed_at = ?
+			WHERE session_id = ? AND state IN ('pending', 'running')
+		`, stageState, input.Error, now, sessionID); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE attempts SET state = ?, result = ?, error = ?, completed_at = ?
@@ -893,6 +980,16 @@ func (s *Store) SweepExpired(ctx context.Context) ([]ExpiredLease, error) {
 				       terminal_message = 'lease expired', execution_owner = 'none'
 				WHERE id = (SELECT session_id FROM executions WHERE id = ?)
 				  AND state IN ('preparing', 'running')
+			`, now, value.ExecutionID); err != nil {
+				return nil, unavailable(err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE session_stages
+				SET state = CASE WHEN state = 'running' THEN 'failed' ELSE 'cancelled' END,
+				    error = CASE WHEN state = 'running' THEN 'lease expired' ELSE error END,
+				    completed_at = ?
+				WHERE session_id = (SELECT session_id FROM executions WHERE id = ?)
+				  AND state IN ('pending', 'running')
 			`, now, value.ExecutionID); err != nil {
 				return nil, unavailable(err)
 			}
