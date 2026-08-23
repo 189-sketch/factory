@@ -38,6 +38,12 @@ type continuationHistory struct {
 	PullRequestHeadSHA    string                    `json:"pull_request_head_sha,omitempty"`
 	CheckpointSHA         string                    `json:"checkpoint_sha,omitempty"`
 	AcceptedAtMillis      int64                     `json:"accepted_at_millis"`
+	MessageTruncated      bool                      `json:"message_truncated,omitempty"`
+}
+
+type continuationSelection struct {
+	line     string
+	complete bool
 }
 
 func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBranch string) bool {
@@ -163,7 +169,7 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 		}
 		serialized[index] = string(body)
 	}
-	selected := make(map[int]bool, len(history))
+	selected := make(map[int]continuationSelection, len(history))
 	priority := make([]int, 0, len(history))
 	for index := len(history) - 1; index >= 0; index-- {
 		if history[index].Status != protocol.WorkUpdateRunning {
@@ -189,13 +195,29 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 	}
 	remaining := protocol.MaxAgentPromptBytes - baseBytes
 	selectedOrder := make([]int, 0, len(priority))
+	truncatedOne := false
 	for _, candidate := range priority {
 		cost := len([]byte(serialized[candidate])) + 1
 		if cost <= remaining {
-			selected[candidate] = true
+			selected[candidate] = continuationSelection{line: serialized[candidate], complete: true}
 			selectedOrder = append(selectedOrder, candidate)
 			remaining -= cost
+			continue
 		}
+		if truncatedOne {
+			break
+		}
+		line, ok, err := truncateContinuationHistory(history[candidate], remaining)
+		if err != nil {
+			return "", unavailable(err)
+		}
+		truncatedOne = true
+		if !ok {
+			break
+		}
+		selected[candidate] = continuationSelection{line: line}
+		selectedOrder = append(selectedOrder, candidate)
+		remaining -= len([]byte(line)) + 1
 	}
 	prompt := continuationWithHistory(mandatory, serialized, selected)
 	for !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) && len(selectedOrder) != 0 {
@@ -214,12 +236,46 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 	return prompt, nil
 }
 
-func continuationWithHistory(mandatory string, serialized []string, selected map[int]bool) string {
+func truncateContinuationHistory(item continuationHistory, budget int) (string, bool, error) {
+	item.MessageTruncated = true
+	message := item.Message
+	boundaries := make([]int, 0, utf8.RuneCountInString(message)+1)
+	for index := range message {
+		boundaries = append(boundaries, index)
+	}
+	boundaries = append(boundaries, len(message))
+	best := ""
+	low, high := 0, len(boundaries)-1
+	for low <= high {
+		middle := low + (high-low)/2
+		item.Message = message[:boundaries[middle]]
+		body, err := json.Marshal(item)
+		if err != nil {
+			return "", false, err
+		}
+		if len(body)+1 <= budget {
+			best = string(body)
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return best, best != "", nil
+}
+
+func continuationWithHistory(
+	mandatory string,
+	serialized []string,
+	selected map[int]continuationSelection,
+) string {
 	omitted := make([]string, 0, len(serialized))
 	inserted := make([]int, 0, len(selected))
 	for index, line := range serialized {
-		if selected[index] {
+		if selection, ok := selected[index]; ok {
 			inserted = append(inserted, index)
+			if !selection.complete {
+				omitted = append(omitted, line)
+			}
 		} else {
 			omitted = append(omitted, line)
 		}
@@ -240,7 +296,7 @@ func continuationWithHistory(mandatory string, serialized []string, selected map
 	result.WriteString(marker)
 	for _, index := range inserted {
 		result.WriteByte('\n')
-		result.WriteString(serialized[index])
+		result.WriteString(selected[index].line)
 	}
 	return result.String()
 }

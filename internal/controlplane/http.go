@@ -93,6 +93,8 @@ func NewHandler(store *Store, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("PUT /api/v1/tasks/{task_id}/archived", api.setTaskArchived)
 	mux.HandleFunc("POST /api/v1/tasks/{task_id}/run", api.runTask)
 	mux.HandleFunc("POST /api/v1/tasks/{task_id}/discard-occurrence", api.discardTaskOccurrence)
+	mux.HandleFunc("GET /api/v1/procedures", api.listProcedures)
+	mux.HandleFunc("POST /api/v1/procedure-runs", api.admitProcedureRun)
 	mux.HandleFunc("POST /api/v1/builds", api.admitBuild)
 	mux.HandleFunc("POST /api/v1/work/{work_id}/answer", api.answerWork)
 	mux.HandleFunc("POST /api/v1/work/{work_id}/retry", api.retryWork)

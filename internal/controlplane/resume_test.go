@@ -2,8 +2,12 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/owainlewis/factory/internal/protocol"
 )
@@ -305,6 +309,51 @@ func TestContinuationPromptBoundsHistoryAndKeepsMandatoryRecoveryContext(t *test
 	}
 	if !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
 		t.Fatalf("continuation prompt exceeds %d bytes", protocol.MaxAgentPromptBytes)
+	}
+}
+
+func TestContinuationPromptTruncatesNewestOutcomeBeforeProgress(t *testing.T) {
+	history := []continuationHistory{
+		{
+			Sequence: 1, Status: protocol.WorkUpdateRunning, Actor: protocol.WorkUpdateActorAgent,
+			Message: "small progress", AcceptedAtMillis: 1,
+		},
+		{
+			Sequence: 2, Status: protocol.WorkUpdateFailed, Actor: protocol.WorkUpdateActorAgent,
+			Message: strings.Repeat("界", 2700), AcceptedAtMillis: 2,
+		},
+	}
+	state := continuationState{
+		title: "Resume", repository: "github.com/owainlewis/factory",
+		publishBranch: "factory/work-resume", checkpointSHA: testCheckpointSHA,
+	}
+	var prompt string
+	for promptBytes := 60 << 10; promptBytes <= protocol.MaxTaskPromptBytes; promptBytes += 128 {
+		state.resolvedPrompt = strings.Repeat("p", promptBytes)
+		candidate, err := assembleContinuationPrompt(state, history)
+		if err == nil && strings.Contains(candidate, `"message_truncated":true`) {
+			prompt = candidate
+			break
+		}
+	}
+	if prompt == "" {
+		t.Fatal("continuation assembly never truncated the oversized newest outcome")
+	}
+	if !utf8.ValidString(prompt) || !strings.Contains(prompt, `"sequence":2`) ||
+		strings.Contains(prompt, `"sequence":1`) {
+		t.Fatalf("outcome-first truncated prompt = %q", prompt[len(prompt)-1000:])
+	}
+	serialized := make([]string, len(history))
+	for index, item := range history {
+		body, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serialized[index] = string(body)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(serialized, "\n")))
+	if digest := hex.EncodeToString(sum[:]); !strings.Contains(prompt, "omitted updates: 2; omitted SHA-256: "+digest) {
+		t.Fatalf("truncated history marker did not digest full omitted records: %s", prompt[len(prompt)-1000:])
 	}
 }
 
