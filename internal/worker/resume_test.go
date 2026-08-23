@@ -146,8 +146,30 @@ func TestRecoveryPreparationPrefersPendingSHAAndRequiresExactRestoredRef(t *test
 		WorkID: testWorkID, PublishBranch: publishBranch,
 		PendingResumeSHA: checkpoint, CheckpointPublished: true,
 	})
-	if err != nil || branch != publishBranch || commit != checkpoint {
+	if err != nil || branch != "main" || commit != checkpoint {
 		t.Fatalf("pending resume = %q %q, error %v", branch, commit, err)
+	}
+	value, err := prepareWorktree(
+		context.Background(), "git", t.TempDir(), repository,
+		testWorkID, testAttemptID, worktreeRecovery{
+			WorkID: testWorkID, PublishBranch: publishBranch,
+			PendingResumeSHA: checkpoint, CheckpointPublished: true,
+		},
+	)
+	if err != nil || value.BaseBranch != "main" || value.BaseCommit != checkpoint {
+		t.Fatalf("pending-resume worktree = %#v, error %v", value, err)
+	}
+	prompt := buildPrompt(protocol.Claim{
+		Session: protocol.ClaimedSession{
+			TaskName: "Resume work", Prompt: "Continue the implementation.",
+			OutcomeContract: protocol.OutcomeAgentUpdate,
+			Target:          protocol.WorkTarget{PublishBranch: publishBranch},
+		},
+		Repository: protocol.Repository{RemoteIdentity: repository.RemoteIdentity},
+	}, value)
+	if !strings.Contains(prompt, "Target base branch: main") ||
+		!strings.Contains(prompt, "Factory publish branch: "+publishBranch) {
+		t.Fatalf("pending-resume prompt lost distinct base and publish branches: %q", prompt)
 	}
 	runTestCommand(t, checkout, "git", "push", "origin", ":refs/heads/"+publishBranch)
 	if _, _, err := resolveRecoveryCommit(context.Background(), "git", repository, worktreeRecovery{
@@ -176,7 +198,7 @@ func TestRecoveryPreparationPrefersPendingSHAAndRequiresExactRestoredRef(t *test
 		WorkID: testWorkID, PublishBranch: publishBranch,
 		PullRequestURL: knownPR, PullRequestHeadSHA: checkpoint,
 	})
-	if err != nil || branch != publishBranch || commit != checkpoint {
+	if err != nil || branch != "main" || commit != checkpoint {
 		t.Fatalf("restored known-PR ref = %q %q, error %v", branch, commit, err)
 	}
 

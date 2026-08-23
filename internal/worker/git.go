@@ -334,7 +334,11 @@ func resolveRecoveryCommit(
 				recovery.PendingResumeSHA, recovery.WorkID, err,
 			)
 		}
-		return recovery.PublishBranch, recovery.PendingResumeSHA, nil
+		baseBranch, err := recoveryTargetBaseBranch(ctx, gitExecutable, repository)
+		if err != nil {
+			return "", "", err
+		}
+		return baseBranch, recovery.PendingResumeSHA, nil
 	}
 
 	if recovery.PublishBranch != "" {
@@ -366,7 +370,11 @@ func resolveRecoveryCommit(
 					)
 				}
 			}
-			return recovery.PublishBranch, remoteSHA, nil
+			baseBranch, err := recoveryTargetBaseBranch(ctx, gitExecutable, repository)
+			if err != nil {
+				return "", "", err
+			}
+			return baseBranch, remoteSHA, nil
 		}
 		if recovery.PullRequestURL != "" {
 			trustedSHA := recovery.PullRequestHeadSHA
@@ -380,6 +388,24 @@ func resolveRecoveryCommit(
 		}
 	}
 	return resolveBaseCommit(ctx, gitExecutable, repository)
+}
+
+func recoveryTargetBaseBranch(
+	ctx context.Context,
+	gitExecutable string,
+	repository Repository,
+) (string, error) {
+	if repository.BaseBranch != "" {
+		if err := validateBaseBranch(ctx, gitExecutable, repository, repository.BaseBranch); err != nil {
+			return "", err
+		}
+		return repository.BaseBranch, nil
+	}
+	branch, _, err := discoverRemoteDefaultBranch(ctx, gitExecutable, repository)
+	if err != nil {
+		return "", err
+	}
+	return branch, nil
 }
 
 func ensureCommitAvailable(
