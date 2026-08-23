@@ -263,6 +263,15 @@ func superviseRuntime(
 		stderrWriter.Close()
 		return finishSupervisorStartFailure(anchor, anchorIdentity, writer, fmt.Errorf("start %s: %w", displayName, err))
 	}
+	if err := writer.send(supervisorMessage{Type: "started"}); err != nil {
+		stdout.Close()
+		stdoutWriter.Close()
+		stderr.Close()
+		stderrWriter.Close()
+		_ = stopStartedSupervisorGroup(anchor, anchorIdentity, terminationGrace)
+		_ = command.Wait()
+		return fmt.Errorf("report runtime startup: %w", err)
+	}
 	stdoutWriter.Close()
 	stderrWriter.Close()
 	defer stdout.Close()
@@ -1213,15 +1222,19 @@ func resultPath(dataDirectory, attemptID string) (string, error) {
 	return path, nil
 }
 
-func supervisorStartRequest(process *supervisorProcess, token string) protocol.StartAttemptRequest {
+func supervisorStartRequest(process *supervisorProcess, token string, startedFromSHA ...string) protocol.StartAttemptRequest {
 	supervisorPID := process.supervisorPID
 	processGroupID := process.processGroupID
-	return protocol.StartAttemptRequest{
+	request := protocol.StartAttemptRequest{
 		LeaseToken:      token,
 		SupervisorPID:   &supervisorPID,
 		ProcessIdentity: process.supervisorIdentity,
 		ProcessGroupID:  &processGroupID,
 	}
+	if len(startedFromSHA) != 0 {
+		request.StartedFromSHA = startedFromSHA[0]
+	}
+	return request
 }
 
 func processSummary(process *supervisorProcess) string {

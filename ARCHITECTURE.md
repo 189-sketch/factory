@@ -13,7 +13,10 @@ or runs one saved Procedure across up to 100 enabled managed repositories. Each
 target becomes independent Session-backed Work. A persistent Worker claims the
 Work, prepares one isolated Git worktree, and starts a fresh Pi, Codex, or
 Claude Code process for each Pipeline stage in order. The stages share that
-worktree and branch, stream events, and produce one terminal result.
+worktree and branch, stream events, and accept scoped progress or semantic
+outcome updates. An agent can checkpoint clean committed work in the final
+stage, stop with `needs-input`, and resume from that exact commit after an
+operator answer.
 
 The implementation has four main parts:
 
@@ -132,7 +135,7 @@ commit-resolution policy, outcome contract, ordered target snapshot, source
 same frozen execution choice with target identity, source reference, context,
 stable publish branch, repository identity, ownership, waiting reason,
 progress, checkpoint, pending resume, pull-request evidence, predecessor,
-result, and terminal fields. Each Session owns ordered durable stage records
+answer, result, and terminal fields. Each Session owns ordered durable stage records
 with the rendered prompt, state, result, error, and timestamps.
 
 Work can represent `queued`, `running`, `needs-input`, `ready`, `succeeded`,
@@ -145,6 +148,14 @@ Work updates store typed status, actor, request, Attempt, sequence, message,
 checkpoint, and pull-request fields. Storage allows at most 199 progress
 updates and reserves one outcome update per Attempt. Progress messages are at
 most 2 KiB and outcome messages are at most 8 KiB.
+
+Trusted answers are stored separately from agent updates and linked to the
+question update they answer. The current answer is also projected on Work.
+Continuation prompt assembly keeps the frozen Procedure and original context,
+question, answer, checkpoint, branch, and pull-request evidence. It fills the
+remaining 72 KiB prompt budget with trusted prior answers, then recent outcomes
+and progress. Omitted history is counted and identified by a SHA-256 digest
+without deleting stored records.
 
 A Session starts blocked when no eligible Worker can currently accept it. A
 later claim can route it when a healthy Worker advertises the runtime and
@@ -196,8 +207,10 @@ selection and schedule snapshot.
 
 An Execution is the durable assignment of one Session to one Worker and runtime.
 An Attempt is one leased try of that Execution. An explicit retry of a failed or
-cancelled Session requeues its Execution, increments retry history, and warns
-that external effects may repeat.
+cancelled Session requeues the same Execution and Work, increments retry
+history, and warns that external effects may repeat only when a process already
+started. Retry rejects replaced Work and matching nonterminal Work in the same
+transaction.
 
 An Attempt begins in `preparing`, moves to `running` after the Worker reports
 its supervisor identity, then ends as `succeeded`, `failed`, `cancelled`, or
@@ -248,7 +261,7 @@ static repository paths remain readable through Worker configuration.
     at runtime.
 11. Finite `factory` commands accept only an explicit-port plain HTTP loopback
     endpoint and read current state through bounded API routes.
-12. Claim protocol version 4 gates every persistent Worker claim. Older Workers
+12. Claim protocol version 5 gates every persistent Worker claim. Older Workers
     receive `worker_upgrade_required`, including for process-exit Work.
 13. Build and Procedure fleet admission are all-or-none. Exact request-key
     replay wins before mutable configuration reads, and one Run cannot contain
@@ -256,6 +269,16 @@ static repository paths remain readable through Worker configuration.
 14. An implicit admission key is written durably before HTTP submission and is
     not removed until an authoritative admitted, replayed, or pre-commit
     rejection result has been written and flushed.
+15. A pending resume SHA is authoritative until the supervisor starts the
+    runtime and the Worker reports that it started from that exact commit.
+    Answer, cancellation, failed preparation, and retry do not clear it or fall
+    back to another ref.
+16. Agent-owned `needs-input` requires a clean worktree and a checkpoint
+    revalidated after process stop. Changed Work must match the immutable
+    publish ref. Operator-owned Work cannot create this outcome.
+17. Exact Work replacement creates one new one-Work Run from the named terminal
+    predecessor. First admission checks current eligibility, while exact
+    request-key replay returns the stored replacement before mutable reads.
 
 ## Components
 
@@ -317,11 +340,12 @@ manager:
 
 Only a frozen `agent_update` Attempt receives a private update socket and
 token. The Worker validates that capability locally, resolves ready pull
-request evidence with GitHub and Git, and forwards a typed update under its own
-lease. The agent-facing request never contains an operator credential, Worker
-credential, or Attempt lease token. Outcome reports ask the supervisor to stop
-the process group, then the Worker completes the Attempt only after verified
-process stop and any required delivery postflight check.
+request evidence with GitHub and Git, validates clean durable needs-input
+checkpoints, and forwards a typed update under its own lease. The agent-facing
+request never contains an operator credential, Worker credential, or Attempt
+lease token. Outcome reports ask the supervisor to stop the process group, then
+the Worker completes the Attempt only after verified process stop and the
+required delivery or checkpoint postflight check.
 
 The supervisor is a subprocess of `factory-worker`. It anchors ownership of the
 runtime process group. Unix process-group behavior is required, so Windows
@@ -407,8 +431,11 @@ security headers. Node.js is needed only when UI source changes.
    queued Session, checks capacity and Procedure concurrency, applies run-aware
    fair ordering, creates an Attempt, and moves Execution and Session to
    `preparing`.
-3. The Worker acquires or refreshes the repository, resolves its base commit,
-   creates a branch and worktree, writes a manifest, then starts the supervisor.
+3. The Worker acquires or refreshes the repository. Preparation uses the
+   pending resume SHA first, then an existing immutable publish ref, then the
+   repository base when no pull request or resume checkpoint exists. Missing or
+   moved authoritative commits fail visibly. It then creates a branch and
+   worktree, writes a manifest, and starts the supervisor.
 4. The Worker reports process identity and the server moves the lifecycle to
    `running`.
 5. Heartbeats extend the lease by 30 seconds and return cancellation state.
@@ -421,6 +448,34 @@ security headers. Node.js is needed only when UI source changes.
 8. The Worker removes proved-safe worktrees and reports retained ones back to
    the control plane.
 
+### Agent outcome and question resume
+
+1. The agent calls its Attempt-scoped Unix-socket update endpoint. The Worker
+   prompt names the exact immutable publish branch. The Worker verifies token
+   and Work identity before any mutable Git or provider checks.
+2. Progress is stored without changing Work ownership. `ready` requires
+   matching repository, publish branch, local HEAD, remote ref, and pull-request
+   head evidence.
+3. `needs-input` requires a clean worktree. An unchanged Work checkpoints its
+   exact base commit. Changed Work must be committed and match the fetched
+   immutable publish ref.
+4. An accepted outcome stops the process group. The Worker repeats ready or
+   checkpoint validation after verified process stop. Failed postflight makes
+   the Attempt and Work fail and retains the worktree.
+5. A valid question stores the checkpoint as both historical evidence and the
+   pending resume SHA. The Attempt succeeds, Work enters `needs-input`, and no
+   process or lease remains alive.
+6. An operator answer stores bounded trusted context and requeues the same
+   Work when the frozen Run concurrency limit has a slot; otherwise it remains
+   blocked for the normal fair materializer. The next claim contains a bounded
+   continuation prompt that labels the pending and historical checkpoint SHAs
+   separately, renders the agent question as escaped single-line untrusted
+   text, and prepares from the pending SHA.
+7. The server first validates the prepared commit while moving the Attempt to
+   running. The supervisor then reports that the runtime child started, and a
+   second leased acknowledgement clears the pending SHA for that exact commit.
+   The historical checkpoint remains.
+
 ### Cancellation, lease loss, and retry
 
 Queued or blocked Sessions cancel immediately. Active cancellation is stored on
@@ -430,15 +485,21 @@ supervisor stops the process group and the control plane marks the Attempt
 lost. Startup and periodic sweeps recover expired leases after server failure.
 
 Only failed or cancelled Sessions can be retried. Retry preserves the Session
-and Attempt history, selects a currently eligible Worker, and creates the next
-Attempt when claimed.
+and Attempt history, pending resume SHA, and known pull-request evidence. It
+selects a currently eligible Worker and creates the next Attempt when claimed.
+Known-PR Work with a missing publish ref fails preparation with the PR, ref,
+and trusted recovery SHA. The ref is accepted only when restored at that SHA.
+Work with a previously published checkpoint also fails visibly when its publish
+ref is missing instead of falling back to the repository base.
+`ReplaceWork` is the exact-predecessor recovery path when retry cannot recover
+the original Work.
 
 ## API and security boundaries
 
 The local listener exposes health plus operator and Worker routes under
-`/api/v1`: Builds, Workers, repositories, Pipelines, Tasks, Runs, overview,
-Attempts, and event history. It rejects non-loopback clients before route
-handling.
+`/api/v1`: Builds, Work answer/retry/replacement, Workers, repositories,
+Pipelines, Tasks, Runs, overview, Attempts, updates, and event history. It
+rejects non-loopback clients before route handling.
 
 The optional remote listener exposes only health, enrollment exchange, Worker
 registration and claims, and the active Attempt lifecycle. Creating an
@@ -462,14 +523,16 @@ the durable Work lifecycle, ordered Run targets, outcome contracts, bounded
 Work updates, and claim protocol version 3. It preserves existing rows as
 `process_exit`. Migration 32 adds idempotent agent update requests. Migration
 33 adds Pipeline templates, Task selection, the built-in single-agent Pipeline,
-durable Session stages, and claim protocol version 4. Supported legacy
+durable Session stages, and claim protocol version 4. Migration 34 stores
+checkpoint publication and trusted answer history and advances the combined
+claim protocol to version 5. Supported legacy
 Definitions, schedules, repositories, and execution history are converted;
 unsupported legacy provider admission is blocked and reported rather than
 silently discarded.
 
 Current lifecycle tables include `pipelines`, `pipeline_stages`, `tasks`,
 `task_repositories`, `runs`, `sessions`, `session_stages`, `work_updates`,
-`executions`, `attempts`, `attempt_events`, `workers`,
+`work_answers`, `executions`, `attempts`, `attempt_events`, `workers`,
 `repositories`, Worker repository state, claim request deduplication, and
 Worker enrollment or credentials. Older migration tables may remain for
 history and upgrade compatibility but are not part of the current UI or
@@ -483,13 +546,13 @@ admission path.
   Workers. Multi-stage Pipelines currently require a persistent Worker.
 - Cloud Run execution profiles and elastic dispatch are designed but not
   implemented.
-- Agent-directed Work updates, semantic completion, and the Worker-local update
-  transport are implemented for running, ready, failed, and no-change outcomes.
-  The durable `needs-input` model exists, but the Worker rejects it until
-  verified checkpoint and operator-resume support is implemented.
+- The finite operator CLI and browser do not yet expose answer, retry,
+  replacement, and cancellation controls. Their loopback APIs and lifecycle
+  behavior exist.
 - Managed repository acquisition supports GitHub through `gh`.
-- The current Worker resolves a repository's base commit during Attempt
-  preparation, so a later retry can observe a newer default branch commit.
+- A retry without a pending checkpoint or stable publish ref may observe a
+  newer default branch commit. Once either recovery source exists, fallback is
+  forbidden.
 - Remote Workers require operator-managed TLS certificates and enrollment.
 - Windows Workers are unsupported.
 - Execution isolates worktrees and process groups but does not sandbox hostile
@@ -505,15 +568,15 @@ admission path.
 | Server startup and config | `cmd/factory-server/main.go`, `cmd/factory-server/config.go` |
 | HTTP routes and auth | `internal/controlplane/http.go`, `internal/controlplane/worker_auth.go` |
 | Pipeline templates and stages | `internal/controlplane/pipelines.go`, `internal/controlplane/stage_runs.go`, `internal/protocol/tasks.go` |
-| Task, Run, and Work model | `internal/controlplane/tasks.go`, `internal/controlplane/work.go`, `internal/protocol/tasks.go` |
+| Task, Run, and Work model | `internal/controlplane/tasks.go`, `internal/controlplane/work.go`, `internal/controlplane/resume.go`, `internal/controlplane/replace.go`, `internal/protocol/tasks.go` |
 | Schedule admission | `internal/controlplane/task_scheduler.go`, `internal/controlplane/schedule_cron.go` |
 | Routing and claims | `internal/controlplane/task_claim.go`, `internal/controlplane/state.go` |
 | Lease sweep and recovery | `internal/controlplane/server.go`, `internal/controlplane/recovery.go` |
 | Worker manager | `internal/worker/manager.go`, `internal/worker/registration.go`, `internal/worker/claiming.go` |
 | Attempt execution | `internal/worker/attempt_lifecycle.go`, `internal/worker/supervisor.go`, `internal/worker/events.go` |
-| Git and worktrees | `internal/worker/git.go`, `internal/worker/repository_cache.go`, `internal/worker/reconcile.go` |
+| Git, checkpoints, and worktrees | `internal/worker/git.go`, `internal/worker/agent_update.go`, `internal/worker/repository_cache.go`, `internal/worker/reconcile.go` |
 | Protocol limits and types | `internal/protocol/types.go`, `internal/protocol/prompt.go` |
-| Schema | `migrations/027_routines_work.sql`, `migrations/030_task_run_session.sql`, `migrations/031_work_lifecycle.sql`, `migrations/032_agent_update_requests.sql`, `migrations/033_pipeline_templates.sql` |
+| Schema | `migrations/027_routines_work.sql`, `migrations/030_task_run_session.sql`, `migrations/031_work_lifecycle.sql`, `migrations/032_agent_update_requests.sql`, `migrations/033_pipeline_templates.sql`, `migrations/034_resume_recovery.sql` |
 | Browser UI | `web/src/App.tsx`, `web/src/Pipelines.tsx`, `web/src/Tasks.tsx`, `web/src/Runs.tsx`, `web/src/Workers.tsx`, `web/src/Repositories.tsx` |
 
 ## Verification
@@ -521,6 +584,12 @@ admission path.
 - `internal/controlplane/work_lifecycle_test.go` proves outcome-contract
   freezing, backend compatibility, Work states, bounded update history,
   replacement guards, ordered targets, and legacy prompt limits.
+- `internal/controlplane/resume_test.go` proves answer and pending-SHA
+  persistence, exact start enforcement, retry and cancellation retention,
+  bounded continuation history, and exact replacement replay.
+- `internal/worker/resume_test.go` proves clean and published checkpoint rules,
+  moved and missing ref failures, pending-SHA precedence, and exact known-PR ref
+  restoration.
 - `internal/controlplane/build_test.go`, `internal/protocol/build_test.go`, and
   `internal/factorycli/build_test.go` prove atomic Build admission,
   normalization, replay ordering, runtime freezing, duplicate and rebuild

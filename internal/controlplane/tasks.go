@@ -980,12 +980,18 @@ func resolveSessionStages(
 	target protocol.WorkTarget,
 ) ([]protocol.StageRun, error) {
 	stages := make([]protocol.StageRun, 0, len(task.Pipeline.Stages))
-	for _, stage := range task.Pipeline.Stages {
+	for index, stage := range task.Pipeline.Stages {
 		prompt := renderPipelinePrompt(stage.Prompt, map[string]string{
 			"task.id": task.ID, "task.name": task.Name, "task.prompt": resolvedPrompt,
 			"run.id": runID, "repository": target.RepositoryIdentity, "branch": target.PublishBranch,
 		})
-		if !protocol.AgentPromptFits(task.Name, target.RepositoryIdentity, prompt) {
+		promptFits := protocol.AgentPromptFits(task.Name, target.RepositoryIdentity, prompt)
+		if task.OutcomeContract == protocol.OutcomeAgentUpdate && index == len(task.Pipeline.Stages)-1 {
+			promptFits = agentContinuationReserveFits(
+				task.Name, target.RepositoryIdentity, prompt, target.PublishBranch,
+			)
+		}
+		if !promptFits {
 			return nil, conflict("agent_prompt_too_large", "one rendered Pipeline stage cannot fit the Worker request")
 		}
 		stages = append(stages, protocol.StageRun{
@@ -1409,7 +1415,8 @@ func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) 
 		       session.target_position, session.target_key, session.target_kind, session.source_kind,
 		       session.source_key, session.source_reference, session.context_snapshot, session.publish_branch,
 		       COALESCE(session.predecessor_work_id, ''), session.execution_owner, session.waiting_reason,
-		       session.latest_progress, session.question, session.checkpoint_sha, session.pending_resume_sha,
+		       session.latest_progress, session.question, session.answer, session.checkpoint_sha,
+		       session.pending_resume_sha, session.checkpoint_published,
 		       session.pull_request_url, session.pull_request_head_branch, session.pull_request_head_sha,
 		       session.terminal_message
 		FROM sessions session WHERE session.run_id = ? ORDER BY session.target_position, session.id
@@ -1433,7 +1440,8 @@ func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) 
 			&session.Target.SourceKind, &session.Target.SourceKey, &session.Target.SourceReference,
 			&session.Target.ContextSnapshot, &session.Target.PublishBranch, &session.PredecessorWorkID,
 			&session.ExecutionOwner, &session.WaitingReason, &session.LatestProgress, &session.Question,
-			&session.CheckpointSHA, &session.PendingResumeSHA, &session.PullRequestURL,
+			&session.Answer, &session.CheckpointSHA, &session.PendingResumeSHA,
+			&session.CheckpointPublished, &session.PullRequestURL,
 			&session.PullRequestHeadBranch, &session.PullRequestHeadSHA, &session.TerminalMessage); err != nil {
 			rows.Close()
 			return detail, unavailable(err)
@@ -1786,14 +1794,18 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 	var runID, state, repositoryID, identity, runtime, backend, profileID string
 	var targetKind, sourceKind, sourceKey string
 	var owner protocol.ExecutionOwner
+	var previouslyStarted sql.NullInt64
+	var retryMayRepeatEffects int
 	var profileVersion int
 	err = tx.QueryRowContext(ctx, `
 		SELECT run_id, state, repository_id, repository_identity, required_runtime,
 		       execution_backend, execution_profile_id, execution_profile_version,
-		       target_kind, source_kind, source_key, execution_owner
+		       target_kind, source_kind, source_key, execution_owner, started_at,
+		       retry_may_repeat_effects
 		FROM sessions WHERE id = ? AND run_id = ?
 	`, sessionID, expectedRunID).Scan(&runID, &state, &repositoryID, &identity, &runtime,
-		&backend, &profileID, &profileVersion, &targetKind, &sourceKind, &sourceKey, &owner)
+		&backend, &profileID, &profileVersion, &targetKind, &sourceKind, &sourceKey, &owner,
+		&previouslyStarted, &retryMayRepeatEffects)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.RunDetail{}, ErrNotFound
 	}
@@ -1886,11 +1898,11 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE sessions SET state = 'queued', blocked_reason = NULL, assigned_worker_id = ?,
-		       cancellation_requested = 0, retry_may_repeat_effects = 1,
+		       cancellation_requested = 0, retry_may_repeat_effects = ?,
 		       started_at = NULL, terminal_at = NULL, result = NULL, failure_reason = NULL,
 		       terminal_message = '', waiting_reason = '', execution_owner = 'none'
 		WHERE id = ?
-	`, assignedWorkerID, sessionID); err != nil {
+	`, assignedWorkerID, previouslyStarted.Valid || retryMayRepeatEffects != 0, sessionID); err != nil {
 		return protocol.RunDetail{}, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `

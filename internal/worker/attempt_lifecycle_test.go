@@ -62,14 +62,16 @@ func TestBuildPromptAddsUpdateContractOnlyForAgentUpdateWork(t *testing.T) {
 	claim := protocol.Claim{
 		Session: protocol.ClaimedSession{
 			TaskName: "Report progress", Prompt: "Do the work.", OutcomeContract: protocol.OutcomeAgentUpdate,
+			Target: protocol.WorkTarget{PublishBranch: "factory/work-1111111111111111"},
 		},
 		Repository: protocol.Repository{RemoteIdentity: "github.com/owainlewis/factory"},
 	}
 	prompt := buildPrompt(claim, worktree{Branch: "factory/local", BaseBranch: "main"})
 	for _, expected := range []string{
 		"This Work is unfinished until you call factory update.",
-		"running", "ready", "failed", "no-change", "Ready requires --pr",
-		"Needs-input is unavailable until verified checkpoint support is enabled",
+		"Factory publish branch: factory/work-1111111111111111",
+		"running", "ready", "needs-input", "failed", "no-change", "Ready requires --pr",
+		"Needs-input ends this Attempt", "clean worktree", "committed and pushed",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("agent-update prompt missing %q: %s", expected, prompt)

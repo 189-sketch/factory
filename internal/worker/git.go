@@ -27,6 +27,17 @@ type worktree struct {
 	HeadCommit string
 }
 
+type worktreeRecovery struct {
+	WorkID                string
+	PublishBranch         string
+	CheckpointSHA         string
+	PendingResumeSHA      string
+	CheckpointPublished   bool
+	PullRequestURL        string
+	PullRequestHeadBranch string
+	PullRequestHeadSHA    string
+}
+
 func resolveRepositories(config Config, gitExecutable string) ([]Repository, error) {
 	keys := make([]string, 0, len(config.Repositories))
 	for key := range config.Repositories {
@@ -239,7 +250,13 @@ func sameRemoteIdentity(left, right string) bool {
 	return remoteIdentityComparisonKey(left) == remoteIdentityComparisonKey(right)
 }
 
-func prepareWorktree(ctx context.Context, gitExecutable, root string, repository Repository, sessionID, attemptID string) (worktree, error) {
+func prepareWorktree(
+	ctx context.Context,
+	gitExecutable, root string,
+	repository Repository,
+	sessionID, attemptID string,
+	recovery ...worktreeRecovery,
+) (worktree, error) {
 	if !uuidPattern.MatchString(sessionID) || !uuidPattern.MatchString(attemptID) {
 		return worktree{}, errors.New("server returned an invalid Session or attempt ID")
 	}
@@ -262,13 +279,15 @@ func prepareWorktree(ctx context.Context, gitExecutable, root string, repository
 		return worktree{}, fmt.Errorf("inspect attempt worktree path: %w", err)
 	}
 	baseBranch, base := repository.BaseBranch, repository.BaseCommit
-	if base == "" {
+	if len(recovery) != 0 {
+		baseBranch, base, err = resolveRecoveryCommit(ctx, gitExecutable, repository, recovery[0])
+	} else if base == "" {
 		baseBranch, base, err = resolveBaseCommit(ctx, gitExecutable, repository)
-		if err != nil {
-			return worktree{}, err
-		}
 	} else if baseBranch == "" || !commitPattern.MatchString(base) {
 		return worktree{}, errors.New("pre-resolved repository base must include a branch and full commit ID")
+	}
+	if err != nil {
+		return worktree{}, err
 	}
 	branch := "factory/" + sessionID[:12] + "-" + attemptID[:12]
 	value := worktree{
@@ -276,6 +295,164 @@ func prepareWorktree(ctx context.Context, gitExecutable, root string, repository
 		BaseCommit: base, HeadCommit: base,
 	}
 	return value, nil
+}
+
+func resolveRecoveryCommit(
+	ctx context.Context,
+	gitExecutable string,
+	repository Repository,
+	recovery worktreeRecovery,
+) (string, string, error) {
+	if err := validateRegisteredOrigin(ctx, gitExecutable, repository); err != nil {
+		return "", "", err
+	}
+	if recovery.PendingResumeSHA != "" {
+		if !commitPattern.MatchString(recovery.PendingResumeSHA) {
+			return "", "", errors.New("pending resume SHA is not a full commit ID")
+		}
+		if recovery.CheckpointPublished {
+			remoteSHA, found, err := remotePublishCommitOptional(
+				ctx, gitExecutable, repository, recovery.PublishBranch,
+			)
+			if err != nil {
+				return "", "", fmt.Errorf("check authoritative pending resume ref: %w", err)
+			}
+			if !found {
+				return "", "", fmt.Errorf(
+					"authoritative pending resume ref refs/heads/%s is missing; restore it to exactly %s before retrying Work %s",
+					recovery.PublishBranch, recovery.PendingResumeSHA, recovery.WorkID,
+				)
+			}
+			if remoteSHA != recovery.PendingResumeSHA {
+				return "", "", fmt.Errorf(
+					"authoritative pending resume ref refs/heads/%s moved to %s; restore it to exactly %s before retrying Work %s",
+					recovery.PublishBranch, remoteSHA, recovery.PendingResumeSHA, recovery.WorkID,
+				)
+			}
+		} else if err := ensureCommitAvailable(ctx, gitExecutable, repository, recovery.PendingResumeSHA); err != nil {
+			return "", "", fmt.Errorf(
+				"authoritative pending resume commit %s is unavailable for Work %s: %w",
+				recovery.PendingResumeSHA, recovery.WorkID, err,
+			)
+		}
+		baseBranch, err := recoveryTargetBaseBranch(ctx, gitExecutable, repository)
+		if err != nil {
+			return "", "", err
+		}
+		return baseBranch, recovery.PendingResumeSHA, nil
+	}
+
+	if recovery.PublishBranch != "" {
+		if recovery.PullRequestURL != "" && recovery.PullRequestHeadBranch != "" &&
+			recovery.PullRequestHeadBranch != recovery.PublishBranch {
+			return "", "", fmt.Errorf(
+				"known pull request %s records head branch %s, not immutable publish ref %s; use factory replace %s",
+				recovery.PullRequestURL, recovery.PullRequestHeadBranch,
+				recovery.PublishBranch, recovery.WorkID,
+			)
+		}
+		remoteSHA, found, err := remotePublishCommitOptional(ctx, gitExecutable, repository, recovery.PublishBranch)
+		if err != nil {
+			return "", "", fmt.Errorf("check Work publish ref: %w", err)
+		}
+		if found {
+			if recovery.PullRequestURL != "" {
+				if recovery.PullRequestHeadSHA == "" {
+					return "", "", fmt.Errorf(
+						"known pull request %s has no trusted recovery SHA; use factory replace %s",
+						recovery.PullRequestURL, recovery.WorkID,
+					)
+				}
+				if remoteSHA != recovery.PullRequestHeadSHA {
+					return "", "", fmt.Errorf(
+						"known pull request %s publish ref refs/heads/%s is at %s, not trusted recovery SHA %s; restore it only at that SHA or use factory replace %s",
+						recovery.PullRequestURL, recovery.PublishBranch, remoteSHA,
+						recovery.PullRequestHeadSHA, recovery.WorkID,
+					)
+				}
+			}
+			baseBranch, err := recoveryTargetBaseBranch(ctx, gitExecutable, repository)
+			if err != nil {
+				return "", "", err
+			}
+			return baseBranch, remoteSHA, nil
+		}
+		if recovery.PullRequestURL != "" {
+			trustedSHA := recovery.PullRequestHeadSHA
+			if trustedSHA == "" {
+				trustedSHA = "(missing; exact replacement is required)"
+			}
+			return "", "", fmt.Errorf(
+				"known pull request %s has missing publish ref refs/heads/%s; trusted recovery SHA: %s; restore the ref only at that SHA or use factory replace %s",
+				recovery.PullRequestURL, recovery.PublishBranch, trustedSHA, recovery.WorkID,
+			)
+		}
+		if recovery.CheckpointPublished {
+			trustedSHA := recovery.CheckpointSHA
+			if !commitPattern.MatchString(trustedSHA) {
+				trustedSHA = "(missing; exact replacement is required)"
+			}
+			return "", "", fmt.Errorf(
+				"previously published checkpoint has missing publish ref refs/heads/%s; trusted checkpoint SHA: %s; restore the ref only at that SHA or use factory replace %s",
+				recovery.PublishBranch, trustedSHA, recovery.WorkID,
+			)
+		}
+	}
+	return resolveBaseCommit(ctx, gitExecutable, repository)
+}
+
+func recoveryTargetBaseBranch(
+	ctx context.Context,
+	gitExecutable string,
+	repository Repository,
+) (string, error) {
+	if repository.BaseBranch != "" {
+		if err := validateBaseBranch(ctx, gitExecutable, repository, repository.BaseBranch); err != nil {
+			return "", err
+		}
+		if _, err := remoteBranchCommit(ctx, gitExecutable, repository, repository.BaseBranch); err != nil {
+			return "", err
+		}
+		return repository.BaseBranch, nil
+	}
+	branch, _, err := discoverRemoteDefaultBranch(ctx, gitExecutable, repository)
+	if err != nil {
+		return "", err
+	}
+	return branch, nil
+}
+
+func ensureCommitAvailable(
+	ctx context.Context,
+	gitExecutable string,
+	repository Repository,
+	commit string,
+) error {
+	stdout, _, err := runGitCommand(
+		ctx, gitExecutable, repository.Path, 64<<10,
+		"rev-parse", "--verify", commit+"^{commit}",
+	)
+	if err == nil && strings.TrimSpace(string(stdout)) == commit {
+		return nil
+	}
+	stdout, stderr, err := runGitCommand(
+		ctx, gitExecutable, repository.Path, 256<<10,
+		"fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", commit,
+	)
+	if err != nil {
+		return commandFailure("fetch pending resume commit", stdout, stderr, err)
+	}
+	stdout, stderr, err = runGitCommand(
+		ctx, gitExecutable, repository.Path, 64<<10,
+		"rev-parse", "--verify", commit+"^{commit}",
+	)
+	if err != nil || strings.TrimSpace(string(stdout)) != commit {
+		if err == nil {
+			err = errors.New("fetched object did not resolve to the pending resume commit")
+		}
+		return commandFailure("verify pending resume commit", stdout, stderr, err)
+	}
+	return nil
 }
 
 func resolveBaseCommit(

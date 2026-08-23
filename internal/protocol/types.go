@@ -37,10 +37,11 @@ const (
 	MaxEventPageSize          = 500
 	MinWorkerCapacity         = 1
 	MaxWorkerCapacity         = 100
-	// ClaimProtocolVersion moved to 4 when claims began carrying a frozen
-	// sequence of Pipeline stages. Mixed server and Worker versions are not
-	// supported, including for compatibility process-exit Work.
-	ClaimProtocolVersion = 4
+	// ClaimProtocolVersion moved to 5 when claims began combining frozen
+	// Pipeline stages with exact resumable recovery metadata. Mixed server and
+	// Worker versions are not supported, including for compatibility
+	// process-exit Work.
+	ClaimProtocolVersion = 5
 )
 
 func SupportedRuntime(value string) bool {
@@ -248,6 +249,8 @@ type StartAttemptRequest struct {
 	SupervisorPID   *int64 `json:"supervisor_pid,omitempty"`
 	ProcessIdentity string `json:"process_identity,omitempty"`
 	ProcessGroupID  *int64 `json:"process_group_id,omitempty"`
+	StartedFromSHA  string `json:"started_from_sha,omitempty"`
+	RuntimeStarted  bool   `json:"runtime_started,omitempty"`
 }
 
 type HeartbeatResponse struct {

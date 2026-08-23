@@ -152,19 +152,25 @@ type SessionExecution struct {
 // ClaimedSession contains the immutable input a Worker needs to execute a
 // single repository session. It intentionally uses only the Tasks model.
 type ClaimedSession struct {
-	ID              string          `json:"id"`
-	RunID           string          `json:"run_id"`
-	TaskName        string          `json:"task_name"`
-	Prompt          string          `json:"prompt"`
-	Stages          []StageRun      `json:"stages"`
-	WorkerID        string          `json:"worker_id"`
-	RepositoryID    string          `json:"repository_id"`
-	RequiredRuntime string          `json:"required_runtime"`
-	TimeoutSeconds  int             `json:"timeout_seconds"`
-	OutcomeContract OutcomeContract `json:"outcome_contract"`
-	Target          WorkTarget      `json:"target"`
-	State           string          `json:"state"`
-	AdmittedAt      time.Time       `json:"admitted_at"`
+	ID                    string          `json:"id"`
+	RunID                 string          `json:"run_id"`
+	TaskName              string          `json:"task_name"`
+	Prompt                string          `json:"prompt"`
+	Stages                []StageRun      `json:"stages"`
+	WorkerID              string          `json:"worker_id"`
+	RepositoryID          string          `json:"repository_id"`
+	RequiredRuntime       string          `json:"required_runtime"`
+	TimeoutSeconds        int             `json:"timeout_seconds"`
+	OutcomeContract       OutcomeContract `json:"outcome_contract"`
+	Target                WorkTarget      `json:"target"`
+	CheckpointSHA         string          `json:"checkpoint_sha,omitempty"`
+	PendingResumeSHA      string          `json:"pending_resume_sha,omitempty"`
+	CheckpointPublished   bool            `json:"checkpoint_published,omitempty"`
+	PullRequestURL        string          `json:"pull_request_url,omitempty"`
+	PullRequestHeadBranch string          `json:"pull_request_head_branch,omitempty"`
+	PullRequestHeadSHA    string          `json:"pull_request_head_sha,omitempty"`
+	State                 string          `json:"state"`
+	AdmittedAt            time.Time       `json:"admitted_at"`
 }
 
 type TaskPage struct {
@@ -327,6 +333,7 @@ type WorkUpdate struct {
 	PullRequestHeadBranch string           `json:"pull_request_head_branch,omitempty"`
 	PullRequestHeadSHA    string           `json:"pull_request_head_sha,omitempty"`
 	CheckpointSHA         string           `json:"checkpoint_sha,omitempty"`
+	CheckpointPublished   bool             `json:"checkpoint_published,omitempty"`
 	Actor                 WorkUpdateActor  `json:"actor"`
 	AcceptedAt            time.Time        `json:"accepted_at"`
 }
@@ -359,6 +366,32 @@ type AttemptUpdateRequest struct {
 	PullRequestHeadBranch string           `json:"pull_request_head_branch,omitempty"`
 	PullRequestHeadSHA    string           `json:"pull_request_head_sha,omitempty"`
 	CheckpointSHA         string           `json:"checkpoint_sha,omitempty"`
+	CheckpointPublished   bool             `json:"checkpoint_published,omitempty"`
+}
+
+type WorkAnswerRequest struct {
+	RequestID string `json:"request_id"`
+	Message   string `json:"message"`
+}
+
+type WorkAnswer struct {
+	ID               string    `json:"id"`
+	WorkID           string    `json:"work_id"`
+	QuestionUpdateID string    `json:"question_update_id"`
+	RequestID        string    `json:"request_id"`
+	Message          string    `json:"message"`
+	AcceptedAt       time.Time `json:"accepted_at"`
+}
+
+type ReplaceWorkRequest struct {
+	RequestKey string `json:"request_key"`
+	WorkID     string `json:"work_id"`
+}
+
+type WorkReplacement struct {
+	Result     AdmissionResult `json:"result"`
+	RequestKey string          `json:"request_key"`
+	Run        RunDetail       `json:"run"`
 }
 
 type WorkUpdatePage struct {
@@ -458,6 +491,8 @@ type Session struct {
 	Question              string            `json:"question,omitempty"`
 	CheckpointSHA         string            `json:"checkpoint_sha,omitempty"`
 	PendingResumeSHA      string            `json:"pending_resume_sha,omitempty"`
+	CheckpointPublished   bool              `json:"checkpoint_published,omitempty"`
+	Answer                string            `json:"answer,omitempty"`
 	PullRequestURL        string            `json:"pull_request_url,omitempty"`
 	PullRequestHeadBranch string            `json:"pull_request_head_branch,omitempty"`
 	PullRequestHeadSHA    string            `json:"pull_request_head_sha,omitempty"`

@@ -74,7 +74,15 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}
 	worktreeRoot := filepath.Join(manager.dataDirectory, "worktrees")
 	value, err := prepareWorktree(handle.context, manager.options.GitExecutable, worktreeRoot,
-		repository, claim.Session.ID, claim.Attempt.ID)
+		repository, claim.Session.ID, claim.Attempt.ID, worktreeRecovery{
+			WorkID: claim.Session.ID, PublishBranch: claim.Session.Target.PublishBranch,
+			CheckpointSHA:         claim.Session.CheckpointSHA,
+			PendingResumeSHA:      claim.Session.PendingResumeSHA,
+			CheckpointPublished:   claim.Session.CheckpointPublished,
+			PullRequestURL:        claim.Session.PullRequestURL,
+			PullRequestHeadBranch: claim.Session.PullRequestHeadBranch,
+			PullRequestHeadSHA:    claim.Session.PullRequestHeadSHA,
+		})
 	if err != nil {
 		releaseRepository()
 		manager.finishWithoutWorktree(claim, token, handle, terminalForStop(handle), stoppedAttemptError(handle, err))
@@ -165,15 +173,21 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}
 	lastResult := ""
 	var finalMessage supervisorMessage
+	attemptStarted := false
 	for index, stage := range stages {
+		if stage.State == protocol.StageSucceeded {
+			lastResult = stage.Result
+			continue
+		}
 		if reason := handle.stopReasonAt(time.Now()); reason != "" {
 			sender.closeAndWait(5 * time.Second)
-			err := stoppedAttemptError(handle, errors.New("Attempt stopped before the next Pipeline stage."))
+			err := stoppedAttemptError(handle, errors.New("attempt stopped before the next Pipeline stage"))
 			manager.finishWithWorktree(claim, token, handle, repository, value,
 				terminalForStop(handle), "", err.Error())
 			return
 		}
 		finalStage := index == len(stages)-1
+		firstExecutedStage := !attemptStarted
 		prompt := buildStagePrompt(claim, value, stage, finalStage)
 		if len([]byte(value.Branch)) > protocol.MaxAgentBranchBytes ||
 			len([]byte(value.BaseBranch)) > protocol.MaxAgentBranchBytes ||
@@ -223,8 +237,10 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			return
 		}
 		handle.setSupervisor(process)
-		if index == 0 {
-			started, err := manager.client.start(handle.context, claim.Attempt.ID, supervisorStartRequest(process, token))
+		if firstExecutedStage {
+			started, err := manager.client.start(
+				handle.context, claim.Attempt.ID, supervisorStartRequest(process, token, value.BaseCommit),
+			)
 			if err != nil {
 				reason := handle.stopReason()
 				var apiError *APIError
@@ -253,8 +269,6 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 					"control plane did not accept the running transition")
 				return
 			}
-			manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
-				"process", processSummary(process))
 		}
 		_, err = manager.client.startStage(handle.context, claim.Attempt.ID, stage.Position, stageStartRequest(process, token))
 		if err != nil {
@@ -278,6 +292,26 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			sender.closeAndWait(5 * time.Second)
 			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
 			return
+		}
+		if err := manager.awaitRuntimeStarted(process); err != nil {
+			sender.closeAndWait(5 * time.Second)
+			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
+			return
+		}
+		if firstExecutedStage {
+			if _, err := manager.client.start(handle.context, claim.Attempt.ID, protocol.StartAttemptRequest{
+				LeaseToken: token, StartedFromSHA: value.BaseCommit, RuntimeStarted: true,
+			}); err != nil {
+				handle.stop("failed")
+				message := manager.waitForSupervisor(process)
+				sender.closeAndWait(5 * time.Second)
+				manager.finishWithWorktree(claim, token, handle, repository, value,
+					terminalState(message), message.Result, firstNonEmpty(err.Error(), message.Error))
+				return
+			}
+			manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
+				"process", processSummary(process))
+			attemptStarted = true
 		}
 		manager.logger.Info("pipeline_stage_started", "attempt_id", claim.Attempt.ID, "stage", stage.Name, "position", stage.Position)
 		message := manager.waitForSupervisorWithEvents(process, sender)
@@ -333,19 +367,29 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	if claim.Session.TimeoutSeconds < 1 || claim.Session.TimeoutSeconds > int(protocol.MaxTimeout/time.Second) {
 		return errors.New("claim timeout is outside the supported range")
 	}
-	if len(claim.Session.Stages) == 0 {
-		if !protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt) {
-			return errors.New("claim agent prompt exceeds 72 KiB")
-		}
-		return nil
-	}
-	if len(claim.Session.Stages) > protocol.MaxPipelineStages {
+	stages := claim.Session.Stages
+	if len(stages) == 0 {
+		stages = []protocol.StageRun{{Prompt: claim.Session.Prompt}}
+	} else if len(stages) > protocol.MaxPipelineStages {
 		return errors.New("claim Pipeline must contain 1 through 20 stages")
 	}
-	for _, stage := range claim.Session.Stages {
-		if !protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, stage.Prompt) {
+	for index, stage := range stages {
+		promptFits := protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, stage.Prompt)
+		if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate && index == len(stages)-1 {
+			promptFits = protocol.AgentUpdatePromptFits(
+				claim.Session.TaskName, claim.Repository.RemoteIdentity,
+				claim.Session.Target.PublishBranch, stage.Prompt,
+			)
+		}
+		if !promptFits {
 			return errors.New("claim Pipeline stage prompt exceeds 72 KiB")
 		}
+	}
+	if claim.Session.PendingResumeSHA != "" && !commitPattern.MatchString(claim.Session.PendingResumeSHA) {
+		return errors.New("claim pending resume SHA is not a full commit ID")
+	}
+	if claim.Session.PullRequestHeadSHA != "" && !commitPattern.MatchString(claim.Session.PullRequestHeadSHA) {
+		return errors.New("claim pull request recovery SHA is not a full commit ID")
 	}
 	return nil
 }
@@ -532,11 +576,22 @@ func (manager *Manager) waitForSupervisor(process *supervisorProcess) supervisor
 	}
 }
 
+func (manager *Manager) awaitRuntimeStarted(process *supervisorProcess) error {
+	message := manager.waitForSupervisorMessage(process)
+	if message.Type == "started" {
+		return nil
+	}
+	if message.Type == "exit" {
+		return errors.New(firstNonEmpty(message.Error, "attempt runtime exited before reporting startup"))
+	}
+	return errors.New("attempt supervisor returned invalid runtime startup evidence")
+}
+
 func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) supervisorMessage {
 	for {
 		select {
 		case message := <-process.messages:
-			if message.Type == "exit" || message.Type == "output" {
+			if message.Type == "started" || message.Type == "exit" || message.Type == "output" {
 				if message.Type == "exit" {
 					_ = process.closeControl()
 					if message.StopUnverified {
@@ -550,7 +605,7 @@ func (manager *Manager) waitForSupervisorMessage(process *supervisorProcess) sup
 		case err := <-process.decodeErrors:
 			select {
 			case message := <-process.messages:
-				if message.Type == "exit" || message.Type == "output" {
+				if message.Type == "started" || message.Type == "exit" || message.Type == "output" {
 					if message.Type == "exit" {
 						if message.StopUnverified {
 							manager.emergencyStop(process, errors.New(firstNonEmpty(message.Error, "process stop was not verified")))
@@ -647,6 +702,17 @@ func (manager *Manager) finishWithWorktree(
 				evidence.HeadSHA != outcome.PullRequestHeadSHA {
 				state = "failed"
 				errorText = "Delivery evidence could not be revalidated after the agent process stopped."
+			}
+		} else if outcome.Status == protocol.WorkUpdateNeedsInput {
+			validationContext, cancelValidation := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
+			evidence, validationErr := manager.validateNeedsInputCheckpoint(
+				validationContext, claim, repository, value,
+			)
+			cancelValidation()
+			if validationErr != nil || evidence.SHA != outcome.CheckpointSHA ||
+				evidence.Published != outcome.CheckpointPublished {
+				state = "failed"
+				errorText = "Checkpoint could not be revalidated after the agent process stopped."
 			}
 		}
 	}
@@ -893,21 +959,23 @@ func attemptStopReasonForSupervisor(reason string) string {
 }
 
 func buildStagePrompt(claim protocol.Claim, value worktree, stage protocol.StageRun, finalStage bool) string {
-	prompt := protocol.FormatAgentPrompt(
+	if finalStage && claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+		return protocol.FormatAgentUpdatePrompt(
+			claim.Session.TaskName,
+			claim.Repository.RemoteIdentity,
+			value.Branch,
+			value.BaseBranch,
+			claim.Session.Target.PublishBranch,
+			stage.Prompt,
+		)
+	}
+	return protocol.FormatAgentPrompt(
 		claim.Session.TaskName,
 		claim.Repository.RemoteIdentity,
 		value.Branch,
 		value.BaseBranch,
 		stage.Prompt,
 	)
-	if !finalStage || claim.Session.OutcomeContract != protocol.OutcomeAgentUpdate {
-		return prompt
-	}
-	return prompt + "\n\nFactory update contract:\n" +
-		"This Work is unfinished until you call factory update. Use status running for useful progress only. " +
-		"Before exiting, report exactly one available outcome: ready, failed, or no-change. " +
-		"Ready requires --pr with the GitHub pull request URL. Needs-input is unavailable until verified checkpoint support is enabled. " +
-		"Always include a concise non-empty --message."
 }
 
 func updateServerSocket(server *agentUpdateServer) string {

@@ -189,6 +189,34 @@ func TestProcedureRunRebuildUsesLatestExactProcedureRepositoryPredecessor(t *tes
 	}
 }
 
+func TestProcedureRunReservesContinuationRecoveryPromptSpace(t *testing.T) {
+	store := newTestStore(t)
+	repository := createManagedRepositoryForProcedure(t, store, "github.com/acme/api")
+	procedure, err := store.CreateTask(context.Background(), protocol.SaveTaskRequest{
+		Name: "Large legacy Procedure", Prompt: "small", Runtime: protocol.RuntimeCodex,
+		OutcomeContract: protocol.OutcomeProcessExit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Repeat("p", protocol.MaxTaskPromptBytes)
+	if !protocol.AgentPromptFits(procedure.Name, repository.RemoteIdentity, prompt) ||
+		agentContinuationReserveFits(procedure.Name, repository.RemoteIdentity, prompt, "factory/work-0000000000000000") {
+		t.Fatal("test prompt does not isolate the continuation recovery reserve")
+	}
+	if _, err := store.db.Exec(`
+		UPDATE tasks SET prompt = ?, outcome_contract = 'agent_update' WHERE id = ?
+	`, prompt, procedure.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdmitProcedureRun(context.Background(), protocol.ProcedureRunRequest{
+		RequestKey: "large-recovery-reserve", Procedure: procedure.Name,
+		Repositories: []string{repository.RemoteIdentity},
+	}); !serviceErrorCode(err, "agent_prompt_too_large") {
+		t.Fatalf("Procedure recovery reserve error = %v", err)
+	}
+}
+
 func TestClaimSchedulingAlternatesEligibleRuns(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -217,6 +245,14 @@ func TestClaimSchedulingAlternatesEligibleRuns(t *testing.T) {
 	})
 	if err != nil || first == nil || first.Session.RunID != largeRun.Run.Run.ID {
 		t.Fatalf("first claim = %#v, err %v", first, err)
+	}
+	if _, err := store.CompleteAttempt(ctx, first.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: strings.Repeat("a", 64), State: "failed", Error: "preparation failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RetrySession(ctx, largeRun.Run.Run.ID, first.Session.ID); err != nil {
+		t.Fatal(err)
 	}
 	now = now.Add(time.Second)
 	second, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{

@@ -260,9 +260,10 @@ protocol. V1 does not treat the agent process as isolated from other files and
 services available to the Worker operating-system user. The Worker does not
 decide whether the engineering task is semantically complete.
 
-The implementation increments `ClaimProtocolVersion` from 2 to 3 because the
-claim and completion contract now includes frozen outcome behavior, scoped
-updates, checkpoints, and post-stop validation. The control plane rejects an
+The implementation requires `ClaimProtocolVersion` 5. Version 3 introduced
+frozen outcome behavior and scoped updates, version 4 added frozen Pipeline
+stages, and version 5 adds authoritative resume start evidence to the combined
+claim and completion contract. The control plane rejects an
 older registration or claim with `worker_upgrade_required`; an old Worker can
 never claim `agent_update` Work. V1 requires the server and all Workers to be
 upgraded together. A server-first upgrade pauses claims from older Workers,
@@ -816,7 +817,10 @@ exact replacement instead of restoring a known SHA. Common target rebuilds use
 predecessor.
 Preparation re-fetches and proves the restored ref equals the recorded SHA. It
 does not create a resumable question without a checkpoint. The retry prompt
-identifies prior updates, known PR, publish ref, and duplicate-effect risk.
+identifies prior updates, known PR, publish ref, pending and historical
+checkpoint SHAs, and duplicate-effect risk. A missing ref for Work with a
+previously published checkpoint also fails visibly instead of falling back to
+the repository base.
 Factory never force-pushes or deletes the ref. If the ref moves while an Attempt
 is active, the agent must reconcile a normal push or report `needs-input`.
 
@@ -870,16 +874,18 @@ not already finalized. Cancelling a Run applies the appropriate path to each
 nonterminal Work target without changing terminal siblings.
 
 An operator answer to `needs-input` appends trusted context and requeues the
-same Work while retaining its authoritative `pending_resume_sha`.
+same Work while retaining its authoritative `pending_resume_sha`. If another
+target has taken the released frozen Run concurrency slot, the answered Work
+remains blocked until normal fair materialization can admit it.
 The next Worker claim creates a new Attempt. The agent receives the original
 frozen Procedure, original context, prior question, answer, bounded newest
 updates, known branch, checkpoint SHA, and PR metadata. Worktree preparation starts from that
 exact checkpoint. A missing or unreachable checkpoint fails preparation visibly
 instead of falling back to the publish ref or repository base. Cancellation,
 failed preparation, and explicit retry retain `pending_resume_sha`. It is cleared
-only after an Attempt successfully starts from that commit; the historical
-`checkpoint_sha` and update remain stored. Archiving a Procedure prevents new
-Runs but does not cancel admitted Work.
+only after the supervisor starts the runtime child and the Worker acknowledges
+that exact commit; the historical `checkpoint_sha` and update remain stored.
+Archiving a Procedure prevents new Runs but does not cancel admitted Work.
 
 Every assembled agent prompt remains within the existing 72 KiB byte limit.
 For `agent_update` Work, admission requires the frozen Procedure, original
@@ -888,9 +894,12 @@ the maximum 8 KiB question and 8 KiB answer. Before accepting `needs-input` or
 an answer, Factory also proves the actual mandatory continuation sections fit;
 rejection leaves the current state unchanged. The continuation always includes
 the Procedure, original context, current question and answer, checkpoint and
-branch identity, PR metadata, and an omission marker. It fills remaining bytes
-with the newest prior updates, prioritizing Attempt outcomes over progress and
-displaying the selected records chronologically. If history is omitted or one
+branch identity, PR metadata, and an omission marker. The untrusted agent
+question is escaped onto one line so its content cannot create a trusted-looking
+Factory heading. The prompt fills remaining bytes
+with the newest prior records, prioritizing trusted operator answers, then
+Attempt outcomes, then progress, and displaying selected records
+chronologically. If history is omitted or one
 message must be UTF-8-boundary truncated, the marker includes stored and
 inserted counts and a SHA-256 digest of the complete omitted serialized history.
 All full updates remain stored and visible outside the prompt.
@@ -984,7 +993,7 @@ remains visible and never silently drops an outcome.
   stored agent update is retried after its lease expires.
 - `AC-12`: Local and enrolled VM Workers use the same scoped update protocol
   without transmitting the operator credential, Worker credential, or Attempt
-  lease token in that protocol. Claim protocol version 3 is required; older
+  lease token in that protocol. Claim protocol version 5 is required; older
   Workers receive `worker_upgrade_required` and cannot claim Work.
 - `AC-13`: Restarting the control plane or Worker preserves Work, updates,
   questions, results, and retained recovery state.
@@ -1053,7 +1062,7 @@ limit with a reserved outcome slot, dirty needs-input rejection, pushed and
 unchanged checkpoints, answer continuation, answer then cancellation or failed
 preparation then retry with moved and missing refs, maximum question and answer
 sizes, bounded multi-Attempt history with UTF-8 truncation and omission digests,
-claim protocol version 3 acceptance, older-Worker rejection before any Work
+claim protocol version 5 acceptance, older-Worker rejection before any Work
 claim, outcome-aware worktree retention and cleanup.
 They verify `AC-5`, `AC-7`, `AC-8`, `AC-10`, `AC-12`, and `AC-13`, including
 the race detector.

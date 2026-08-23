@@ -129,7 +129,7 @@ func TestFakeAgentReportsProgressAndOutcomeThroughRealWorkerEndpoint(t *testing.
 		t.Fatal(err)
 	}
 	var work protocol.Work
-	deadline = time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		work, err = store.Work(context.Background(), run.Sessions[0].ID)
 		if err == nil && work.State == protocol.WorkNoChange {
@@ -150,6 +150,65 @@ func TestFakeAgentReportsProgressAndOutcomeThroughRealWorkerEndpoint(t *testing.
 	}
 	if len(work.Stages) != 2 || work.Stages[0].State != protocol.StageSucceeded || work.Stages[1].State != protocol.StageSucceeded {
 		t.Fatalf("fake-agent Pipeline stages = %#v", work.Stages)
+	}
+
+	resumePipeline, err := store.CreatePipeline(context.Background(), protocol.SavePipelineRequest{
+		Name: "Build then ask",
+		Stages: []protocol.PipelineStage{
+			{Name: "Build", Prompt: "Make the requested change."},
+			{Name: "Report", Prompt: "Ask for compatibility mode."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeTask, err := store.CreateTask(context.Background(), protocol.SaveTaskRequest{
+		Name: "Endpoint resume", Prompt: "Resume only the final stage.", Runtime: protocol.RuntimeCodex,
+		PipelineID: resumePipeline.ID, RepositoryIDs: []string{registered.Repositories[0].ID},
+		OutcomeContract: protocol.OutcomeAgentUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRun, _, err := store.RunTask(context.Background(), resumeTask.ID, protocol.RunTaskRequest{
+		RequestKey: "endpoint-resume",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		work, err = store.Work(context.Background(), resumeRun.Sessions[0].ID)
+		if err == nil && work.State == protocol.WorkNeedsInput {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err != nil || work.State != protocol.WorkNeedsInput || work.PendingResumeSHA == "" ||
+		len(work.Stages) != 2 || work.Stages[0].State != protocol.StageSucceeded ||
+		work.Stages[1].State != protocol.StageSucceeded {
+		t.Fatalf("needs-input Pipeline Work = %#v, err %v", work, err)
+	}
+	firstStageCompletedAt := work.Stages[0].CompletedAt
+	if _, err := store.AnswerWork(context.Background(), work.ID, protocol.WorkAnswerRequest{
+		RequestID: "66000000-0000-4000-8000-000000000001", Message: "Preserve legacy mode.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		work, err = store.Work(context.Background(), resumeRun.Sessions[0].ID)
+		if err == nil && work.State == protocol.WorkNoChange {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err != nil || work.State != protocol.WorkNoChange || work.PendingResumeSHA != "" ||
+		len(work.Attempts) != 2 || len(work.Stages) != 2 ||
+		work.Stages[0].State != protocol.StageSucceeded || work.Stages[0].CompletedAt == nil ||
+		firstStageCompletedAt == nil || !work.Stages[0].CompletedAt.Equal(*firstStageCompletedAt) ||
+		work.Stages[1].State != protocol.StageSucceeded {
+		t.Fatalf("resumed final Pipeline stage = %#v, err %v", work, err)
 	}
 
 	missingPipeline, err := store.CreatePipeline(context.Background(), protocol.SavePipelineRequest{
@@ -217,6 +276,23 @@ esac
 if [ -z "${FACTORY_UPDATE_SOCKET:-}" ]; then
   exit 0
 fi
+case "$prompt" in
+  *"Ask for compatibility mode."*)
+    case "$prompt" in
+      *"Preserve legacy mode."*) ;;
+      *)
+        printf 'checkpoint\n' >> README.md
+        git add README.md
+        git commit -m 'test: checkpoint question' >/dev/null
+        publish_branch=$(printf '%s\n' "$prompt" | sed -n 's/^Factory publish branch: //p')
+        git push origin "HEAD:refs/heads/$publish_branch" >/dev/null
+        question='{"work_id":"'"$FACTORY_WORK_ID"'","attempt_id":"'"$FACTORY_ATTEMPT_ID"'","update_token":"'"$FACTORY_UPDATE_TOKEN"'","request_id":"60000000-0000-4000-8000-000000000003","status":"needs-input","message":"Which compatibility mode?"}'
+        curl --silent --show-error --fail --unix-socket "$FACTORY_UPDATE_SOCKET" -H 'Content-Type: application/json' --data "$question" http://factory.local/update >/dev/null
+        sleep 30
+        ;;
+    esac
+    ;;
+esac
 progress='{"work_id":"'"$FACTORY_WORK_ID"'","attempt_id":"'"$FACTORY_ATTEMPT_ID"'","update_token":"'"$FACTORY_UPDATE_TOKEN"'","request_id":"60000000-0000-4000-8000-000000000001","status":"running","message":"Fake agent is checking the task."}'
 outcome='{"work_id":"'"$FACTORY_WORK_ID"'","attempt_id":"'"$FACTORY_ATTEMPT_ID"'","update_token":"'"$FACTORY_UPDATE_TOKEN"'","request_id":"60000000-0000-4000-8000-000000000002","status":"no-change","message":"No defensible change exists."}'
 curl --silent --show-error --fail --unix-socket "$FACTORY_UPDATE_SOCKET" -H 'Content-Type: application/json' --data "$progress" http://factory.local/update >/dev/null

@@ -9,6 +9,90 @@ import (
 	"github.com/owainlewis/factory/internal/protocol"
 )
 
+func TestPipelineAnswerResumesOnlyFinalAgentUpdateStage(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	worker := registerTestWorker(t, store, workerA, 10, protocol.RepositoryRegistration{
+		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
+	})
+	pipeline, err := store.CreatePipeline(ctx, protocol.SavePipelineRequest{
+		Name: "Build then report",
+		Stages: []protocol.PipelineStage{
+			{Name: "Build", Prompt: "Implement {{ task.prompt }}"},
+			{Name: "Report", Prompt: "Verify the implementation and report the outcome."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.CreateTask(ctx, protocol.SaveTaskRequest{
+		Name: "Resumable Pipeline", Prompt: "the requested behavior", Runtime: protocol.RuntimeCodex,
+		PipelineID: pipeline.ID, RepositoryIDs: []string{worker.Repositories[0].ID},
+		OutcomeContract: protocol.OutcomeAgentUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := store.RunTask(ctx, task.ID, protocol.RunTaskRequest{RequestKey: "pipeline-resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{
+		RequestID: "pipeline-resume-claim", LeaseToken: tokenA,
+	})
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, error %v", claim, err)
+	}
+	if _, err := store.StartAttempt(ctx, claim.Attempt.ID, protocol.StartAttemptRequest{LeaseToken: tokenA}); err != nil {
+		t.Fatal(err)
+	}
+	for position := 0; position < 2; position++ {
+		if _, err := store.StartStage(ctx, claim.Attempt.ID, position, protocol.StartStageRequest{LeaseToken: tokenA}); err != nil {
+			t.Fatal(err)
+		}
+		if position == 1 {
+			if _, err := store.AppendAgentUpdate(ctx, claim.Attempt.ID, protocol.AttemptUpdateRequest{
+				LeaseToken: tokenA, RequestID: "65000000-0000-4000-8000-000000000001",
+				Status: protocol.WorkUpdateNeedsInput, Message: "Which compatibility mode?",
+				CheckpointSHA: testCheckpointSHA, CheckpointPublished: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.CompleteStage(ctx, claim.Attempt.ID, position, protocol.CompleteStageRequest{
+			LeaseToken: tokenA, State: protocol.StageSucceeded, Result: "done",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.CompleteAttempt(ctx, claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	work, err := store.Work(ctx, run.Sessions[0].ID)
+	if err != nil || work.State != protocol.WorkNeedsInput {
+		t.Fatalf("needs-input Work = %#v, error %v", work, err)
+	}
+	if _, err := store.AnswerWork(ctx, work.ID, protocol.WorkAnswerRequest{
+		RequestID: "65000000-0000-4000-8000-000000000002", Message: "Preserve legacy mode.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{
+		RequestID: "pipeline-resume-continuation", LeaseToken: resumeToken,
+	})
+	if err != nil || resumed == nil || len(resumed.Session.Stages) != 2 {
+		t.Fatalf("continuation claim = %#v, error %v", resumed, err)
+	}
+	if resumed.Session.Stages[0].State != protocol.StageSucceeded ||
+		resumed.Session.Stages[1].State != protocol.StagePending ||
+		!strings.Contains(resumed.Session.Stages[1].Prompt, "Which compatibility mode?") ||
+		!strings.Contains(resumed.Session.Stages[1].Prompt, "Preserve legacy mode.") {
+		t.Fatalf("continuation stages = %#v", resumed.Session.Stages)
+	}
+}
+
 func TestPipelineTemplateSnapshotsAndSequencesAgentStages(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

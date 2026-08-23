@@ -576,6 +576,14 @@ func TestPendingCancellationWinsAgentUpdateCompletion(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.AppendAgentUpdate(context.Background(), claim.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: tokenA,
+		RequestID:  "a9000000-0000-4000-8000-000000000001",
+		Status:     protocol.WorkUpdateNeedsInput, Message: "Which behavior should be preserved?",
+		CheckpointSHA: testCheckpointSHA, CheckpointPublished: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.CancelSession(context.Background(), run.Run.ID, run.Sessions[0].ID); err != nil {
 		t.Fatal(err)
 	}
@@ -595,8 +603,20 @@ func TestPendingCancellationWinsAgentUpdateCompletion(t *testing.T) {
 	}
 	if attempt.State != "cancelled" || attempt.Result != "" || attempt.Error != "" ||
 		work.State != protocol.WorkCancelled || work.Result != "" || work.FailureReason != "" ||
-		work.TerminalMessage != "Cancelled by operator." || run.Run.State != protocol.RunCancelled {
+		work.TerminalMessage != "Cancelled by operator." || run.Run.State != protocol.RunCancelled ||
+		work.CheckpointSHA != testCheckpointSHA || work.PendingResumeSHA != testCheckpointSHA ||
+		!work.CheckpointPublished {
 		t.Fatalf("late completion after cancellation = Attempt %#v, Work %#v, Run %#v",
 			attempt, work, run.Run)
+	}
+	if _, err := store.RetrySession(context.Background(), run.Run.ID, work.ID); err != nil {
+		t.Fatal(err)
+	}
+	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "cancellation-retry", LeaseToken: resumeToken,
+	})
+	if err != nil || retryClaim == nil || retryClaim.Session.PendingResumeSHA != testCheckpointSHA ||
+		!retryClaim.Session.CheckpointPublished {
+		t.Fatalf("cancelled checkpoint retry claim = %#v, error %v", retryClaim, err)
 	}
 }
