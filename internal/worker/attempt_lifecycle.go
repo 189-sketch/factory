@@ -76,6 +76,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	value, err := prepareWorktree(handle.context, manager.options.GitExecutable, worktreeRoot,
 		repository, claim.Session.ID, claim.Attempt.ID, worktreeRecovery{
 			WorkID: claim.Session.ID, PublishBranch: claim.Session.Target.PublishBranch,
+			CheckpointSHA:         claim.Session.CheckpointSHA,
 			PendingResumeSHA:      claim.Session.PendingResumeSHA,
 			CheckpointPublished:   claim.Session.CheckpointPublished,
 			PullRequestURL:        claim.Session.PullRequestURL,

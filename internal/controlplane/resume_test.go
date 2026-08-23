@@ -152,7 +152,10 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 		t.Fatalf("continuation claim = %#v, error %v", claim, err)
 	}
 	continuationPrompt := claim.Session.Stages[len(claim.Session.Stages)-1].Prompt
-	if claim.Session.PendingResumeSHA != testCheckpointSHA || !claim.Session.CheckpointPublished ||
+	if claim.Session.CheckpointSHA != testCheckpointSHA ||
+		claim.Session.PendingResumeSHA != testCheckpointSHA || !claim.Session.CheckpointPublished ||
+		!strings.Contains(continuationPrompt, "Pending checkpoint SHA: "+testCheckpointSHA) ||
+		!strings.Contains(continuationPrompt, "Historical checkpoint SHA: "+testCheckpointSHA) ||
 		!strings.Contains(continuationPrompt, "Which behavior should be preserved?") ||
 		!strings.Contains(continuationPrompt, answer.Message) ||
 		!strings.Contains(continuationPrompt, "Stored history records: 2") ||
@@ -211,8 +214,12 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
 		RequestID: "post-continuation-retry-claim", LeaseToken: strings.Repeat("c", 64),
 	})
-	if err != nil || retryClaim == nil || retryClaim.Session.PendingResumeSHA != "" ||
-		!retryClaim.Session.CheckpointPublished {
+	if err != nil || retryClaim == nil || retryClaim.Session.CheckpointSHA != testCheckpointSHA ||
+		retryClaim.Session.PendingResumeSHA != "" || !retryClaim.Session.CheckpointPublished ||
+		!strings.Contains(retryClaim.Session.Stages[len(retryClaim.Session.Stages)-1].Prompt,
+			"Pending checkpoint SHA: (none)") ||
+		!strings.Contains(retryClaim.Session.Stages[len(retryClaim.Session.Stages)-1].Prompt,
+			"Historical checkpoint SHA: "+testCheckpointSHA) {
 		t.Fatalf("post-continuation retry claim = %#v, error %v", retryClaim, err)
 	}
 }
@@ -578,6 +585,7 @@ func TestContinuationPromptBoundsHistoryAndKeepsMandatoryRecoveryContext(t *test
 		title: "Resume", repository: "github.com/owainlewis/factory",
 		resolvedPrompt: strings.Repeat("p", 52<<10), publishBranch: "factory/work-resume",
 		question: "Which API?", answer: "Keep v1.", checkpointSHA: testCheckpointSHA,
+		pendingResumeSHA:      testCheckpointSHA,
 		pullRequestURL:        "https://github.com/owainlewis/factory/pull/343",
 		pullRequestHeadBranch: "factory/work-resume", pullRequestHeadSHA: testCheckpointSHA,
 		retryMayRepeatEffects: true,
@@ -608,6 +616,32 @@ func TestContinuationPromptBoundsHistoryAndKeepsMandatoryRecoveryContext(t *test
 	}
 	if !protocol.AgentUpdatePromptFits(state.title, state.repository, state.publishBranch, prompt) {
 		t.Fatalf("continuation prompt exceeds %d bytes", protocol.MaxAgentPromptBytes)
+	}
+}
+
+func TestContinuationPromptDistinguishesPendingAndHistoricalCheckpoints(t *testing.T) {
+	historical := strings.Repeat("a", 40)
+	pending := strings.Repeat("b", 40)
+	state := continuationState{
+		resolvedPrompt: "Continue safely.", publishBranch: "factory/work-resume",
+		checkpointSHA: historical,
+	}
+	prompt, err := assembleContinuationPrompt(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Pending checkpoint SHA: (none)") ||
+		!strings.Contains(prompt, "Historical checkpoint SHA: "+historical) {
+		t.Fatalf("historical-only recovery context = %q", prompt)
+	}
+	state.pendingResumeSHA = pending
+	prompt, err = assembleContinuationPrompt(state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Pending checkpoint SHA: "+pending) ||
+		!strings.Contains(prompt, "Historical checkpoint SHA: "+historical) {
+		t.Fatalf("pending recovery context = %q", prompt)
 	}
 }
 
@@ -721,6 +755,7 @@ func TestAgentContinuationReserveIncludesFirstQuestionAndAnswer(t *testing.T) {
 		question:              strings.Repeat("q", protocol.MaxQuestionBytes),
 		answer:                strings.Repeat("a", protocol.MaxAnswerBytes),
 		checkpointSHA:         strings.Repeat("f", 64),
+		pendingResumeSHA:      strings.Repeat("f", 64),
 		pullRequestURL:        "https://github.com/" + strings.Repeat("r", 2028),
 		pullRequestHeadBranch: strings.Repeat("b", 255),
 		pullRequestHeadSHA:    strings.Repeat("f", 64),

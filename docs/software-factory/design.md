@@ -817,7 +817,10 @@ exact replacement instead of restoring a known SHA. Common target rebuilds use
 predecessor.
 Preparation re-fetches and proves the restored ref equals the recorded SHA. It
 does not create a resumable question without a checkpoint. The retry prompt
-identifies prior updates, known PR, publish ref, and duplicate-effect risk.
+identifies prior updates, known PR, publish ref, pending and historical
+checkpoint SHAs, and duplicate-effect risk. A missing ref for Work with a
+previously published checkpoint also fails visibly instead of falling back to
+the repository base.
 Factory never force-pushes or deletes the ref. If the ref moves while an Attempt
 is active, the agent must reconcile a normal push or report `needs-input`.
 

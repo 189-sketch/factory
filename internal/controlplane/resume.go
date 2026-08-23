@@ -21,11 +21,11 @@ type sqlQueryer interface {
 }
 
 type continuationState struct {
-	title, repository, resolvedPrompt, publishBranch string
-	question, answer, checkpointSHA                  string
-	pullRequestURL, pullRequestHeadBranch            string
-	pullRequestHeadSHA                               string
-	retryMayRepeatEffects                            bool
+	title, repository, resolvedPrompt, publishBranch  string
+	question, answer, checkpointSHA, pendingResumeSHA string
+	pullRequestURL, pullRequestHeadBranch             string
+	pullRequestHeadSHA                                string
+	retryMayRepeatEffects                             bool
 }
 
 type continuationHistory struct {
@@ -55,6 +55,7 @@ func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBran
 		question:              strings.Repeat("q", protocol.MaxQuestionBytes),
 		answer:                strings.Repeat("a", protocol.MaxAnswerBytes),
 		checkpointSHA:         strings.Repeat("f", 64),
+		pendingResumeSHA:      strings.Repeat("f", 64),
 		pullRequestURL:        "https://github.com/" + strings.Repeat("r", 2028),
 		pullRequestHeadBranch: strings.Repeat("b", 255),
 		pullRequestHeadSHA:    strings.Repeat("f", 64),
@@ -80,6 +81,7 @@ func (s *Store) continuationPrompt(ctx context.Context, workID string) (string, 
 		return "", err
 	}
 	if state.question == "" && state.answer == "" && state.checkpointSHA == "" &&
+		state.pendingResumeSHA == "" &&
 		state.pullRequestURL == "" && !state.retryMayRepeatEffects && len(history) == 0 {
 		return state.resolvedPrompt, nil
 	}
@@ -124,7 +126,8 @@ func loadContinuationState(
 		           (SELECT prompt FROM session_stages WHERE session_id = session.id ORDER BY position DESC LIMIT 1),
 		           session.resolved_prompt
 		       ), session.publish_branch, session.question,
-		       session.answer, session.checkpoint_sha, session.pull_request_url,
+		       session.answer, session.checkpoint_sha, session.pending_resume_sha,
+		       session.pull_request_url,
 		       session.pull_request_head_branch, session.pull_request_head_sha,
 		       session.retry_may_repeat_effects
 		FROM sessions session
@@ -132,7 +135,8 @@ func loadContinuationState(
 		WHERE session.id = ?
 	`, workID).Scan(
 		&state.title, &state.repository, &state.resolvedPrompt, &state.publishBranch,
-		&state.question, &state.answer, &state.checkpointSHA, &state.pullRequestURL,
+		&state.question, &state.answer, &state.checkpointSHA, &state.pendingResumeSHA,
+		&state.pullRequestURL,
 		&state.pullRequestHeadBranch, &state.pullRequestHeadSHA, &retry,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -188,7 +192,8 @@ func loadContinuationState(
 func assembleContinuationPrompt(state continuationState, history []continuationHistory) (string, error) {
 	mandatory := state.resolvedPrompt + "\n\nTrusted Factory recovery context:\n" +
 		"Publish branch: " + state.publishBranch + "\n" +
-		"Pending checkpoint SHA: " + emptyRecoveryValue(state.checkpointSHA) + "\n" +
+		"Pending checkpoint SHA: " + emptyRecoveryValue(state.pendingResumeSHA) + "\n" +
+		"Historical checkpoint SHA: " + emptyRecoveryValue(state.checkpointSHA) + "\n" +
 		"Known pull request: " + emptyRecoveryValue(state.pullRequestURL) + "\n" +
 		"Known pull request head: " + emptyRecoveryValue(state.pullRequestHeadBranch) + " @ " +
 		emptyRecoveryValue(state.pullRequestHeadSHA) + "\n" +

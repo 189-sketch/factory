@@ -466,8 +466,9 @@ security headers. Node.js is needed only when UI source changes.
    pending resume SHA. The Attempt succeeds, Work enters `needs-input`, and no
    process or lease remains alive.
 6. An operator answer stores bounded trusted context and requeues the same
-   Work. The next claim contains a bounded continuation prompt and prepares
-   from the pending SHA.
+   Work. The next claim contains a bounded continuation prompt that labels the
+   pending and historical checkpoint SHAs separately, and prepares from the
+   pending SHA.
 7. The server first validates the prepared commit while moving the Attempt to
    running. The supervisor then reports that the runtime child started, and a
    second leased acknowledgement clears the pending SHA for that exact commit.
@@ -486,6 +487,8 @@ and Attempt history, pending resume SHA, and known pull-request evidence. It
 selects a currently eligible Worker and creates the next Attempt when claimed.
 Known-PR Work with a missing publish ref fails preparation with the PR, ref,
 and trusted recovery SHA. The ref is accepted only when restored at that SHA.
+Work with a previously published checkpoint also fails visibly when its publish
+ref is missing instead of falling back to the repository base.
 `ReplaceWork` is the exact-predecessor recovery path when retry cannot recover
 the original Work.
 

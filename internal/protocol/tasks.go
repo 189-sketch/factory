@@ -163,6 +163,7 @@ type ClaimedSession struct {
 	TimeoutSeconds        int             `json:"timeout_seconds"`
 	OutcomeContract       OutcomeContract `json:"outcome_contract"`
 	Target                WorkTarget      `json:"target"`
+	CheckpointSHA         string          `json:"checkpoint_sha,omitempty"`
 	PendingResumeSHA      string          `json:"pending_resume_sha,omitempty"`
 	CheckpointPublished   bool            `json:"checkpoint_published,omitempty"`
 	PullRequestURL        string          `json:"pull_request_url,omitempty"`

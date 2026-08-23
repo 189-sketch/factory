@@ -188,6 +188,13 @@ func TestRecoveryPreparationPrefersPendingSHAAndRequiresExactRestoredRef(t *test
 	}); err == nil || !strings.Contains(err.Error(), publishBranch) || !strings.Contains(err.Error(), checkpoint) {
 		t.Fatalf("missing pending ref error = %v", err)
 	}
+	if _, _, err := resolveRecoveryCommit(context.Background(), "git", repository, worktreeRecovery{
+		WorkID: testWorkID, PublishBranch: publishBranch,
+		CheckpointSHA: checkpoint, CheckpointPublished: true,
+	}); err == nil || !strings.Contains(err.Error(), "previously published checkpoint") ||
+		!strings.Contains(err.Error(), publishBranch) || !strings.Contains(err.Error(), checkpoint) {
+		t.Fatalf("missing historical checkpoint ref error = %v", err)
+	}
 
 	knownPR := "https://github.com/owainlewis/factory/pull/343"
 	if _, _, err := resolveRecoveryCommit(context.Background(), "git", repository, worktreeRecovery{

@@ -285,7 +285,7 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 		       run.outcome_contract, session.target_position, session.target_key,
 		       session.target_kind, session.repository_identity, session.source_kind,
 		       session.source_key, session.source_reference, session.context_snapshot,
-		       session.publish_branch, session.pending_resume_sha,
+		       session.publish_branch, session.checkpoint_sha, session.pending_resume_sha,
 		       session.checkpoint_published, session.pull_request_url,
 		       session.pull_request_head_branch, session.pull_request_head_sha
 		FROM sessions session
@@ -302,7 +302,8 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 		&claim.Session.Target.RepositoryIdentity, &claim.Session.Target.SourceKind,
 		&claim.Session.Target.SourceKey, &claim.Session.Target.SourceReference,
 		&claim.Session.Target.ContextSnapshot, &claim.Session.Target.PublishBranch,
-		&claim.Session.PendingResumeSHA, &claim.Session.CheckpointPublished,
+		&claim.Session.CheckpointSHA, &claim.Session.PendingResumeSHA,
+		&claim.Session.CheckpointPublished,
 		&claim.Session.PullRequestURL, &claim.Session.PullRequestHeadBranch,
 		&claim.Session.PullRequestHeadSHA); err != nil {
 		return claim, unavailable(err)

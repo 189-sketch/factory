@@ -30,6 +30,7 @@ type worktree struct {
 type worktreeRecovery struct {
 	WorkID                string
 	PublishBranch         string
+	CheckpointSHA         string
 	PendingResumeSHA      string
 	CheckpointPublished   bool
 	PullRequestURL        string
@@ -384,6 +385,16 @@ func resolveRecoveryCommit(
 			return "", "", fmt.Errorf(
 				"known pull request %s has missing publish ref refs/heads/%s; trusted recovery SHA: %s; restore the ref only at that SHA or use factory replace %s",
 				recovery.PullRequestURL, recovery.PublishBranch, trustedSHA, recovery.WorkID,
+			)
+		}
+		if recovery.CheckpointPublished {
+			trustedSHA := recovery.CheckpointSHA
+			if !commitPattern.MatchString(trustedSHA) {
+				trustedSHA = "(missing; exact replacement is required)"
+			}
+			return "", "", fmt.Errorf(
+				"previously published checkpoint has missing publish ref refs/heads/%s; trusted checkpoint SHA: %s; restore the ref only at that SHA or use factory replace %s",
+				recovery.PublishBranch, trustedSHA, recovery.WorkID,
 			)
 		}
 	}
