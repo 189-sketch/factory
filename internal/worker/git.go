@@ -399,6 +399,9 @@ func recoveryTargetBaseBranch(
 		if err := validateBaseBranch(ctx, gitExecutable, repository, repository.BaseBranch); err != nil {
 			return "", err
 		}
+		if _, err := remoteBranchCommit(ctx, gitExecutable, repository, repository.BaseBranch); err != nil {
+			return "", err
+		}
 		return repository.BaseBranch, nil
 	}
 	branch, _, err := discoverRemoteDefaultBranch(ctx, gitExecutable, repository)

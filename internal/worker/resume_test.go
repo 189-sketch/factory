@@ -171,6 +171,16 @@ func TestRecoveryPreparationPrefersPendingSHAAndRequiresExactRestoredRef(t *test
 		!strings.Contains(prompt, "Factory publish branch: "+publishBranch) {
 		t.Fatalf("pending-resume prompt lost distinct base and publish branches: %q", prompt)
 	}
+	missingBaseRepository := repository
+	missingBaseRepository.BaseBranch = "deleted-base"
+	if _, _, err := resolveRecoveryCommit(
+		context.Background(), "git", missingBaseRepository, worktreeRecovery{
+			WorkID: testWorkID, PublishBranch: publishBranch,
+			PendingResumeSHA: checkpoint, CheckpointPublished: true,
+		},
+	); err == nil || !strings.Contains(err.Error(), "deleted-base") {
+		t.Fatalf("missing configured recovery base error = %v", err)
+	}
 	runTestCommand(t, checkout, "git", "push", "origin", ":refs/heads/"+publishBranch)
 	if _, _, err := resolveRecoveryCommit(context.Background(), "git", repository, worktreeRecovery{
 		WorkID: testWorkID, PublishBranch: publishBranch,
