@@ -61,7 +61,7 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	if claim.Session.PendingResumeSHA != testCheckpointSHA || !claim.Session.CheckpointPublished ||
 		!strings.Contains(claim.Session.Prompt, "Which behavior should be preserved?") ||
 		!strings.Contains(claim.Session.Prompt, answer.Message) ||
-		!strings.Contains(claim.Session.Prompt, "Stored updates: 1") ||
+		!strings.Contains(claim.Session.Prompt, "Stored history records: 2") ||
 		!protocol.AgentUpdatePromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt) {
 		t.Fatalf("continuation claim = %#v", claim.Session)
 	}
@@ -108,6 +108,100 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	if err != nil || retryClaim == nil || retryClaim.Session.PendingResumeSHA != "" ||
 		!retryClaim.Session.CheckpointPublished {
 		t.Fatalf("post-continuation retry claim = %#v, error %v", retryClaim, err)
+	}
+}
+
+func TestContinuationPreservesEveryTrustedAnswerAcrossQuestionRounds(t *testing.T) {
+	store, worker, _, work := needsInputWork(t)
+	const firstAnswer = "Keep the public behavior backward compatible."
+	if _, err := store.AnswerWork(context.Background(), work.ID, protocol.WorkAnswerRequest{
+		RequestID: "62000000-0000-4000-8000-000000000001", Message: firstAnswer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	roundTwoToken := strings.Repeat("c", 64)
+	claim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "second-question-claim", LeaseToken: roundTwoToken,
+	})
+	if err != nil || claim == nil {
+		t.Fatalf("second question claim = %#v, error %v", claim, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: roundTwoToken, StartedFromSHA: testCheckpointSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: roundTwoToken, StartedFromSHA: testCheckpointSHA, RuntimeStarted: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const secondQuestion = "Should the compatibility alias remain documented?"
+	secondCheckpoint := strings.Repeat("d", 40)
+	if _, err := store.AppendAgentUpdate(context.Background(), claim.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: roundTwoToken, RequestID: "62000000-0000-4000-8000-000000000002",
+		Status: protocol.WorkUpdateNeedsInput, Message: secondQuestion,
+		CheckpointSHA: secondCheckpoint, CheckpointPublished: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: roundTwoToken, State: "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := store.Work(context.Background(), work.ID)
+	if err != nil || paused.State != protocol.WorkNeedsInput || paused.Answer != "" {
+		t.Fatalf("second needs-input Work = %#v, error %v", paused, err)
+	}
+	beforeAnswer, err := store.continuationPrompt(context.Background(), work.ID)
+	if err != nil || !strings.Contains(beforeAnswer, firstAnswer) ||
+		!strings.Contains(beforeAnswer, secondQuestion) || !strings.Contains(beforeAnswer, `"trusted":true`) {
+		t.Fatalf("second question lost first trusted answer: prompt %q, error %v", beforeAnswer, err)
+	}
+
+	const secondAnswer = "Keep the alias and document it as deprecated."
+	answer, err := store.AnswerWork(context.Background(), work.ID, protocol.WorkAnswerRequest{
+		RequestID: "62000000-0000-4000-8000-000000000003", Message: secondAnswer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := store.AnswerWork(context.Background(), work.ID, protocol.WorkAnswerRequest{
+		RequestID: answer.RequestID, Message: answer.Message,
+	})
+	if err != nil || replayed.ID != answer.ID {
+		t.Fatalf("second answer replay after requeue = %#v, error %v", replayed, err)
+	}
+	finalClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "third-question-claim", LeaseToken: strings.Repeat("e", 64),
+	})
+	if err != nil || finalClaim == nil {
+		t.Fatalf("third claim = %#v, error %v", finalClaim, err)
+	}
+	prompt := finalClaim.Session.Prompt
+	header := strings.Index(prompt, "Prior Work history")
+	if header < 0 || !protocol.AgentUpdatePromptFits(
+		finalClaim.Session.TaskName, finalClaim.Repository.RemoteIdentity, prompt,
+	) {
+		t.Fatalf("final continuation prompt is missing bounded history: %q", prompt)
+	}
+	history := prompt[header:]
+	ordered := []string{
+		`"message":"Which behavior should be preserved?"`, `"message":"` + firstAnswer + `"`,
+		`"message":"` + secondQuestion + `"`, `"message":"` + secondAnswer + `"`,
+	}
+	previous := -1
+	for _, record := range ordered {
+		position := strings.Index(history, record)
+		if position <= previous {
+			t.Fatalf("trusted continuation history is not Q1/A1/Q2/A2 ordered: %s", history)
+		}
+		previous = position
+	}
+	if strings.Count(history, `"kind":"answer"`) != 2 ||
+		strings.Count(history, `"trusted":true`) != 2 {
+		t.Fatalf("answers are not explicitly trusted in continuation history: %s", history)
 	}
 }
 
@@ -300,7 +394,7 @@ func TestContinuationPromptBoundsHistoryAndKeepsMandatoryRecoveryContext(t *test
 	}
 	for _, required := range []string{
 		state.resolvedPrompt, state.question, state.answer, state.checkpointSHA,
-		state.pullRequestURL, "Stored updates: 219", "omitted updates:", "omitted SHA-256:",
+		state.pullRequestURL, "Stored history records: 219", "omitted history records:", "omitted SHA-256:",
 		`"sequence":110`, `"sequence":219`,
 	} {
 		if !strings.Contains(prompt, required) {
@@ -352,12 +446,44 @@ func TestContinuationPromptTruncatesNewestOutcomeBeforeProgress(t *testing.T) {
 		serialized[index] = string(body)
 	}
 	sum := sha256.Sum256([]byte(strings.Join(serialized, "\n")))
-	if digest := hex.EncodeToString(sum[:]); !strings.Contains(prompt, "omitted updates: 2; omitted SHA-256: "+digest) {
+	if digest := hex.EncodeToString(sum[:]); !strings.Contains(prompt, "omitted history records: 2; omitted SHA-256: "+digest) {
 		t.Fatalf("truncated history marker did not digest full omitted records: %s", prompt[len(prompt)-1000:])
 	}
 }
 
-func TestAgentContinuationReserveIncludesFirstOutcomeDigest(t *testing.T) {
+func TestContinuationOmissionDigestCoversTrustedAnswer(t *testing.T) {
+	history := []continuationHistory{{
+		Sequence: 1, Kind: "answer", Actor: protocol.WorkUpdateActorOperator,
+		Message:          strings.Repeat("界", protocol.MaxAnswerBytes/3),
+		AcceptedAtMillis: 1, Trusted: true,
+	}}
+	serialized, err := json.Marshal(history[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(serialized)
+	digest := hex.EncodeToString(sum[:])
+	state := continuationState{
+		title: "Resume", repository: "github.com/owainlewis/factory",
+		publishBranch: "factory/work-resume", checkpointSHA: testCheckpointSHA,
+	}
+	var prompt string
+	for promptBytes := 58 << 10; promptBytes <= protocol.MaxResolvedPromptBytes; promptBytes += 128 {
+		state.resolvedPrompt = strings.Repeat("p", promptBytes)
+		candidate, candidateErr := assembleContinuationPrompt(state, history)
+		if candidateErr == nil && strings.Contains(
+			candidate, "omitted history records: 1; omitted SHA-256: "+digest,
+		) {
+			prompt = candidate
+			break
+		}
+	}
+	if prompt == "" || !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
+		t.Fatal("bounded continuation never digested the complete omitted trusted answer")
+	}
+}
+
+func TestAgentContinuationReserveIncludesFirstQuestionAndAnswer(t *testing.T) {
 	const title = "Resume"
 	const repository = "github.com/owainlewis/factory"
 	const publishBranch = "factory/work-resume"
@@ -394,15 +520,18 @@ func TestAgentContinuationReserveIncludesFirstOutcomeDigest(t *testing.T) {
 		retryMayRepeatEffects: true,
 	}
 	history := []continuationHistory{{
-		Sequence: 1, Status: protocol.WorkUpdateNeedsInput, Actor: protocol.WorkUpdateActorAgent,
+		Sequence: 1, Kind: "update", Status: protocol.WorkUpdateNeedsInput, Actor: protocol.WorkUpdateActorAgent,
 		Message:       strings.Repeat("q", protocol.MaxQuestionBytes),
 		CheckpointSHA: strings.Repeat("f", 64), AcceptedAtMillis: 1,
+	}, {
+		Sequence: 1, Kind: "answer", Actor: protocol.WorkUpdateActorOperator,
+		Message: strings.Repeat("a", protocol.MaxAnswerBytes), AcceptedAtMillis: 2, Trusted: true,
 	}}
 	prompt, err := assembleContinuationPrompt(state, history)
 	if err != nil || !protocol.AgentUpdatePromptFits(title, repository, prompt) {
-		t.Fatalf("first outcome invalidated continuation reserve: prompt bytes %d, error %v", len(prompt), err)
+		t.Fatalf("first question and answer invalidated continuation reserve: prompt bytes %d, error %v", len(prompt), err)
 	}
-	if !strings.Contains(prompt, "Stored updates: 1") ||
+	if !strings.Contains(prompt, "Stored history records: 2") ||
 		!strings.Contains(prompt, "omitted SHA-256:") {
 		t.Fatalf("continuation prompt missing first-outcome history evidence: %s", prompt[len(prompt)-500:])
 	}

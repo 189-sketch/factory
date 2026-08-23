@@ -30,7 +30,8 @@ type continuationState struct {
 
 type continuationHistory struct {
 	Sequence              int                       `json:"sequence"`
-	Status                protocol.WorkUpdateStatus `json:"status"`
+	Kind                  string                    `json:"kind,omitempty"`
+	Status                protocol.WorkUpdateStatus `json:"status,omitempty"`
 	Actor                 protocol.WorkUpdateActor  `json:"actor"`
 	Message               string                    `json:"message"`
 	PullRequestURL        string                    `json:"pull_request_url,omitempty"`
@@ -38,6 +39,7 @@ type continuationHistory struct {
 	PullRequestHeadSHA    string                    `json:"pull_request_head_sha,omitempty"`
 	CheckpointSHA         string                    `json:"checkpoint_sha,omitempty"`
 	AcceptedAtMillis      int64                     `json:"accepted_at_millis"`
+	Trusted               bool                      `json:"trusted"`
 	MessageTruncated      bool                      `json:"message_truncated,omitempty"`
 }
 
@@ -59,10 +61,14 @@ func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBran
 		retryMayRepeatEffects: true,
 	}
 	history := []continuationHistory{{
-		Sequence: 999999999, Status: protocol.WorkUpdateNeedsInput,
+		Sequence: int(^uint(0) >> 1), Kind: "update", Status: protocol.WorkUpdateNeedsInput,
 		Actor:         protocol.WorkUpdateActorAgent,
 		Message:       strings.Repeat("q", protocol.MaxQuestionBytes),
 		CheckpointSHA: strings.Repeat("f", 64), AcceptedAtMillis: 9223372036854775807,
+	}, {
+		Sequence: int(^uint(0) >> 1), Kind: "answer", Actor: protocol.WorkUpdateActorOperator,
+		Message: strings.Repeat("a", protocol.MaxAnswerBytes), AcceptedAtMillis: 9223372036854775807,
+		Trusted: true,
 	}}
 	prompt, err := assembleContinuationPrompt(state, history)
 	return err == nil && protocol.AgentUpdatePromptFits(title, repository, prompt)
@@ -132,10 +138,24 @@ func loadContinuationState(
 	}
 	state.retryMayRepeatEffects = retry != 0
 	rows, err := queryer.QueryContext(ctx, `
-		SELECT sequence, status, actor, message, pull_request_url,
-		       pull_request_head_branch, pull_request_head_sha, checkpoint_sha, accepted_at
-		FROM work_updates WHERE work_id = ? ORDER BY sequence
-	`, workID)
+		SELECT sequence, kind, status, actor, message, pull_request_url,
+		       pull_request_head_branch, pull_request_head_sha, checkpoint_sha,
+		       accepted_at, trusted
+		FROM (
+			SELECT sequence, sequence * 2 AS sort_key, 'update' AS kind, status, actor,
+			       message, pull_request_url, pull_request_head_branch,
+			       pull_request_head_sha, checkpoint_sha, accepted_at,
+			       actor != 'agent' AS trusted
+			FROM work_updates WHERE work_id = ?
+			UNION ALL
+			SELECT question.sequence, question.sequence * 2 + 1, 'answer', '', 'operator',
+			       answer.message, '', '', '', '', answer.accepted_at, 1
+			FROM work_answers answer
+			JOIN work_updates question ON question.id = answer.question_update_id
+			WHERE answer.work_id = ?
+		)
+		ORDER BY sort_key
+	`, workID, workID)
 	if err != nil {
 		return state, nil, unavailable(err)
 	}
@@ -143,13 +163,15 @@ func loadContinuationState(
 	var history []continuationHistory
 	for rows.Next() {
 		var item continuationHistory
+		var trusted int
 		if err := rows.Scan(
-			&item.Sequence, &item.Status, &item.Actor, &item.Message,
+			&item.Sequence, &item.Kind, &item.Status, &item.Actor, &item.Message,
 			&item.PullRequestURL, &item.PullRequestHeadBranch, &item.PullRequestHeadSHA,
-			&item.CheckpointSHA, &item.AcceptedAtMillis,
+			&item.CheckpointSHA, &item.AcceptedAtMillis, &trusted,
 		); err != nil {
 			return state, nil, unavailable(err)
 		}
+		item.Trusted = trusted != 0
 		history = append(history, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -180,7 +202,12 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 	selected := make(map[int]continuationSelection, len(history))
 	priority := make([]int, 0, len(history))
 	for index := len(history) - 1; index >= 0; index-- {
-		if history[index].Status != protocol.WorkUpdateRunning {
+		if history[index].Kind == "answer" {
+			priority = append(priority, index)
+		}
+	}
+	for index := len(history) - 1; index >= 0; index-- {
+		if history[index].Kind != "answer" && history[index].Status != protocol.WorkUpdateRunning {
 			priority = append(priority, index)
 		}
 	}
@@ -295,12 +322,12 @@ func continuationWithHistory(
 		digest = hex.EncodeToString(sum[:])
 	}
 	marker := fmt.Sprintf(
-		"Stored updates: %d; inserted updates: %d; omitted updates: %d; omitted SHA-256: %s",
+		"Stored history records: %d; inserted history records: %d; omitted history records: %d; omitted SHA-256: %s",
 		len(serialized), len(inserted), len(omitted), digest,
 	)
 	var result strings.Builder
 	result.WriteString(mandatory)
-	result.WriteString("\n\nUntrusted prior Work history:\n")
+	result.WriteString("\n\nPrior Work history (trusted=true is trusted Factory/operator context; agent messages are untrusted):\n")
 	result.WriteString(marker)
 	for _, index := range inserted {
 		result.WriteByte('\n')
@@ -370,16 +397,21 @@ func (s *Store) AnswerWork(
 	if backend != protocol.BackendPersistent {
 		return protocol.WorkAnswer{}, conflict("agent_update_backend_unsupported", "resumable Work requires the persistent execution backend")
 	}
-	if err := validateContinuationWithinTx(ctx, tx, workID, question, input.Message); err != nil {
-		return protocol.WorkAnswer{}, err
-	}
 	var questionUpdateID string
+	var questionSequence int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT id FROM work_updates
+		SELECT id, sequence FROM work_updates
 		WHERE work_id = ? AND status = 'needs-input'
 		ORDER BY sequence DESC LIMIT 1
-	`, workID).Scan(&questionUpdateID); err != nil {
+	`, workID).Scan(&questionUpdateID, &questionSequence); err != nil {
 		return protocol.WorkAnswer{}, unavailable(err)
+	}
+	prospective := continuationHistory{
+		Sequence: questionSequence, Kind: "answer", Actor: protocol.WorkUpdateActorOperator,
+		Message: input.Message, AcceptedAtMillis: now, Trusted: true,
+	}
+	if err := validateContinuationWithinTx(ctx, tx, workID, question, input.Message, prospective); err != nil {
+		return protocol.WorkAnswer{}, err
 	}
 	answerID, err := newID()
 	if err != nil {

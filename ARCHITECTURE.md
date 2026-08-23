@@ -139,9 +139,9 @@ Trusted answers are stored separately from agent updates and linked to the
 question update they answer. The current answer is also projected on Work.
 Continuation prompt assembly keeps the frozen Procedure and original context,
 question, answer, checkpoint, branch, and pull-request evidence. It fills the
-remaining 72 KiB prompt budget with outcome-first recent history. Omitted
-history is counted and identified by a SHA-256 digest without deleting stored
-updates.
+remaining 72 KiB prompt budget with trusted prior answers, then recent outcomes
+and progress. Omitted history is counted and identified by a SHA-256 digest
+without deleting stored records.
 
 A Session starts blocked when no eligible Worker can currently accept it. A
 later claim can route it when a healthy Worker advertises the runtime and
