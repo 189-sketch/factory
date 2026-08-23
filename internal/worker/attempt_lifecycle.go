@@ -180,7 +180,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 		}
 		if reason := handle.stopReasonAt(time.Now()); reason != "" {
 			sender.closeAndWait(5 * time.Second)
-			err := stoppedAttemptError(handle, errors.New("Attempt stopped before the next Pipeline stage"))
+			err := stoppedAttemptError(handle, errors.New("attempt stopped before the next Pipeline stage"))
 			manager.finishWithWorktree(claim, token, handle, repository, value,
 				terminalForStop(handle), "", err.Error())
 			return
