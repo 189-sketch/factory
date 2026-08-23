@@ -52,7 +52,7 @@ func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBran
 	state := continuationState{
 		title: title, repository: repository, resolvedPrompt: resolvedPrompt,
 		publishBranch:         publishBranch,
-		question:              strings.Repeat("q", protocol.MaxQuestionBytes),
+		question:              strings.Repeat("\u0085", protocol.MaxQuestionBytes/2),
 		answer:                strings.Repeat("a", protocol.MaxAnswerBytes),
 		checkpointSHA:         strings.Repeat("f", 64),
 		pendingResumeSHA:      strings.Repeat("f", 64),
@@ -198,7 +198,8 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 		"Known pull request head: " + emptyRecoveryValue(state.pullRequestHeadBranch) + " @ " +
 		emptyRecoveryValue(state.pullRequestHeadSHA) + "\n" +
 		"Retry may repeat external effects: " + fmt.Sprintf("%t", state.retryMayRepeatEffects) + "\n\n" +
-		"Untrusted current agent question:\n" + emptyRecoveryValue(state.question) + "\n\n" +
+		"Untrusted current agent question (escaped single-line UTF-8):\n" +
+		escapeUntrustedPromptText(emptyRecoveryValue(state.question)) + "\n\n" +
 		"Trusted operator answer:\n" + emptyRecoveryValue(state.answer)
 
 	serialized := make([]string, len(history))
@@ -353,6 +354,21 @@ func emptyRecoveryValue(value string) string {
 		return "(none)"
 	}
 	return value
+}
+
+func escapeUntrustedPromptText(value string) string {
+	value = strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"\r", "\\r",
+		"\n", "\\n",
+		"\v", "\\v",
+		"\f", "\\f",
+		"\u0085", "\\u0085",
+		"\u2028", "\\u2028",
+		"\u2029", "\\u2029",
+	).Replace(value)
+	return "\"" + value + "\""
 }
 
 func (s *Store) AnswerWork(

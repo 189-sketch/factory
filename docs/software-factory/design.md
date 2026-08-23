@@ -894,7 +894,9 @@ the maximum 8 KiB question and 8 KiB answer. Before accepting `needs-input` or
 an answer, Factory also proves the actual mandatory continuation sections fit;
 rejection leaves the current state unchanged. The continuation always includes
 the Procedure, original context, current question and answer, checkpoint and
-branch identity, PR metadata, and an omission marker. It fills remaining bytes
+branch identity, PR metadata, and an omission marker. The untrusted agent
+question is escaped onto one line so its content cannot create a trusted-looking
+Factory heading. The prompt fills remaining bytes
 with the newest prior records, prioritizing trusted operator answers, then
 Attempt outcomes, then progress, and displaying selected records
 chronologically. If history is omitted or one
