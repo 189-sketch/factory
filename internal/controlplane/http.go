@@ -360,12 +360,24 @@ func (a *API) claim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) listWorkers(w http.ResponseWriter, r *http.Request) {
-	workers, err := a.store.Workers(r.Context())
-	if err != nil {
-		writeError(w, err)
-		return
+	switch r.URL.Query().Get("view") {
+	case "":
+		workers, err := a.store.Workers(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"workers": workers})
+	case "summary":
+		page, err := a.store.WorkerSummaries(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+	default:
+		writeError(w, invalid("invalid_view", "view must be summary when provided"))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workers": workers})
 }
 
 func (a *API) getWorker(w http.ResponseWriter, r *http.Request) {

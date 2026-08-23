@@ -12,8 +12,11 @@ or scheduling that Task creates a Run with one Session per repository. A
 persistent Worker claims each Session, prepares an isolated Git worktree, runs
 Pi, Codex, or Claude Code, streams events, and reports one terminal result.
 
-The implementation has three main parts:
+The implementation has four main parts:
 
+- `factory` is the operator CLI. Long-running commands replace themselves with
+  the compatible server or Worker executable, while finite commands read the
+  loopback HTTP API and never open SQLite or Worker directories.
 - `factory-server` owns durable state, scheduling, routing, the HTTP API, and
   the embedded browser UI.
 - `factory-worker` owns runtime health, repository caches, worktrees, agent
@@ -34,7 +37,7 @@ as the source of truth and preserves the persistent Worker path as the built-in
 ### System architecture
 
 ```text
-Operator browser
+Operator browser or `factory` CLI
       |
       | loopback HTTP and JSON
       v
@@ -62,15 +65,22 @@ child process and does not receive a control-plane operator credential.
 ### Dependency hierarchy
 
 ```text
+cmd/factory         -> internal/factorycli   -> internal/protocol
+cmd/factory-server  -> internal/controlplane -> internal/protocol
+                    -> web
+cmd/factory-worker  -> internal/worker       -> internal/protocol
 commands and browser -> HTTP API -> control-plane store -> SQLite
 factory-worker       -> typed protocol -> control-plane store
 factory-worker       -> runtime adapters -> agent child processes
 ```
 
-Product and Worker code depend on `internal/protocol`. Worker code does not
-depend on `internal/controlplane`. Only the control plane writes lifecycle
-state to SQLite. Work is user-facing lifecycle truth. Execution and Attempt
-remain process and lease truth.
+Entry points depend on their runtime package, and both long-running runtime
+packages share only protocol types. Product and Worker code depend on
+`internal/protocol`; Worker code must never import `internal/controlplane`.
+Commands and the browser use the HTTP API, and only the control plane writes
+lifecycle state to SQLite. Work is user-facing lifecycle truth. Execution and
+Attempt remain process and lease truth. Finite CLI commands cannot read
+control-plane or Worker state directly.
 
 ## Current product model
 
@@ -180,10 +190,25 @@ static repository paths remain readable through Worker configuration.
    context.
 10. Operator builds embed committed `web/dist` assets and do not require Node.js
     at runtime.
-11. Claim protocol version 3 gates every persistent Worker claim. Older Workers
+11. Finite `factory` commands accept only an explicit-port plain HTTP loopback
+    endpoint and read current state through bounded API routes.
+12. Claim protocol version 3 gates every persistent Worker claim. Older Workers
     receive `worker_upgrade_required`, including for process-exit Work.
 
 ## Components
+
+### Operator CLI
+
+`cmd/factory` delegates parsing and finite HTTP work to `internal/factorycli`.
+The `status`, `show`, and `workers` commands decode protocol resources and write
+either stable tabular output or one JSON value. They do not import SQLite or
+Worker packages.
+
+The `server start` and `worker start` commands replace the CLI process with the
+matching compatibility executable beside it or on `PATH`. An explicit config
+path is passed through the existing `FACTORY_SERVER_CONFIG` or
+`FACTORY_WORKER_CONFIG` environment contract. Process replacement preserves the
+existing role's signal and shutdown behavior.
 
 ### Control plane
 
@@ -350,6 +375,7 @@ admission path.
 
 | Area | Primary files |
 | --- | --- |
+| Operator CLI | `cmd/factory/main.go`, `internal/factorycli/command.go`, `internal/factorycli/client.go` |
 | Server startup and config | `cmd/factory-server/main.go`, `cmd/factory-server/config.go` |
 | HTTP routes and auth | `internal/controlplane/http.go`, `internal/controlplane/worker_auth.go` |
 | Task, Run, and Work model | `internal/controlplane/tasks.go`, `internal/controlplane/work.go`, `internal/protocol/tasks.go` |
@@ -365,9 +391,18 @@ admission path.
 
 ## Verification
 
-`internal/controlplane/work_lifecycle_test.go` proves outcome-contract freezing,
-backend compatibility, Work states, bounded update history, replacement guards,
-ordered targets, and legacy prompt limits. `tasks_migration_test.go` opens
-populated historical databases and proves identity, lifecycle, scheduled
-process-exit completion, and foreign-key preservation. Repository-wide proof is
-provided by `just format-check`, `just vet`, `just boundary`, and `just test`.
+- `internal/controlplane/work_lifecycle_test.go` proves outcome-contract
+  freezing, backend compatibility, Work states, bounded update history,
+  replacement guards, ordered targets, and legacy prompt limits.
+- `internal/controlplane/tasks_migration_test.go` opens populated historical
+  databases and proves identity, lifecycle, scheduled process-exit completion,
+  and foreign-key preservation.
+- `go test ./cmd/... ./internal/...` covers entry points, CLI routing and output,
+  API contracts, storage, Worker lifecycle, and release construction.
+- `just format-check`, `just vet`, `just boundary`, and `just test` provide the
+  repository-wide formatting, static-analysis, dependency, and test proof.
+- `just test-tooling` proves the Node-free build produces the complete operator
+  binary set.
+- `just test-launcher` proves server and Worker readiness and signal handling.
+- `just test-release` proves archive contents, metadata, reproducibility, and
+  native execution.

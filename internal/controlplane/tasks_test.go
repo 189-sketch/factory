@@ -98,6 +98,10 @@ func TestRunPagePreservesRepositorySummaryWithoutPrompt(t *testing.T) {
 	if len(summary.Repositories) != 1 || summary.Repositories[0].RemoteIdentity != "github.com/owainlewis/factory" {
 		t.Fatalf("Run page repository summary = %#v", summary.Repositories)
 	}
+	if page.Runs[0].OutcomeContract != protocol.OutcomeProcessExit || len(page.Runs[0].Targets) != 1 ||
+		page.Runs[0].Targets[0].RepositoryID != worker.Repositories[0].ID {
+		t.Fatalf("Run page frozen Work fields = %#v", page.Runs[0])
+	}
 }
 
 func TestTaskRunReplayReturnsCommittedRunAfterTaskChanges(t *testing.T) {

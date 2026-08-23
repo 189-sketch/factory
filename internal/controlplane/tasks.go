@@ -1093,20 +1093,183 @@ func (s *Store) RunPage(ctx context.Context, limit int, cursor string) (protocol
 	}
 	page := protocol.RunPage{Runs: make([]protocol.Run, 0, len(keys))}
 	for _, key := range keys {
-		detail, err := s.Run(ctx, key.id)
+		run, err := s.runListEntry(ctx, key.id)
 		if err != nil {
 			return protocol.RunPage{}, err
 		}
-		detail.Run.Task.Prompt = ""
-		detail.Run.Task.TimeoutSeconds = 0
-		detail.Run.Task.ConcurrencyLimit = 0
-		page.Runs = append(page.Runs, detail.Run)
+		page.Runs = append(page.Runs, run)
 	}
 	if hasMore {
 		last := keys[len(keys)-1]
 		page.NextCursor = encodeRunCursor(last.admitted, last.id)
 	}
 	return page, nil
+}
+
+func (s *Store) RunSummaryPage(ctx context.Context, limit int, cursor string) (protocol.RunListPage, error) {
+	if limit == 0 {
+		limit = defaultTaskPageSize
+	}
+	if limit < 1 || limit > maxTaskPageSize {
+		return protocol.RunListPage{}, invalid("invalid_limit", "limit must be between 1 and 200")
+	}
+	admitted, cursorID, err := decodeRunCursor(cursor)
+	if err != nil {
+		return protocol.RunListPage{}, err
+	}
+	query := `
+		SELECT id, json_extract(task_snapshot, '$.name'), source, admitted_at, updated_at, terminal_at
+		FROM runs WHERE 1 = 1
+	`
+	args := make([]any, 0, 5)
+	if admitted != 0 {
+		query += ` AND (admitted_at < ? OR (admitted_at = ? AND id < ?))`
+		args = append(args, admitted, admitted, cursorID)
+	}
+	query += ` ORDER BY admitted_at DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return protocol.RunListPage{}, unavailable(err)
+	}
+	page := protocol.RunListPage{Runs: make([]protocol.RunListSummary, 0, limit)}
+	var admittedMillis []int64
+	for rows.Next() {
+		var summary protocol.RunListSummary
+		var admittedAt, updatedAt int64
+		var terminalAt sql.NullInt64
+		if err := rows.Scan(&summary.ID, &summary.TaskName, &summary.Source, &admittedAt, &updatedAt, &terminalAt); err != nil {
+			rows.Close()
+			return protocol.RunListPage{}, unavailable(err)
+		}
+		summary.AdmittedAt, summary.UpdatedAt = fromMillis(admittedAt), fromMillis(updatedAt)
+		if terminalAt.Valid {
+			value := fromMillis(terminalAt.Int64)
+			summary.TerminalAt = &value
+		}
+		page.Runs = append(page.Runs, summary)
+		admittedMillis = append(admittedMillis, admittedAt)
+	}
+	if err := rows.Close(); err != nil {
+		return protocol.RunListPage{}, unavailable(err)
+	}
+	hasMore := len(page.Runs) > limit
+	if hasMore {
+		page.Runs = page.Runs[:limit]
+		admittedMillis = admittedMillis[:limit]
+	}
+	for index := range page.Runs {
+		if err := s.applyRunListSummary(ctx, &page.Runs[index]); err != nil {
+			return protocol.RunListPage{}, err
+		}
+	}
+	if hasMore {
+		last := page.Runs[len(page.Runs)-1]
+		page.NextCursor = encodeRunCursor(admittedMillis[len(admittedMillis)-1], last.ID)
+	}
+	return page, nil
+}
+
+func (s *Store) applyRunListSummary(ctx context.Context, summary *protocol.RunListSummary) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT state, blocked_reason
+		FROM sessions WHERE run_id = ? ORDER BY target_position, id
+	`, summary.ID)
+	if err != nil {
+		return unavailable(err)
+	}
+	defer rows.Close()
+	sessions := make([]protocol.Session, 0)
+	for rows.Next() {
+		var session protocol.Session
+		var blockedReason sql.NullString
+		if err := rows.Scan(&session.State, &blockedReason); err != nil {
+			return unavailable(err)
+		}
+		session.BlockedReason = blockedReason.String
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return unavailable(err)
+	}
+	run := protocol.Run{TerminalAt: summary.TerminalAt}
+	applyRunAggregate(&run, sessions, s.now())
+	summary.State, summary.NeedsAttention = run.State, run.NeedsAttention
+	summary.SessionCount, summary.SucceededCount = run.SessionCount, run.SucceededCount
+	summary.ReadyCount, summary.NeedsInputCount = run.ReadyCount, run.NeedsInputCount
+	summary.NoChangeCount, summary.FailedCount = run.NoChangeCount, run.FailedCount
+	summary.CancelledCount, summary.ActiveCount = run.CancelledCount, run.ActiveCount
+	return nil
+}
+
+func (s *Store) runListEntry(ctx context.Context, id string) (protocol.Run, error) {
+	var run protocol.Run
+	var snapshot, executionSnapshot, targetsSnapshot []byte
+	var scheduledAt, terminalAt sql.NullInt64
+	var admittedAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, task_id, task_snapshot, execution_snapshot, outcome_contract,
+		       targets_snapshot, source, scheduled_at, admitted_at, updated_at, terminal_at
+		FROM runs WHERE id = ?
+	`, id).Scan(&run.ID, &run.TaskID, &snapshot, &executionSnapshot, &run.OutcomeContract,
+		&targetsSnapshot, &run.Source,
+		&scheduledAt, &admittedAt, &updatedAt, &terminalAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return run, ErrNotFound
+	}
+	if err != nil {
+		return run, unavailable(err)
+	}
+	if err := json.Unmarshal(snapshot, &run.Task); err != nil {
+		return run, unavailable(err)
+	}
+	if err := json.Unmarshal(executionSnapshot, &run.Execution); err != nil {
+		return run, unavailable(err)
+	}
+	if err := json.Unmarshal(targetsSnapshot, &run.Targets); err != nil {
+		return run, unavailable(err)
+	}
+	run.Task.Prompt, run.Task.TimeoutSeconds, run.Task.ConcurrencyLimit = "", 0, 0
+	run.AdmittedAt, run.UpdatedAt = fromMillis(admittedAt), fromMillis(updatedAt)
+	if scheduledAt.Valid {
+		value := fromMillis(scheduledAt.Int64)
+		run.ScheduledAt = &value
+	}
+	if terminalAt.Valid {
+		value := fromMillis(terminalAt.Int64)
+		run.TerminalAt = &value
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT repository_id, repository_identity, state, blocked_reason
+		FROM sessions WHERE run_id = ? ORDER BY target_position, id
+	`, id)
+	if err != nil {
+		return run, unavailable(err)
+	}
+	defer rows.Close()
+	var sessions []protocol.Session
+	seenRepositories := make(map[string]bool)
+	rebuildRepositories := len(run.Task.Repositories) == 0
+	for rows.Next() {
+		var session protocol.Session
+		var blockedReason sql.NullString
+		if err := rows.Scan(&session.RepositoryID, &session.RepositoryIdentity, &session.State, &blockedReason); err != nil {
+			return run, unavailable(err)
+		}
+		session.BlockedReason = blockedReason.String
+		sessions = append(sessions, session)
+		if rebuildRepositories && session.RepositoryID != "" && session.RepositoryIdentity != "" && !seenRepositories[session.RepositoryID] {
+			seenRepositories[session.RepositoryID] = true
+			run.Task.Repositories = append(run.Task.Repositories, protocol.TaskRepository{
+				ID: session.RepositoryID, RemoteIdentity: session.RepositoryIdentity,
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return run, unavailable(err)
+	}
+	applyRunAggregate(&run, sessions, s.now())
+	return run, nil
 }
 
 func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) {
@@ -1255,6 +1418,57 @@ func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) 
 	}
 	applyRunAggregate(&detail.Run, detail.Sessions, s.now())
 	return detail, nil
+}
+
+func (s *Store) RunSummary(ctx context.Context, id string) (protocol.RunSummary, error) {
+	var summary protocol.RunSummary
+	var admittedAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT run.id, json_extract(run.task_snapshot, '$.name'), run.source,
+		       run.admitted_at, run.updated_at
+		FROM runs run WHERE run.id = ?
+	`, id).Scan(&summary.ID, &summary.TaskName, &summary.Source, &admittedAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return summary, ErrNotFound
+	}
+	if err != nil {
+		return summary, unavailable(err)
+	}
+	summary.AdmittedAt, summary.UpdatedAt = fromMillis(admittedAt), fromMillis(updatedAt)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session.id, session.repository_identity, session.state, session.blocked_reason,
+		       session.assigned_worker_id, session.result, session.failure_reason,
+		       (SELECT COUNT(*) FROM attempts attempt
+		        JOIN executions execution ON execution.id = attempt.execution_id
+		        WHERE execution.session_id = session.id)
+		FROM sessions session
+		WHERE session.run_id = ?
+		ORDER BY session.target_position, session.id
+	`, id)
+	if err != nil {
+		return summary, unavailable(err)
+	}
+	defer rows.Close()
+	sessions := make([]protocol.Session, 0)
+	for rows.Next() {
+		var session protocol.RunSessionSummary
+		var blockedReason, workerID, result, failure sql.NullString
+		if err := rows.Scan(&session.ID, &session.RepositoryIdentity, &session.State,
+			&blockedReason, &workerID, &result, &failure, &session.AttemptCount); err != nil {
+			return summary, unavailable(err)
+		}
+		session.BlockedReason, session.AssignedWorkerID = blockedReason.String, workerID.String
+		session.Result, session.FailureReason = result.String, failure.String
+		summary.Sessions = append(summary.Sessions, session)
+		sessions = append(sessions, protocol.Session{State: session.State, BlockedReason: session.BlockedReason})
+	}
+	if err := rows.Err(); err != nil {
+		return summary, unavailable(err)
+	}
+	run := protocol.Run{}
+	applyRunAggregate(&run, sessions, s.now())
+	summary.State = run.State
+	return summary, nil
 }
 
 func applyRunAggregate(run *protocol.Run, sessions []protocol.Session, now time.Time) {

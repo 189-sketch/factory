@@ -133,21 +133,45 @@ func (a *API) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	page, err := a.store.RunPage(r.Context(), limit, r.URL.Query().Get("cursor"))
-	if err != nil {
-		writeError(w, err)
-		return
+	switch r.URL.Query().Get("view") {
+	case "":
+		page, err := a.store.RunPage(r.Context(), limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+	case "summary":
+		page, err := a.store.RunSummaryPage(r.Context(), limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+	default:
+		writeError(w, invalid("invalid_view", "view must be summary when provided"))
 	}
-	writeJSON(w, http.StatusOK, page)
 }
 
 func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
-	detail, err := a.store.Run(r.Context(), r.PathValue("run_id"))
-	if err != nil {
-		writeError(w, err)
-		return
+	switch r.URL.Query().Get("view") {
+	case "":
+		detail, err := a.store.Run(r.Context(), r.PathValue("run_id"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, detail)
+	case "summary":
+		summary, err := a.store.RunSummary(r.Context(), r.PathValue("run_id"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summary)
+	default:
+		writeError(w, invalid("invalid_view", "view must be summary when provided"))
 	}
-	writeJSON(w, http.StatusOK, detail)
 }
 
 func (a *API) cancelRun(w http.ResponseWriter, r *http.Request) {
