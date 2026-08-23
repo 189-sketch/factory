@@ -874,7 +874,9 @@ not already finalized. Cancelling a Run applies the appropriate path to each
 nonterminal Work target without changing terminal siblings.
 
 An operator answer to `needs-input` appends trusted context and requeues the
-same Work while retaining its authoritative `pending_resume_sha`.
+same Work while retaining its authoritative `pending_resume_sha`. If another
+target has taken the released frozen Run concurrency slot, the answered Work
+remains blocked until normal fair materialization can admit it.
 The next Worker claim creates a new Attempt. The agent receives the original
 frozen Procedure, original context, prior question, answer, bounded newest
 updates, known branch, checkpoint SHA, and PR metadata. Worktree preparation starts from that

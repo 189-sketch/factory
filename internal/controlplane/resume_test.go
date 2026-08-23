@@ -224,6 +224,87 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	}
 }
 
+func TestAnswerWorkWaitsForProcedureConcurrencySlot(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	api := createManagedRepositoryForProcedure(t, store, "github.com/acme/api")
+	web := createManagedRepositoryForProcedure(t, store, "github.com/acme/web")
+	worker := registerTestWorker(t, store, workerA, 10,
+		protocol.RepositoryRegistration{Key: "api", RemoteIdentity: api.RemoteIdentity},
+		protocol.RepositoryRegistration{Key: "web", RemoteIdentity: web.RemoteIdentity},
+	)
+	procedure, err := store.CreateTask(ctx, protocol.SaveTaskRequest{
+		Name: "Concurrent resume", Prompt: "Update every repository.", Runtime: protocol.RuntimeCodex,
+		ConcurrencyLimit: 1, OutcomeContract: protocol.OutcomeAgentUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := store.AdmitProcedureRun(ctx, protocol.ProcedureRunRequest{
+		RequestKey: "concurrent-resume", Procedure: procedure.Name,
+		Repositories: []string{api.RemoteIdentity, web.RemoteIdentity},
+	})
+	if err != nil || len(admission.Run.Sessions) != 2 {
+		t.Fatalf("Procedure admission = %#v, error %v", admission, err)
+	}
+	pausedID := admission.Run.Sessions[0].ID
+	first, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{
+		RequestID: "concurrent-resume-first", LeaseToken: tokenA,
+	})
+	if err != nil || first == nil || first.Session.ID != pausedID {
+		t.Fatalf("first claim = %#v, error %v", first, err)
+	}
+	if _, err := store.StartAttempt(ctx, first.Attempt.ID, protocol.StartAttemptRequest{LeaseToken: tokenA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendAgentUpdate(ctx, first.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: tokenA, RequestID: "66000000-0000-4000-8000-000000000001",
+		Status: protocol.WorkUpdateNeedsInput, Message: "Which compatibility level?",
+		CheckpointSHA: testCheckpointSHA, CheckpointPublished: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(ctx, first.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	secondToken := strings.Repeat("c", 64)
+	second, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{
+		RequestID: "concurrent-resume-second", LeaseToken: secondToken,
+	})
+	if err != nil || second == nil || second.Session.ID == pausedID {
+		t.Fatalf("second claim = %#v, error %v", second, err)
+	}
+	if _, err := store.StartAttempt(ctx, second.Attempt.ID, protocol.StartAttemptRequest{LeaseToken: secondToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AnswerWork(ctx, pausedID, protocol.WorkAnswerRequest{
+		RequestID: "66000000-0000-4000-8000-000000000002", Message: "Preserve compatibility.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := store.Work(ctx, pausedID)
+	if err != nil || paused.State != protocol.SessionBlocked ||
+		paused.BlockedReason != taskConcurrencyBlockedReason || paused.AssignedWorkerID != "" {
+		t.Fatalf("answered Work bypassed concurrency = %#v, error %v", paused, err)
+	}
+
+	if _, err := store.CompleteAttempt(ctx, second.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: secondToken, State: "failed", Error: "test slot release",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{
+		RequestID: "concurrent-resume-third", LeaseToken: strings.Repeat("d", 64),
+	})
+	if err != nil || resumed == nil || resumed.Session.ID != pausedID ||
+		resumed.Session.PendingResumeSHA != testCheckpointSHA {
+		t.Fatalf("resumed claim after slot release = %#v, error %v", resumed, err)
+	}
+}
+
 func TestContinuationPreservesEveryTrustedAnswerAcrossQuestionRounds(t *testing.T) {
 	store, worker, _, work := needsInputWork(t)
 	const firstAnswer = "Keep the public behavior backward compatible."

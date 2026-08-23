@@ -441,9 +441,22 @@ func (s *Store) AnswerWork(
 		return protocol.WorkAnswer{}, unavailable(err)
 	}
 
-	assignedWorkerID, blockedReason, err := s.resumeRoute(ctx, tx, repositoryID, identity, runtime, now)
-	if err != nil {
-		return protocol.WorkAnswer{}, err
+	var concurrencySlotAvailable int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT (
+			SELECT COUNT(*) FROM sessions active
+			WHERE active.run_id = run.id AND active.state IN ('queued', 'preparing', 'running')
+		) < json_extract(run.task_snapshot, '$.concurrency_limit')
+		FROM runs run WHERE run.id = ?
+	`, runID).Scan(&concurrencySlotAvailable); err != nil {
+		return protocol.WorkAnswer{}, unavailable(err)
+	}
+	assignedWorkerID, blockedReason := "", taskConcurrencyBlockedReason
+	if concurrencySlotAvailable != 0 {
+		assignedWorkerID, blockedReason, err = s.resumeRoute(ctx, tx, repositoryID, identity, runtime, now)
+		if err != nil {
+			return protocol.WorkAnswer{}, err
+		}
 	}
 	if assignedWorkerID != "" {
 		if err := queueExistingExecution(ctx, tx, workID, assignedWorkerID, runtime, now); err != nil {

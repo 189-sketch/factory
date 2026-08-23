@@ -466,9 +466,10 @@ security headers. Node.js is needed only when UI source changes.
    pending resume SHA. The Attempt succeeds, Work enters `needs-input`, and no
    process or lease remains alive.
 6. An operator answer stores bounded trusted context and requeues the same
-   Work. The next claim contains a bounded continuation prompt that labels the
-   pending and historical checkpoint SHAs separately, and prepares from the
-   pending SHA.
+   Work when the frozen Run concurrency limit has a slot; otherwise it remains
+   blocked for the normal fair materializer. The next claim contains a bounded
+   continuation prompt that labels the pending and historical checkpoint SHAs
+   separately, and prepares from the pending SHA.
 7. The server first validates the prepared commit while moving the Attempt to
    running. The supervisor then reports that the runtime child started, and a
    second leased acknowledgement clears the pending SHA for that exact commit.
