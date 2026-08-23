@@ -886,8 +886,9 @@ an answer, Factory also proves the actual mandatory continuation sections fit;
 rejection leaves the current state unchanged. The continuation always includes
 the Procedure, original context, current question and answer, checkpoint and
 branch identity, PR metadata, and an omission marker. It fills remaining bytes
-with the newest prior updates, prioritizing Attempt outcomes over progress and
-displaying the selected records chronologically. If history is omitted or one
+with the newest prior records, prioritizing trusted operator answers, then
+Attempt outcomes, then progress, and displaying selected records
+chronologically. If history is omitted or one
 message must be UTF-8-boundary truncated, the marker includes stored and
 inserted counts and a SHA-256 digest of the complete omitted serialized history.
 All full updates remain stored and visible outside the prompt.

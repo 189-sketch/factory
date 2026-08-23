@@ -51,6 +51,15 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 		afterAnswer.Answer != answer.Message {
 		t.Fatalf("answered Work = %#v", afterAnswer)
 	}
+	var continuationRetryCount int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT retry_count FROM executions WHERE session_id = ?
+	`, work.ID).Scan(&continuationRetryCount); err != nil {
+		t.Fatal(err)
+	}
+	if continuationRetryCount != 0 {
+		t.Fatalf("answer continuation retry_count = %d, want 0", continuationRetryCount)
+	}
 
 	claim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
 		RequestID: "answer-continuation-claim", LeaseToken: resumeToken,
@@ -62,7 +71,10 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 		!strings.Contains(claim.Session.Prompt, "Which behavior should be preserved?") ||
 		!strings.Contains(claim.Session.Prompt, answer.Message) ||
 		!strings.Contains(claim.Session.Prompt, "Stored history records: 2") ||
-		!protocol.AgentUpdatePromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt) {
+		!protocol.AgentUpdatePromptFits(
+			claim.Session.TaskName, claim.Repository.RemoteIdentity,
+			claim.Session.Target.PublishBranch, claim.Session.Prompt,
+		) {
 		t.Fatalf("continuation claim = %#v", claim.Session)
 	}
 	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
@@ -101,6 +113,15 @@ func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T
 	}
 	if _, err := store.RetrySession(context.Background(), run.Run.ID, work.ID); err != nil {
 		t.Fatal(err)
+	}
+	var explicitRetryCount int
+	if err := store.db.QueryRowContext(context.Background(), `
+		SELECT retry_count FROM executions WHERE session_id = ?
+	`, work.ID).Scan(&explicitRetryCount); err != nil {
+		t.Fatal(err)
+	}
+	if explicitRetryCount != 1 {
+		t.Fatalf("explicit retry_count = %d, want 1", explicitRetryCount)
 	}
 	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
 		RequestID: "post-continuation-retry-claim", LeaseToken: strings.Repeat("c", 64),
@@ -182,7 +203,8 @@ func TestContinuationPreservesEveryTrustedAnswerAcrossQuestionRounds(t *testing.
 	prompt := finalClaim.Session.Prompt
 	header := strings.Index(prompt, "Prior Work history")
 	if header < 0 || !protocol.AgentUpdatePromptFits(
-		finalClaim.Session.TaskName, finalClaim.Repository.RemoteIdentity, prompt,
+		finalClaim.Session.TaskName, finalClaim.Repository.RemoteIdentity,
+		finalClaim.Session.Target.PublishBranch, prompt,
 	) {
 		t.Fatalf("final continuation prompt is missing bounded history: %q", prompt)
 	}
@@ -259,6 +281,104 @@ func TestFailedReadyPostflightRetainsTrustedPRRecoveryEvidence(t *testing.T) {
 	if err != nil || retryClaim == nil || retryClaim.Session.PullRequestURL != pullRequestURL ||
 		retryClaim.Session.PullRequestHeadSHA != testCheckpointSHA {
 		t.Fatalf("PR recovery claim = %#v, error %v", retryClaim, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), retryClaim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: resumeToken, StartedFromSHA: testCheckpointSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendAgentUpdate(context.Background(), retryClaim.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: resumeToken, RequestID: "63000000-0000-4000-8000-000000000002",
+		Status: protocol.WorkUpdateFailed, Message: "Implementation is blocked.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), retryClaim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: resumeToken, State: "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failedAgain, err := store.Work(context.Background(), failed.ID)
+	if err != nil || failedAgain.PullRequestURL != pullRequestURL ||
+		failedAgain.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch ||
+		failedAgain.PullRequestHeadSHA != testCheckpointSHA {
+		t.Fatalf("agent failure erased trusted PR recovery = %#v, error %v", failedAgain, err)
+	}
+	if _, err := store.RetrySession(context.Background(), run.Run.ID, failedAgain.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondRetryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "pr-recovery-second-retry", LeaseToken: strings.Repeat("c", 64),
+	})
+	if err != nil || secondRetryClaim == nil || secondRetryClaim.Session.PullRequestURL != pullRequestURL ||
+		secondRetryClaim.Session.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch ||
+		secondRetryClaim.Session.PullRequestHeadSHA != testCheckpointSHA {
+		t.Fatalf("second PR recovery claim = %#v, error %v", secondRetryClaim, err)
+	}
+}
+
+func TestCancelledReadyAttemptRetainsTrustedPRRecoveryEvidence(t *testing.T) {
+	store := newTestStore(t)
+	worker := registerTestWorker(t, store, workerA, 10, protocol.RepositoryRegistration{
+		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
+	})
+	task, err := store.CreateTask(context.Background(), protocol.SaveTaskRequest{
+		Name: "Cancelled PR recovery", Prompt: "Open a pull request.", Runtime: protocol.RuntimeCodex,
+		RepositoryIDs: []string{worker.Repositories[0].ID}, OutcomeContract: protocol.OutcomeAgentUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := store.RunTask(context.Background(), task.ID, protocol.RunTaskRequest{
+		RequestKey: "cancelled-pr-recovery",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "cancelled-pr-recovery-claim", LeaseToken: tokenA,
+	})
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, error %v", claim, err)
+	}
+	if _, err := store.StartAttempt(context.Background(), claim.Attempt.ID, protocol.StartAttemptRequest{
+		LeaseToken: tokenA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const pullRequestURL = "https://github.com/owainlewis/factory/pull/343"
+	if _, err := store.AppendAgentUpdate(context.Background(), claim.Attempt.ID, protocol.AttemptUpdateRequest{
+		LeaseToken: tokenA, RequestID: "63100000-0000-4000-8000-000000000001",
+		Status: protocol.WorkUpdateReady, Message: "Ready.", PullRequestURL: pullRequestURL,
+		PullRequestHeadBranch: run.Sessions[0].Target.PublishBranch,
+		PullRequestHeadSHA:    testCheckpointSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CancelSession(context.Background(), run.Run.ID, run.Sessions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteAttempt(context.Background(), claim.Attempt.ID, protocol.CompleteAttemptRequest{
+		LeaseToken: tokenA, State: "succeeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, err := store.Work(context.Background(), run.Sessions[0].ID)
+	if err != nil || cancelled.State != protocol.WorkCancelled || cancelled.PullRequestURL != pullRequestURL ||
+		cancelled.PullRequestHeadSHA != testCheckpointSHA ||
+		cancelled.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch {
+		t.Fatalf("cancelled ready Work = %#v, error %v", cancelled, err)
+	}
+	if _, err := store.RetrySession(context.Background(), run.Run.ID, cancelled.ID); err != nil {
+		t.Fatal(err)
+	}
+	retryClaim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "cancelled-pr-recovery-retry", LeaseToken: resumeToken,
+	})
+	if err != nil || retryClaim == nil || retryClaim.Session.PullRequestURL != pullRequestURL ||
+		retryClaim.Session.PullRequestHeadSHA != testCheckpointSHA ||
+		retryClaim.Session.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch {
+		t.Fatalf("cancelled PR recovery claim = %#v, error %v", retryClaim, err)
 	}
 }
 
@@ -401,7 +521,7 @@ func TestContinuationPromptBoundsHistoryAndKeepsMandatoryRecoveryContext(t *test
 			t.Fatalf("continuation prompt missing %q", required)
 		}
 	}
-	if !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
+	if !protocol.AgentUpdatePromptFits(state.title, state.repository, state.publishBranch, prompt) {
 		t.Fatalf("continuation prompt exceeds %d bytes", protocol.MaxAgentPromptBytes)
 	}
 }
@@ -478,7 +598,9 @@ func TestContinuationOmissionDigestCoversTrustedAnswer(t *testing.T) {
 			break
 		}
 	}
-	if prompt == "" || !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
+	if prompt == "" || !protocol.AgentUpdatePromptFits(
+		state.title, state.repository, state.publishBranch, prompt,
+	) {
 		t.Fatal("bounded continuation never digested the complete omitted trusted answer")
 	}
 }
@@ -528,7 +650,7 @@ func TestAgentContinuationReserveIncludesFirstQuestionAndAnswer(t *testing.T) {
 		Message: strings.Repeat("a", protocol.MaxAnswerBytes), AcceptedAtMillis: 2, Trusted: true,
 	}}
 	prompt, err := assembleContinuationPrompt(state, history)
-	if err != nil || !protocol.AgentUpdatePromptFits(title, repository, prompt) {
+	if err != nil || !protocol.AgentUpdatePromptFits(title, repository, publishBranch, prompt) {
 		t.Fatalf("first question and answer invalidated continuation reserve: prompt bytes %d, error %v", len(prompt), err)
 	}
 	if !strings.Contains(prompt, "Stored history records: 2") ||

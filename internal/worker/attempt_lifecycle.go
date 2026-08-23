@@ -300,7 +300,8 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	promptFits := protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt)
 	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
 		promptFits = protocol.AgentUpdatePromptFits(
-			claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt,
+			claim.Session.TaskName, claim.Repository.RemoteIdentity,
+			claim.Session.Target.PublishBranch, claim.Session.Prompt,
 		)
 	}
 	if !promptFits {
@@ -870,6 +871,7 @@ func buildPrompt(claim protocol.Claim, value worktree) string {
 			claim.Repository.RemoteIdentity,
 			value.Branch,
 			value.BaseBranch,
+			claim.Session.Target.PublishBranch,
 			claim.Session.Prompt,
 		)
 	}

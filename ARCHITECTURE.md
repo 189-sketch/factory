@@ -431,7 +431,8 @@ security headers. Node.js is needed only when UI source changes.
 ### Agent outcome and question resume
 
 1. The agent calls its Attempt-scoped Unix-socket update endpoint. The Worker
-   verifies token and Work identity before any mutable Git or provider checks.
+   prompt names the exact immutable publish branch. The Worker verifies token
+   and Work identity before any mutable Git or provider checks.
 2. Progress is stored without changing Work ownership. `ready` requires
    matching repository, publish branch, local HEAD, remote ref, and pull-request
    head evidence.

@@ -666,15 +666,17 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 	failureReason := input.Error
 	var outcome protocol.WorkUpdate
 	hasOutcome := false
+	if lease.outcomeContract == protocol.OutcomeAgentUpdate {
+		outcome, hasOutcome, err = attemptOutcome(ctx, tx, attemptID)
+		if err != nil {
+			return protocol.Attempt{}, err
+		}
+	}
 	if lease.cancel {
 		input.State, input.Result, input.Error = "cancelled", "", ""
 		workState, failureReason = protocol.WorkCancelled, ""
 		terminalMessage = "Cancelled by operator."
 	} else if lease.outcomeContract == protocol.OutcomeAgentUpdate {
-		outcome, hasOutcome, err = attemptOutcome(ctx, tx, attemptID)
-		if err != nil {
-			return protocol.Attempt{}, err
-		}
 		if input.State == "succeeded" && !hasOutcome {
 			const missingOutcome = "Agent exited without reporting an outcome."
 			input.State, input.Result, input.Error = "failed", "", missingOutcome
@@ -729,8 +731,11 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 	} else if hasOutcome && input.State == "succeeded" {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET state = ?, terminal_at = ?, result = NULL, failure_reason = ?,
-			       terminal_message = ?, pull_request_url = ?, pull_request_head_branch = ?,
-			       pull_request_head_sha = ?, execution_owner = 'none'
+			       terminal_message = ?,
+			       pull_request_url = COALESCE(NULLIF(?, ''), pull_request_url),
+			       pull_request_head_branch = COALESCE(NULLIF(?, ''), pull_request_head_branch),
+			       pull_request_head_sha = COALESCE(NULLIF(?, ''), pull_request_head_sha),
+			       execution_owner = 'none'
 			WHERE id = (SELECT session_id FROM executions WHERE id = ?)
 			  AND state = 'running'
 		`, workState, now, nullString(failureReason), terminalMessage, outcome.PullRequestURL,

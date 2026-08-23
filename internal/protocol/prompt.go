@@ -47,14 +47,17 @@ func AgentPromptFits(title, repository, resolvedPrompt string) bool {
 	return len([]byte(FormatAgentPrompt(title, repository, maxBranch, maxBranch, resolvedPrompt))) <= MaxAgentPromptBytes
 }
 
-func FormatAgentUpdatePrompt(title, repository, workingBranch, targetBaseBranch, resolvedPrompt string) string {
+func FormatAgentUpdatePrompt(
+	title, repository, workingBranch, targetBaseBranch, publishBranch, resolvedPrompt string,
+) string {
 	return FormatAgentPrompt(title, repository, workingBranch, targetBaseBranch, resolvedPrompt) +
+		"\n\nFactory publish branch: " + publishBranch +
 		"\n\n" + AgentUpdatePromptContract
 }
 
-func AgentUpdatePromptFits(title, repository, resolvedPrompt string) bool {
+func AgentUpdatePromptFits(title, repository, publishBranch, resolvedPrompt string) bool {
 	maxBranch := strings.Repeat("x", MaxAgentBranchBytes)
 	return len([]byte(FormatAgentUpdatePrompt(
-		title, repository, maxBranch, maxBranch, resolvedPrompt,
+		title, repository, maxBranch, maxBranch, publishBranch, resolvedPrompt,
 	))) <= MaxAgentPromptBytes
 }

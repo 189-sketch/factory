@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestFormatAgentPromptPreservesSafetyAndBranchContract(t *testing.T) {
 	want := "You are running in a Factory managed Git worktree.\n" +
@@ -20,5 +23,27 @@ func TestFormatAgentPromptPreservesSafetyAndBranchContract(t *testing.T) {
 		"Keep the change focused.",
 	); got != want {
 		t.Fatalf("FormatAgentPrompt() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatAgentUpdatePromptNamesImmutablePublishBranch(t *testing.T) {
+	const publishBranch = "factory/work-1111111111111111"
+	prompt := FormatAgentUpdatePrompt(
+		"Fix the prompt",
+		"github.com/owainlewis/factory",
+		"factory/123456789abc-abcdef123456",
+		"main",
+		publishBranch,
+		"Keep the change focused.",
+	)
+	if !strings.Contains(prompt, "Working branch: factory/123456789abc-abcdef123456") ||
+		!strings.Contains(prompt, "Factory publish branch: "+publishBranch) ||
+		!strings.Contains(prompt, AgentUpdatePromptContract) {
+		t.Fatalf("agent-update prompt = %q", prompt)
+	}
+	if !AgentUpdatePromptFits(
+		"Fix the prompt", "github.com/owainlewis/factory", publishBranch, "Keep the change focused.",
+	) {
+		t.Fatal("bounded agent-update prompt rejected the exact publish branch")
 	}
 }

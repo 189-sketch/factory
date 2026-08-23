@@ -71,7 +71,7 @@ func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBran
 		Trusted: true,
 	}}
 	prompt, err := assembleContinuationPrompt(state, history)
-	return err == nil && protocol.AgentUpdatePromptFits(title, repository, prompt)
+	return err == nil && protocol.AgentUpdatePromptFits(title, repository, publishBranch, prompt)
 }
 
 func (s *Store) continuationPrompt(ctx context.Context, workID string) (string, error) {
@@ -99,7 +99,9 @@ func validateContinuationWithinTx(
 	state.question, state.answer = question, answer
 	history = append(history, prospective...)
 	prompt, err := assembleContinuationPrompt(state, history)
-	if err != nil || !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
+	if err != nil || !protocol.AgentUpdatePromptFits(
+		state.title, state.repository, state.publishBranch, prompt,
+	) {
 		return &ServiceError{
 			Code:    "continuation_prompt_too_large",
 			Message: "the mandatory recovery context cannot fit the 72 KiB agent prompt",
@@ -219,7 +221,7 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 	maxBranch := strings.Repeat("x", protocol.MaxAgentBranchBytes)
 	basePrompt := continuationWithHistory(mandatory, serialized, selected)
 	baseBytes := len([]byte(protocol.FormatAgentUpdatePrompt(
-		state.title, state.repository, maxBranch, maxBranch, basePrompt,
+		state.title, state.repository, maxBranch, maxBranch, state.publishBranch, basePrompt,
 	)))
 	if baseBytes > protocol.MaxAgentPromptBytes {
 		return "", &ServiceError{
@@ -255,13 +257,15 @@ func assembleContinuationPrompt(state continuationState, history []continuationH
 		remaining -= len([]byte(line)) + 1
 	}
 	prompt := continuationWithHistory(mandatory, serialized, selected)
-	for !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) && len(selectedOrder) != 0 {
+	for !protocol.AgentUpdatePromptFits(
+		state.title, state.repository, state.publishBranch, prompt,
+	) && len(selectedOrder) != 0 {
 		last := selectedOrder[len(selectedOrder)-1]
 		selectedOrder = selectedOrder[:len(selectedOrder)-1]
 		delete(selected, last)
 		prompt = continuationWithHistory(mandatory, serialized, selected)
 	}
-	if !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
+	if !protocol.AgentUpdatePromptFits(state.title, state.repository, state.publishBranch, prompt) {
 		return "", &ServiceError{
 			Code:    "continuation_prompt_too_large",
 			Message: "the mandatory recovery context cannot fit the 72 KiB agent prompt",
@@ -404,6 +408,11 @@ func (s *Store) AnswerWork(
 		WHERE work_id = ? AND status = 'needs-input'
 		ORDER BY sequence DESC LIMIT 1
 	`, workID).Scan(&questionUpdateID, &questionSequence); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return protocol.WorkAnswer{}, conflict(
+				"resume_question_missing", "needs-input Work has no recorded question update",
+			)
+		}
 		return protocol.WorkAnswer{}, unavailable(err)
 	}
 	prospective := continuationHistory{
@@ -493,8 +502,7 @@ func queueExistingExecution(
 	} else if err == nil {
 		_, err = tx.ExecContext(ctx, `
 			UPDATE executions SET assigned_worker_id = COALESCE(NULLIF(?, ''), assigned_worker_id),
-			       state = ?, cancellation_requested = 0,
-			       retry_count = retry_count + 1, updated_at = ? WHERE id = ?
+			       state = ?, cancellation_requested = 0, updated_at = ? WHERE id = ?
 		`, assignedWorkerID, "queued", now, executionID)
 	}
 	if err != nil {
