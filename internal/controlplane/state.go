@@ -858,11 +858,35 @@ func (s *Store) SweepExpired(ctx context.Context) ([]ExpiredLease, error) {
 		}
 		changed, _ := result.RowsAffected()
 		if changed == 1 {
+			outcome, hasOutcome, err := attemptOutcome(ctx, tx, value.AttemptID)
+			if err != nil {
+				return nil, err
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE executions SET state = 'failed', updated_at = ?
 				WHERE id = ? AND state IN ('preparing', 'running')
 				`, now, value.ExecutionID); err != nil {
 				return nil, unavailable(err)
+			}
+			if hasOutcome && outcome.Status == protocol.WorkUpdateNeedsInput {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE sessions SET checkpoint_sha = ?, pending_resume_sha = ?, checkpoint_published = ?
+					WHERE id = (SELECT session_id FROM executions WHERE id = ?)
+					  AND state IN ('preparing', 'running')
+				`, outcome.CheckpointSHA, outcome.CheckpointSHA, outcome.CheckpointPublished,
+					value.ExecutionID); err != nil {
+					return nil, unavailable(err)
+				}
+			} else if hasOutcome && outcome.Status == protocol.WorkUpdateReady {
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE sessions SET pull_request_url = ?, pull_request_head_branch = ?,
+					       pull_request_head_sha = ?
+					WHERE id = (SELECT session_id FROM executions WHERE id = ?)
+					  AND state IN ('preparing', 'running')
+				`, outcome.PullRequestURL, outcome.PullRequestHeadBranch,
+					outcome.PullRequestHeadSHA, value.ExecutionID); err != nil {
+					return nil, unavailable(err)
+				}
 			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE sessions SET state = 'failed', terminal_at = ?, failure_reason = 'lease expired',

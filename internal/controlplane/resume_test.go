@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/owainlewis/factory/internal/protocol"
@@ -14,6 +15,89 @@ import (
 
 const testCheckpointSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const resumeToken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+func TestExpiredAgentAttemptRetainsAcceptedRecoveryEvidence(t *testing.T) {
+	tests := []struct {
+		name      string
+		requestID string
+		update    protocol.AttemptUpdateRequest
+	}{
+		{
+			name:      "published checkpoint",
+			requestID: "64000000-0000-4000-8000-000000000001",
+			update: protocol.AttemptUpdateRequest{
+				Status: protocol.WorkUpdateNeedsInput, Message: "Which behavior?",
+				CheckpointSHA: testCheckpointSHA, CheckpointPublished: true,
+			},
+		},
+		{
+			name:      "known pull request",
+			requestID: "64000000-0000-4000-8000-000000000002",
+			update: protocol.AttemptUpdateRequest{
+				Status: protocol.WorkUpdateReady, Message: "Ready.",
+				PullRequestURL:     "https://github.com/owainlewis/factory/pull/343",
+				PullRequestHeadSHA: testCheckpointSHA,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			run, claim := claimRunningAgentWork(t, store, "expired-recovery-"+test.name)
+			test.update.LeaseToken = tokenA
+			test.update.RequestID = test.requestID
+			if test.update.Status == protocol.WorkUpdateReady {
+				test.update.PullRequestHeadBranch = run.Sessions[0].Target.PublishBranch
+			}
+			if _, err := store.AppendAgentUpdate(context.Background(), claim.Attempt.ID, test.update); err != nil {
+				t.Fatal(err)
+			}
+
+			store.now = func() time.Time { return claim.Attempt.LeaseExpiresAt.Add(time.Millisecond) }
+			expired, err := store.SweepExpired(context.Background())
+			if err != nil || len(expired) != 1 || expired[0].AttemptID != claim.Attempt.ID {
+				t.Fatalf("expired Attempts = %#v, error %v", expired, err)
+			}
+			failed, err := store.Work(context.Background(), run.Sessions[0].ID)
+			if err != nil || failed.State != protocol.WorkFailed || failed.FailureReason != "lease expired" {
+				t.Fatalf("expired Work = %#v, error %v", failed, err)
+			}
+			if test.update.Status == protocol.WorkUpdateNeedsInput {
+				if failed.CheckpointSHA != testCheckpointSHA || failed.PendingResumeSHA != testCheckpointSHA ||
+					!failed.CheckpointPublished || failed.Question != "" {
+					t.Fatalf("checkpoint recovery Work = %#v", failed)
+				}
+			} else if failed.PullRequestURL != test.update.PullRequestURL ||
+				failed.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch ||
+				failed.PullRequestHeadSHA != testCheckpointSHA {
+				t.Fatalf("pull request recovery Work = %#v", failed)
+			}
+
+			if _, err := store.HeartbeatWorker(context.Background(), workerA); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.RetrySession(context.Background(), run.Run.ID, failed.ID); err != nil {
+				t.Fatal(err)
+			}
+			retryClaim, err := store.Claim(context.Background(), workerA, protocol.ClaimRequest{
+				RequestID: "expired-recovery-retry-" + test.name, LeaseToken: resumeToken,
+			})
+			if err != nil || retryClaim == nil {
+				t.Fatalf("recovery claim = %#v, error %v", retryClaim, err)
+			}
+			if test.update.Status == protocol.WorkUpdateNeedsInput {
+				if retryClaim.Session.PendingResumeSHA != testCheckpointSHA ||
+					!retryClaim.Session.CheckpointPublished {
+					t.Fatalf("checkpoint recovery claim = %#v", retryClaim)
+				}
+			} else if retryClaim.Session.PullRequestURL != test.update.PullRequestURL ||
+				retryClaim.Session.PullRequestHeadBranch != run.Sessions[0].Target.PublishBranch ||
+				retryClaim.Session.PullRequestHeadSHA != testCheckpointSHA {
+				t.Fatalf("pull request recovery claim = %#v", retryClaim)
+			}
+		})
+	}
+}
 
 func TestAnswerRequeuesSameWorkAndStartsFromAuthoritativeCheckpoint(t *testing.T) {
 	store, worker, run, work := needsInputWork(t)
