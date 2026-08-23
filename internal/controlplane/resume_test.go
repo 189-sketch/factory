@@ -749,9 +749,20 @@ func TestExactReplacementCopiesFrozenExecutionAndReplayWinsBeforeEligibility(t *
 	worker := registerTestWorker(t, store, workerA, 10, protocol.RepositoryRegistration{
 		Key: "factory", RemoteIdentity: "github.com/owainlewis/factory",
 	})
+	pipeline, err := store.CreatePipeline(context.Background(), protocol.SavePipelineRequest{
+		Name: "Exact replacement stages",
+		Stages: []protocol.PipelineStage{
+			{Name: "Build", Prompt: "Build {{ task.prompt }} on {{ branch }}"},
+			{Name: "Review", Prompt: "Review the replacement in {{ repository }}"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	task, err := store.CreateTask(context.Background(), protocol.SaveTaskRequest{
 		Name: "Exact replacement", Prompt: "Review the repository.", Runtime: protocol.RuntimeCodex,
-		RepositoryIDs: []string{worker.Repositories[0].ID}, OutcomeContract: protocol.OutcomeAgentUpdate,
+		PipelineID: pipeline.ID, RepositoryIDs: []string{worker.Repositories[0].ID},
+		OutcomeContract: protocol.OutcomeAgentUpdate,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -788,8 +799,20 @@ func TestExactReplacementCopiesFrozenExecutionAndReplayWinsBeforeEligibility(t *
 		replaced.Execution.Provider != "frozen-provider" || replaced.Execution.Model != "frozen-model" ||
 		replaced.Execution.ResourceClass != "frozen-resource" ||
 		replacement.Run.Run.Execution != replaced.Execution ||
-		replaced.Target.PublishBranch == first.Sessions[0].Target.PublishBranch {
+		replaced.Target.PublishBranch == first.Sessions[0].Target.PublishBranch || len(replaced.Stages) != 2 {
 		t.Fatalf("replaced Work = %#v, Run execution = %#v", replaced, replacement.Run.Run.Execution)
+	}
+	claim, err := store.Claim(context.Background(), worker.ID, protocol.ClaimRequest{
+		RequestID: "replacement-stages-claim", LeaseToken: tokenA,
+	})
+	promptFits := claim != nil && len(claim.Session.Stages) == 2 && protocol.AgentUpdatePromptFits(
+		claim.Session.TaskName, claim.Repository.RemoteIdentity,
+		claim.Session.Target.PublishBranch, claim.Session.Stages[1].Prompt,
+	)
+	if err != nil || claim == nil || len(claim.Session.Stages) != 2 ||
+		!strings.Contains(claim.Session.Stages[0].Prompt, "Review the repository.") ||
+		!strings.Contains(claim.Session.Stages[0].Prompt, claim.Session.Target.PublishBranch) || !promptFits {
+		t.Fatalf("replacement stage claim = %#v, prompt fits %v, error %v", claim, promptFits, err)
 	}
 	archived := true
 	if _, err := store.SetTaskArchived(context.Background(), task.ID, protocol.SetTaskArchivedRequest{

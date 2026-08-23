@@ -143,12 +143,16 @@ func (s *Store) ReplaceWork(
 	if taskID == protocol.StandardBuildProcedureID {
 		resolvedPrompt = replacePublishBranch(resolvedPrompt, oldPublishBranch, newPublishBranch)
 	}
-	if outcomeContract == protocol.OutcomeAgentUpdate && !agentContinuationReserveFits(
-		snapshot.Name, predecessor.RepositoryIdentity, resolvedPrompt, newPublishBranch,
-	) {
-		return protocol.WorkReplacement{}, conflict(
-			"agent_prompt_too_large", "the exact predecessor cannot fit the Worker request with recovery reserves",
-		)
+	target := protocol.WorkTarget{
+		ID: workID, Position: 0, TargetKey: predecessor.Target.TargetKey,
+		TargetKind: predecessor.Target.TargetKind, RepositoryID: predecessor.RepositoryID,
+		RepositoryIdentity: predecessor.RepositoryIdentity, SourceKind: predecessor.Target.SourceKind,
+		SourceKey: predecessor.Target.SourceKey, SourceReference: predecessor.Target.SourceReference,
+		ContextSnapshot: predecessor.Target.ContextSnapshot, PublishBranch: newPublishBranch,
+	}
+	resolvedStages, err := resolveSessionStages(snapshot, resolvedPrompt, runID, target)
+	if err != nil {
+		return protocol.WorkReplacement{}, err
 	}
 
 	assignedWorkerID, blockedReason, err := s.replacementRoute(
@@ -171,13 +175,6 @@ func (s *Store) ReplaceWork(
 	`, runID, input.RequestKey, fingerprint, taskID, taskSnapshotJSON,
 		executionSnapshot, outcomeContract, now, now); err != nil {
 		return protocol.WorkReplacement{}, unavailable(err)
-	}
-	target := protocol.WorkTarget{
-		ID: workID, Position: 0, TargetKey: predecessor.Target.TargetKey,
-		TargetKind: predecessor.Target.TargetKind, RepositoryID: predecessor.RepositoryID,
-		RepositoryIdentity: predecessor.RepositoryIdentity, SourceKind: predecessor.Target.SourceKind,
-		SourceKey: predecessor.Target.SourceKey, SourceReference: predecessor.Target.SourceReference,
-		ContextSnapshot: predecessor.Target.ContextSnapshot, PublishBranch: newPublishBranch,
 	}
 	targetsJSON, err := json.Marshal([]protocol.WorkTarget{target})
 	if err != nil {
@@ -207,6 +204,9 @@ func (s *Store) ReplaceWork(
 		target.PublishBranch, input.WorkID,
 		boundedUTF8Bytes(blockedReason, protocol.MaxWaitingReasonBytes)); err != nil {
 		return protocol.WorkReplacement{}, unavailable(err)
+	}
+	if err := insertSessionStages(ctx, tx, workID, resolvedStages); err != nil {
+		return protocol.WorkReplacement{}, err
 	}
 	if assignedWorkerID != "" {
 		executionID, err := newID()

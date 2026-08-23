@@ -172,6 +172,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}
 	lastResult := ""
 	var finalMessage supervisorMessage
+	attemptStarted := false
 	for index, stage := range stages {
 		if stage.State == protocol.StageSucceeded {
 			lastResult = stage.Result
@@ -185,6 +186,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			return
 		}
 		finalStage := index == len(stages)-1
+		firstExecutedStage := !attemptStarted
 		prompt := buildStagePrompt(claim, value, stage, finalStage)
 		if len([]byte(value.Branch)) > protocol.MaxAgentBranchBytes ||
 			len([]byte(value.BaseBranch)) > protocol.MaxAgentBranchBytes ||
@@ -234,7 +236,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			return
 		}
 		handle.setSupervisor(process)
-		if index == 0 {
+		if firstExecutedStage {
 			started, err := manager.client.start(
 				handle.context, claim.Attempt.ID, supervisorStartRequest(process, token, value.BaseCommit),
 			)
@@ -295,7 +297,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			manager.finishWithWorktree(claim, token, handle, repository, value, "failed", "", err.Error())
 			return
 		}
-		if index == 0 {
+		if firstExecutedStage {
 			if _, err := manager.client.start(handle.context, claim.Attempt.ID, protocol.StartAttemptRequest{
 				LeaseToken: token, StartedFromSHA: value.BaseCommit, RuntimeStarted: true,
 			}); err != nil {
@@ -308,6 +310,7 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 			}
 			manager.logger.Info("attempt_started", "attempt_id", claim.Attempt.ID, "repository", repository.Key,
 				"process", processSummary(process))
+			attemptStarted = true
 		}
 		manager.logger.Info("pipeline_stage_started", "attempt_id", claim.Attempt.ID, "stage", stage.Name, "position", stage.Position)
 		message := manager.waitForSupervisorWithEvents(process, sender)
