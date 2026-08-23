@@ -73,6 +73,25 @@ func TestAgentUpdateUsesOnlyInjectedUnixSocketContext(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("agent update request was not received")
 	}
+
+	stdout.Reset()
+	code = Run(Options{
+		Arguments: []string{"update", "--status", "needs-input", "--message", "Which behavior is correct?"},
+		Stdout:    &stdout, Stderr: &stderr,
+		Getenv: func(key string) string { return environment[key] },
+	})
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "accepted needs-input") {
+		t.Fatalf("Run needs-input update = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	select {
+	case input := <-requests:
+		if input.Status != protocol.WorkUpdateNeedsInput || input.Message != "Which behavior is correct?" ||
+			input.PullRequestURL != "" {
+			t.Fatalf("needs-input request = %#v", input)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("needs-input update request was not received")
+	}
 }
 
 func TestAgentUpdateRequiresContextAndReadyEvidence(t *testing.T) {
@@ -95,18 +114,5 @@ func TestAgentUpdateRequiresContextAndReadyEvidence(t *testing.T) {
 		},
 	}); code != 2 || !strings.Contains(stderr.String(), "ready requires --pr") {
 		t.Fatalf("missing ready PR = %d, stderr %q", code, stderr.String())
-	}
-	stderr.Reset()
-	if code := Run(Options{
-		Arguments: []string{"update", "--status", "needs-input", "--message", "Need a decision."},
-		Stderr:    &stderr,
-		Getenv: func(key string) string {
-			return map[string]string{
-				"FACTORY_WORK_ID": "work", "FACTORY_ATTEMPT_ID": "attempt",
-				"FACTORY_UPDATE_SOCKET": "/tmp/update", "FACTORY_UPDATE_TOKEN": "token",
-			}[key]
-		},
-	}); code != 2 || !strings.Contains(stderr.String(), "needs-input is unavailable") {
-		t.Fatalf("needs-input availability = %d, stderr %q", code, stderr.String())
 	}
 }

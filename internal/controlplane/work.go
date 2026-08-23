@@ -133,12 +133,6 @@ func (s *Store) AppendAgentUpdate(
 	if workState != string(protocol.WorkRunning) || owner != string(protocol.ExecutionOwnerWorkerAttempt) {
 		return protocol.WorkUpdate{}, conflict("update_not_active", "the Work is not owned by this active Attempt")
 	}
-	if input.Status == protocol.WorkUpdateNeedsInput {
-		if err := validateContinuationWithinTx(ctx, tx, workID, input.Message, strings.Repeat("a", protocol.MaxAnswerBytes)); err != nil {
-			return protocol.WorkUpdate{}, err
-		}
-	}
-
 	existingOutcome, hasOutcome, err := attemptOutcome(ctx, tx, attemptID)
 	if err != nil {
 		return protocol.WorkUpdate{}, err
@@ -176,6 +170,17 @@ func (s *Store) AppendAgentUpdate(
 		SELECT COALESCE(MAX(sequence), 0) + 1 FROM work_updates WHERE work_id = ?
 	`, workID).Scan(&sequence); err != nil {
 		return protocol.WorkUpdate{}, unavailable(err)
+	}
+	if input.Status == protocol.WorkUpdateNeedsInput {
+		prospective := continuationHistory{
+			Sequence: sequence, Status: input.Status, Actor: protocol.WorkUpdateActorAgent,
+			Message: input.Message, CheckpointSHA: input.CheckpointSHA, AcceptedAtMillis: now,
+		}
+		if err := validateContinuationWithinTx(
+			ctx, tx, workID, input.Message, strings.Repeat("a", protocol.MaxAnswerBytes), prospective,
+		); err != nil {
+			return protocol.WorkUpdate{}, err
+		}
 	}
 	updateID, err := newID()
 	if err != nil {

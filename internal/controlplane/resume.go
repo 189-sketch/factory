@@ -58,7 +58,13 @@ func agentContinuationReserveFits(title, repository, resolvedPrompt, publishBran
 		pullRequestHeadSHA:    strings.Repeat("f", 64),
 		retryMayRepeatEffects: true,
 	}
-	prompt, err := assembleContinuationPrompt(state, nil)
+	history := []continuationHistory{{
+		Sequence: 999999999, Status: protocol.WorkUpdateNeedsInput,
+		Actor:         protocol.WorkUpdateActorAgent,
+		Message:       strings.Repeat("q", protocol.MaxQuestionBytes),
+		CheckpointSHA: strings.Repeat("f", 64), AcceptedAtMillis: 9223372036854775807,
+	}}
+	prompt, err := assembleContinuationPrompt(state, history)
 	return err == nil && protocol.AgentUpdatePromptFits(title, repository, prompt)
 }
 
@@ -78,12 +84,14 @@ func validateContinuationWithinTx(
 	ctx context.Context,
 	tx *sql.Tx,
 	workID, question, answer string,
+	prospective ...continuationHistory,
 ) error {
 	state, history, err := loadContinuationState(ctx, tx, workID)
 	if err != nil {
 		return err
 	}
 	state.question, state.answer = question, answer
+	history = append(history, prospective...)
 	prompt, err := assembleContinuationPrompt(state, history)
 	if err != nil || !protocol.AgentUpdatePromptFits(state.title, state.repository, prompt) {
 		return &ServiceError{

@@ -357,6 +357,57 @@ func TestContinuationPromptTruncatesNewestOutcomeBeforeProgress(t *testing.T) {
 	}
 }
 
+func TestAgentContinuationReserveIncludesFirstOutcomeDigest(t *testing.T) {
+	const title = "Resume"
+	const repository = "github.com/owainlewis/factory"
+	const publishBranch = "factory/work-resume"
+	best, low, high := -1, 0, protocol.MaxResolvedPromptBytes
+	for low <= high {
+		middle := low + (high-low)/2
+		if agentContinuationReserveFits(
+			title, repository, strings.Repeat("p", middle), publishBranch,
+		) {
+			best = middle
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	if best < 0 {
+		t.Fatal("continuation reserve rejected every resolved prompt size")
+	}
+	resolvedPrompt := strings.Repeat("p", best)
+	if best < protocol.MaxResolvedPromptBytes && agentContinuationReserveFits(
+		title, repository, resolvedPrompt+"p", publishBranch,
+	) {
+		t.Fatal("continuation reserve test did not find its exact admission boundary")
+	}
+	state := continuationState{
+		title: title, repository: repository, resolvedPrompt: resolvedPrompt,
+		publishBranch:         publishBranch,
+		question:              strings.Repeat("q", protocol.MaxQuestionBytes),
+		answer:                strings.Repeat("a", protocol.MaxAnswerBytes),
+		checkpointSHA:         strings.Repeat("f", 64),
+		pullRequestURL:        "https://github.com/" + strings.Repeat("r", 2028),
+		pullRequestHeadBranch: strings.Repeat("b", 255),
+		pullRequestHeadSHA:    strings.Repeat("f", 64),
+		retryMayRepeatEffects: true,
+	}
+	history := []continuationHistory{{
+		Sequence: 1, Status: protocol.WorkUpdateNeedsInput, Actor: protocol.WorkUpdateActorAgent,
+		Message:       strings.Repeat("q", protocol.MaxQuestionBytes),
+		CheckpointSHA: strings.Repeat("f", 64), AcceptedAtMillis: 1,
+	}}
+	prompt, err := assembleContinuationPrompt(state, history)
+	if err != nil || !protocol.AgentUpdatePromptFits(title, repository, prompt) {
+		t.Fatalf("first outcome invalidated continuation reserve: prompt bytes %d, error %v", len(prompt), err)
+	}
+	if !strings.Contains(prompt, "Stored updates: 1") ||
+		!strings.Contains(prompt, "omitted SHA-256:") {
+		t.Fatalf("continuation prompt missing first-outcome history evidence: %s", prompt[len(prompt)-500:])
+	}
+}
+
 func TestExactReplacementCopiesFrozenExecutionAndReplayWinsBeforeEligibility(t *testing.T) {
 	store := newTestStore(t)
 	worker := registerTestWorker(t, store, workerA, 10, protocol.RepositoryRegistration{
