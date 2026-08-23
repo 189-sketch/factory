@@ -100,6 +100,12 @@ func (s *Store) AdmitProcedureRun(
 			"agent_update requires the persistent execution backend",
 		)
 	}
+	if execution.Backend != protocol.BackendPersistent && len(snapshot.Pipeline.Stages) > 1 {
+		return protocol.ProcedureRunAdmission{}, conflict(
+			"pipeline_backend_unsupported",
+			"multi-stage Pipelines currently require a persistent Worker",
+		)
+	}
 	if len([]byte(snapshot.Prompt)) > protocol.MaxResolvedPromptBytes {
 		return protocol.ProcedureRunAdmission{}, conflict(
 			"resolved_prompt_too_large", "the frozen Procedure prompt exceeds 64 KiB",
@@ -133,11 +139,6 @@ func (s *Store) AdmitProcedureRun(
 	frozenTargets := make([]protocol.WorkTarget, 0, len(targets))
 	materialized := 0
 	for position, target := range targets {
-		if !protocol.AgentPromptFits(snapshot.Name, target.repository.RemoteIdentity, snapshot.Prompt) {
-			return protocol.ProcedureRunAdmission{}, conflict(
-				"agent_prompt_too_large", "the frozen Procedure prompt cannot fit the Worker request",
-			)
-		}
 		workID, err := newID()
 		if err != nil {
 			return protocol.ProcedureRunAdmission{}, unavailable(err)
@@ -148,6 +149,10 @@ func (s *Store) AdmitProcedureRun(
 			RepositoryIdentity: target.repository.RemoteIdentity, SourceKind: "repository",
 			SourceKey: target.repository.ID, SourceReference: target.repository.RemoteIdentity,
 			PublishBranch: workPublishBranch(workID),
+		}
+		resolvedStages, err := resolveSessionStages(snapshot, snapshot.Prompt, runID, frozen)
+		if err != nil {
+			return protocol.ProcedureRunAdmission{}, err
 		}
 		state, blockedReason := "blocked", procedureConcurrencyBlockedReason
 		var assigned any
@@ -192,6 +197,9 @@ func (s *Store) AdmitProcedureRun(
 			boundedUTF8Bytes(blockedReason, protocol.MaxWaitingReasonBytes)); err != nil {
 			return protocol.ProcedureRunAdmission{}, unavailable(err)
 		}
+		if err := insertSessionStages(ctx, tx, workID, resolvedStages); err != nil {
+			return protocol.ProcedureRunAdmission{}, err
+		}
 		if state == "queued" {
 			executionID, err := newID()
 			if err != nil {
@@ -232,11 +240,13 @@ func loadProcedureSnapshot(ctx context.Context, tx *sql.Tx, nameKey string) (pro
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, name, prompt, runtime, COALESCE(execution_profile_id, ''),
 		       timeout_seconds, concurrency_limit, generation, outcome_contract,
+		       COALESCE(pipeline_id, ?),
 		       archived, migration_only, read_only
 		FROM tasks WHERE name_key = ?
-	`, nameKey).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Prompt, &snapshot.Runtime,
+	`, protocol.DefaultPipelineID, nameKey).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Prompt, &snapshot.Runtime,
 		&snapshot.ExecutionProfileID, &snapshot.TimeoutSeconds, &snapshot.ConcurrencyLimit,
-		&snapshot.Generation, &snapshot.OutcomeContract, &archived, &migrationOnly, &readOnly)
+		&snapshot.Generation, &snapshot.OutcomeContract, &snapshot.Pipeline.ID,
+		&archived, &migrationOnly, &readOnly)
 	if errors.Is(err, sql.ErrNoRows) {
 		return snapshot, invalid("procedure_not_found", fmt.Sprintf("Procedure %s does not exist", nameKey))
 	}
@@ -249,6 +259,11 @@ func loadProcedureSnapshot(ctx context.Context, tx *sql.Tx, nameKey string) (pro
 	if archived != 0 {
 		return snapshot, conflict("procedure_archived", "archived Procedures cannot start Runs")
 	}
+	pipeline, err := loadPipelineSnapshot(ctx, tx, snapshot.Pipeline.ID)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.Pipeline = pipeline
 	return snapshot, nil
 }
 

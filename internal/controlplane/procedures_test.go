@@ -24,9 +24,24 @@ func TestProcedureRunFreezesAllEnabledRepositoriesAndReplaysBeforeChanges(t *tes
 	if _, err := store.SetManagedRepositoryEnabled(ctx, disabled.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	worker := registerTestWorker(t, store, workerA, 10,
+		protocol.RepositoryRegistration{Key: "api", RemoteIdentity: api.RemoteIdentity},
+		protocol.RepositoryRegistration{Key: "web", RemoteIdentity: web.RemoteIdentity},
+	)
+	pipeline, err := store.CreatePipeline(ctx, protocol.SavePipelineRequest{
+		Name: "Fleet review",
+		Stages: []protocol.PipelineStage{
+			{Name: "Inspect", Prompt: "Inspect {{ repository }} for {{ task.name }}."},
+			{Name: "Report", Prompt: "Report the outcome of {{ task.prompt }} on {{ branch }}."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	procedure, err := store.CreateTask(ctx, protocol.SaveTaskRequest{
 		Name: "Bug-Fix", Prompt: "Find and fix one concrete bug.", Runtime: protocol.RuntimeCodex,
 		TimeoutSeconds: 900, ConcurrencyLimit: 2, OutcomeContract: protocol.OutcomeAgentUpdate,
+		PipelineID: pipeline.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +56,8 @@ func TestProcedureRunFreezesAllEnabledRepositoriesAndReplaysBeforeChanges(t *tes
 	if admission.Result != protocol.AdmissionAdmitted || admission.Run.Run.SessionCount != 2 ||
 		admission.Run.Run.Task.Generation != procedure.Generation ||
 		admission.Run.Run.Task.Prompt != "Find and fix one concrete bug." ||
+		admission.Run.Run.Task.Pipeline.ID != pipeline.ID ||
+		admission.Run.Run.Task.Pipeline.Generation != pipeline.Generation ||
 		admission.Run.Run.Task.TimeoutSeconds != 900 || admission.Run.Run.Task.ConcurrencyLimit != 2 ||
 		admission.Run.Run.OutcomeContract != protocol.OutcomeAgentUpdate {
 		t.Fatalf("admission = %#v", admission)
@@ -57,6 +74,20 @@ func TestProcedureRunFreezesAllEnabledRepositoriesAndReplaysBeforeChanges(t *tes
 			work.Target.SourceReference != work.RepositoryIdentity || work.Target.PublishBranch == "" {
 			t.Fatalf("Work %d = %#v", index, work)
 		}
+		storedWork, err := store.Work(ctx, work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(storedWork.Stages) != 2 || storedWork.Stages[0].Name != "Inspect" || storedWork.Stages[1].Name != "Report" ||
+			!strings.Contains(storedWork.Stages[0].Prompt, work.RepositoryIdentity) ||
+			!strings.Contains(storedWork.Stages[1].Prompt, work.Target.PublishBranch) {
+			t.Fatalf("Work %d stages = %#v", index, storedWork.Stages)
+		}
+	}
+	claim, err := store.Claim(ctx, worker.ID, protocol.ClaimRequest{RequestID: "fleet-stage-claim", LeaseToken: tokenA})
+	if err != nil || claim == nil || len(claim.Session.Stages) != 2 ||
+		claim.Session.Stages[0].Name != "Inspect" || claim.Session.Stages[1].Name != "Report" {
+		t.Fatalf("fleet Pipeline claim = %#v, err %v", claim, err)
 	}
 	if _, err := store.UpdateTask(ctx, procedure.ID, protocol.SaveTaskRequest{
 		Name: procedure.Name, Prompt: "Changed instructions.", Runtime: protocol.RuntimePi,
@@ -122,10 +153,7 @@ func TestProcedureRunRebuildUsesLatestExactProcedureRepositoryPredecessor(t *tes
 	other := createProcedureForTest(t, store, "Documentation")
 	terminalRun := admitProcedureForTest(t, store, "terminal", first.Name, repository.RemoteIdentity, false)
 	otherRun := admitProcedureForTest(t, store, "other", other.Name, repository.RemoteIdentity, false)
-	const terminalID = "zzzz-terminal-work"
-	if _, err := store.db.Exec(`UPDATE sessions SET id = ? WHERE id = ?`, terminalID, terminalRun.Run.Sessions[0].ID); err != nil {
-		t.Fatal(err)
-	}
+	terminalID := terminalRun.Run.Sessions[0].ID
 	for _, workID := range []string{terminalID, otherRun.Run.Sessions[0].ID} {
 		if _, err := store.db.Exec(`
 			UPDATE sessions SET state = 'failed', terminal_at = admitted_at, terminal_message = 'failed'
@@ -144,12 +172,12 @@ func TestProcedureRunRebuildUsesLatestExactProcedureRepositoryPredecessor(t *tes
 	}); !serviceErrorCode(err, "procedure_rebuild_active") {
 		t.Fatalf("active rebuild error = %v", err)
 	}
-	const rebuiltID = "aaaa-rebuilt-work"
+	rebuiltID := rebuilt.Run.Sessions[0].ID
 	if _, err := store.db.Exec(`
-		UPDATE sessions SET id = ?, state = 'failed', admitted_at = 1000,
+		UPDATE sessions SET state = 'failed', admitted_at = 1000,
 		       terminal_at = 1000, terminal_message = 'failed'
 		WHERE id = ?
-	`, rebuiltID, rebuilt.Run.Sessions[0].ID); err != nil {
+	`, rebuiltID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`UPDATE sessions SET admitted_at = 1000, terminal_at = 1000 WHERE id = ?`, terminalID); err != nil {

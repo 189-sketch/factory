@@ -23,13 +23,20 @@ func TestBuildAdmissionHTTPReturnsTypedCommitStatus(t *testing.T) {
 	}
 	server := httptest.NewServer(NewHandler(store, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(server.Close)
-	post := func(request protocol.BuildRequest) (*http.Response, []byte) {
+	post := func(request protocol.BuildRequest) (int, []byte) {
 		t.Helper()
 		body, err := json.Marshal(request)
 		if err != nil {
 			t.Fatal(err)
 		}
-		response, err := http.Post(server.URL+"/api/v1/builds", "application/json", bytes.NewReader(body))
+		httpRequest, err := http.NewRequestWithContext(
+			context.Background(), http.MethodPost, server.URL+"/api/v1/builds", bytes.NewReader(body),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		httpRequest.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(httpRequest)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -38,39 +45,39 @@ func TestBuildAdmissionHTTPReturnsTypedCommitStatus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return response, encoded
+		return response.StatusCode, encoded
 	}
 	request := protocol.BuildRequest{
 		RequestKey: "http-build", RepositorySpecified: true, Repository: "github.com/acme/api",
 		References: []string{"https://github.com/acme/api/issues/1", "LINEAR-2"},
 	}
-	response, encoded := post(request)
+	status, encoded := post(request)
 	var admission protocol.BuildAdmission
-	if response.StatusCode != http.StatusCreated || json.Unmarshal(encoded, &admission) != nil ||
+	if status != http.StatusCreated || json.Unmarshal(encoded, &admission) != nil ||
 		admission.Result != protocol.AdmissionAdmitted || admission.Run.Run.SessionCount != 2 {
-		t.Fatalf("created HTTP response = %d %s", response.StatusCode, encoded)
+		t.Fatalf("created HTTP response = %d %s", status, encoded)
 	}
-	response, encoded = post(request)
-	if response.StatusCode != http.StatusOK || json.Unmarshal(encoded, &admission) != nil ||
+	status, encoded = post(request)
+	if status != http.StatusOK || json.Unmarshal(encoded, &admission) != nil ||
 		admission.Result != protocol.AdmissionReplayed {
-		t.Fatalf("replayed HTTP response = %d %s", response.StatusCode, encoded)
+		t.Fatalf("replayed HTTP response = %d %s", status, encoded)
 	}
 	request.Rebuild = true
-	response, encoded = post(request)
+	status, encoded = post(request)
 	var failure protocol.ErrorBody
-	if response.StatusCode != http.StatusConflict || json.Unmarshal(encoded, &failure) != nil ||
+	if status != http.StatusConflict || json.Unmarshal(encoded, &failure) != nil ||
 		failure.Error.AdmissionResult != protocol.AdmissionRejectedBeforeCommit ||
 		failure.Error.RequestKey != request.RequestKey {
-		t.Fatalf("rejected HTTP response = %d %s", response.StatusCode, encoded)
+		t.Fatalf("rejected HTTP response = %d %s", status, encoded)
 	}
 	mismatch := protocol.BuildRequest{
 		RequestKey: "http-mismatch", RepositorySpecified: true, Repository: "github.com/acme/api",
 		References: []string{"https://github.com/acme/other/issues/3"},
 	}
-	response, encoded = post(mismatch)
-	if response.StatusCode != http.StatusBadRequest || json.Unmarshal(encoded, &failure) != nil ||
+	status, encoded = post(mismatch)
+	if status != http.StatusBadRequest || json.Unmarshal(encoded, &failure) != nil ||
 		failure.Error.AdmissionResult != protocol.AdmissionRejectedBeforeCommit {
-		t.Fatalf("mismatched HTTP response = %d %s", response.StatusCode, encoded)
+		t.Fatalf("mismatched HTTP response = %d %s", status, encoded)
 	}
 }
 
@@ -104,6 +111,20 @@ func TestStandardBuildBackingProcedureDoesNotCollideWithExistingTaskName(t *test
 
 func TestBuildAdmissionCreatesIndependentAtomicWorkAndSchedulerClaimsIt(t *testing.T) {
 	store := newTestStore(t)
+	defaultPipeline, err := store.Pipeline(context.Background(), protocol.DefaultPipelineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultPipeline, err = store.UpdatePipeline(context.Background(), defaultPipeline.ID, protocol.SavePipelineRequest{
+		Name: defaultPipeline.Name, ExpectedGeneration: defaultPipeline.Generation,
+		Stages: []protocol.PipelineStage{
+			{Name: "Plan", Prompt: "Plan {{ task.prompt }} for {{ repository }}."},
+			{Name: "Build", Prompt: "Build {{ task.prompt }} on {{ branch }}."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository, _, err := store.CreateManagedRepository(context.Background(), protocol.CreateManagedRepositoryRequest{
 		RemoteIdentity: "github.com/owainlewis/factory",
 	})
@@ -129,6 +150,8 @@ func TestBuildAdmissionCreatesIndependentAtomicWorkAndSchedulerClaimsIt(t *testi
 		admission.Run.Run.Task.ID != protocol.StandardBuildProcedureID ||
 		admission.Run.Run.Task.Generation != protocol.StandardBuildProcedureGeneration ||
 		admission.Run.Run.Task.Runtime != protocol.RuntimeCodex ||
+		admission.Run.Run.Task.Pipeline.ID != defaultPipeline.ID ||
+		admission.Run.Run.Task.Pipeline.Generation != defaultPipeline.Generation ||
 		admission.Run.Run.OutcomeContract != protocol.OutcomeAgentUpdate {
 		t.Fatalf("admission = %#v", admission)
 	}
@@ -139,6 +162,15 @@ func TestBuildAdmissionCreatesIndependentAtomicWorkAndSchedulerClaimsIt(t *testi
 			!strings.Contains(work.ResolvedPrompt, "Untrusted work-item context:") ||
 			!strings.Contains(work.ResolvedPrompt, protocol.StandardBuildProcedurePrompt) {
 			t.Fatalf("Work %d = %#v", index, work)
+		}
+		storedWork, err := store.Work(context.Background(), work.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(storedWork.Stages) != 2 || storedWork.Stages[0].Name != "Plan" || storedWork.Stages[1].Name != "Build" ||
+			!strings.Contains(storedWork.Stages[0].Prompt, protocol.StandardBuildProcedurePrompt) ||
+			!strings.Contains(storedWork.Stages[1].Prompt, work.Target.PublishBranch) {
+			t.Fatalf("Work %d stages = %#v", index, storedWork.Stages)
 		}
 		if seenBranches[work.Target.PublishBranch] {
 			t.Fatalf("duplicate publish branch %q", work.Target.PublishBranch)
@@ -155,7 +187,8 @@ func TestBuildAdmissionCreatesIndependentAtomicWorkAndSchedulerClaimsIt(t *testi
 		t.Fatalf("claim = %#v, error %v", claim, err)
 	}
 	if claim.Session.RunID != admission.Run.Run.ID || claim.Session.Target.TargetKind != "work_item" ||
-		claim.Session.OutcomeContract != protocol.OutcomeAgentUpdate {
+		claim.Session.OutcomeContract != protocol.OutcomeAgentUpdate || len(claim.Session.Stages) != 2 ||
+		claim.Session.Stages[0].Name != "Plan" || claim.Session.Stages[1].Name != "Build" {
 		t.Fatalf("claimed Build Work = %#v", claim.Session)
 	}
 }
@@ -275,13 +308,13 @@ func TestBuildRebuildSelectsLineageLeafWhenAdmissionTimesTie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const olderID = "zzzz-older-work"
+	olderID := initial.Run.Sessions[0].ID
 	if _, err := store.db.Exec(`
 		UPDATE sessions
-		SET id = ?, state = 'failed', admitted_at = 1000, terminal_at = 1000,
+		SET state = 'failed', admitted_at = 1000, terminal_at = 1000,
 		    terminal_message = 'failed'
 		WHERE id = ?
-	`, olderID, initial.Run.Sessions[0].ID); err != nil {
+	`, olderID); err != nil {
 		t.Fatal(err)
 	}
 	firstRebuild, err := store.AdmitBuild(context.Background(), protocol.BuildRequest{

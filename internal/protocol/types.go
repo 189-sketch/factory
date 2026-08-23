@@ -16,6 +16,9 @@ const (
 	RuntimeCodex              = "codex"
 	RuntimeClaudeCode         = "claude-code"
 	MaxBodyBytes              = 1 << 20
+	// MaxClaimStageBytes leaves half of a claim response available for the
+	// Attempt, execution, Session, and repository metadata around its stages.
+	MaxClaimStageBytes        = MaxBodyBytes / 2
 	MaxEventBatchBytes        = 256 << 10
 	MaxEventBytes             = 64 << 10
 	MaxEventsPerBatch         = 100
@@ -34,10 +37,10 @@ const (
 	MaxEventPageSize          = 500
 	MinWorkerCapacity         = 1
 	MaxWorkerCapacity         = 100
-	// ClaimProtocolVersion moved to 3 when claims began freezing the Work
-	// lifecycle and outcome contract. Mixed server and Worker versions are not
+	// ClaimProtocolVersion moved to 4 when claims began carrying a frozen
+	// sequence of Pipeline stages. Mixed server and Worker versions are not
 	// supported, including for compatibility process-exit Work.
-	ClaimProtocolVersion = 3
+	ClaimProtocolVersion = 4
 )
 
 func SupportedRuntime(value string) bool {
