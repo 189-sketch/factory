@@ -245,6 +245,7 @@ type StartAttemptRequest struct {
 	SupervisorPID   *int64 `json:"supervisor_pid,omitempty"`
 	ProcessIdentity string `json:"process_identity,omitempty"`
 	ProcessGroupID  *int64 `json:"process_group_id,omitempty"`
+	StartedFromSHA  string `json:"started_from_sha,omitempty"`
 }
 
 type HeartbeatResponse struct {

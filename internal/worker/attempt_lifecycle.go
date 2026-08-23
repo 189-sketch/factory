@@ -74,7 +74,14 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}
 	worktreeRoot := filepath.Join(manager.dataDirectory, "worktrees")
 	value, err := prepareWorktree(handle.context, manager.options.GitExecutable, worktreeRoot,
-		repository, claim.Session.ID, claim.Attempt.ID)
+		repository, claim.Session.ID, claim.Attempt.ID, worktreeRecovery{
+			WorkID: claim.Session.ID, PublishBranch: claim.Session.Target.PublishBranch,
+			PendingResumeSHA:      claim.Session.PendingResumeSHA,
+			CheckpointPublished:   claim.Session.CheckpointPublished,
+			PullRequestURL:        claim.Session.PullRequestURL,
+			PullRequestHeadBranch: claim.Session.PullRequestHeadBranch,
+			PullRequestHeadSHA:    claim.Session.PullRequestHeadSHA,
+		})
 	if err != nil {
 		releaseRepository()
 		manager.finishWithoutWorktree(claim, token, handle, terminalForStop(handle), stoppedAttemptError(handle, err))
@@ -207,7 +214,9 @@ func (manager *Manager) runAttempt(parent context.Context, claim protocol.Claim,
 	}
 	handle.setSupervisor(process)
 
-	started, err := manager.client.start(handle.context, claim.Attempt.ID, supervisorStartRequest(process, token))
+	started, err := manager.client.start(
+		handle.context, claim.Attempt.ID, supervisorStartRequest(process, token, value.BaseCommit),
+	)
 	if err != nil {
 		reason := handle.stopReason()
 		var apiError *APIError
@@ -275,8 +284,23 @@ func (manager *Manager) validateClaim(claim protocol.Claim) error {
 	if claim.Session.TimeoutSeconds < 1 || claim.Session.TimeoutSeconds > int(protocol.MaxTimeout/time.Second) {
 		return errors.New("claim timeout is outside the supported range")
 	}
-	if !protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt) {
+	promptFits := protocol.AgentPromptFits(claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt)
+	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+		promptFits = protocol.AgentUpdatePromptFits(
+			claim.Session.TaskName, claim.Repository.RemoteIdentity, claim.Session.Prompt,
+		)
+	}
+	if !promptFits {
 		return errors.New("claim agent prompt exceeds 72 KiB")
+	}
+	if claim.Session.PendingResumeSHA != "" && !commitPattern.MatchString(claim.Session.PendingResumeSHA) {
+		return errors.New("claim pending resume SHA is not a full commit ID")
+	}
+	if claim.Session.CheckpointPublished && claim.Session.PendingResumeSHA == "" {
+		return errors.New("claim marks a checkpoint published without a pending resume SHA")
+	}
+	if claim.Session.PullRequestHeadSHA != "" && !commitPattern.MatchString(claim.Session.PullRequestHeadSHA) {
+		return errors.New("claim pull request recovery SHA is not a full commit ID")
 	}
 	return nil
 }
@@ -579,6 +603,17 @@ func (manager *Manager) finishWithWorktree(
 				state = "failed"
 				errorText = "Delivery evidence could not be revalidated after the agent process stopped."
 			}
+		} else if outcome.Status == protocol.WorkUpdateNeedsInput {
+			validationContext, cancelValidation := context.WithTimeout(context.Background(), 2*gitCommandTimeout)
+			evidence, validationErr := manager.validateNeedsInputCheckpoint(
+				validationContext, claim, repository, value,
+			)
+			cancelValidation()
+			if validationErr != nil || evidence.SHA != outcome.CheckpointSHA ||
+				evidence.Published != outcome.CheckpointPublished {
+				state = "failed"
+				errorText = "Checkpoint could not be revalidated after the agent process stopped."
+			}
 		}
 	}
 	state, result, errorText = terminalForFinalStop(
@@ -808,21 +843,22 @@ func attemptStopReasonForSupervisor(reason string) string {
 }
 
 func buildPrompt(claim protocol.Claim, value worktree) string {
-	prompt := protocol.FormatAgentPrompt(
+	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+		return protocol.FormatAgentUpdatePrompt(
+			claim.Session.TaskName,
+			claim.Repository.RemoteIdentity,
+			value.Branch,
+			value.BaseBranch,
+			claim.Session.Prompt,
+		)
+	}
+	return protocol.FormatAgentPrompt(
 		claim.Session.TaskName,
 		claim.Repository.RemoteIdentity,
 		value.Branch,
 		value.BaseBranch,
 		claim.Session.Prompt,
 	)
-	if claim.Session.OutcomeContract != protocol.OutcomeAgentUpdate {
-		return prompt
-	}
-	return prompt + "\n\nFactory update contract:\n" +
-		"This Work is unfinished until you call factory update. Use status running for useful progress only. " +
-		"Before exiting, report exactly one available outcome: ready, failed, or no-change. " +
-		"Ready requires --pr with the GitHub pull request URL. Needs-input is unavailable until verified checkpoint support is enabled. " +
-		"Always include a concise non-empty --message."
 }
 
 func updateServerSocket(server *agentUpdateServer) string {

@@ -279,7 +279,9 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 		       run.outcome_contract, session.target_position, session.target_key,
 		       session.target_kind, session.repository_identity, session.source_kind,
 		       session.source_key, session.source_reference, session.context_snapshot,
-		       session.publish_branch
+		       session.publish_branch, session.pending_resume_sha,
+		       session.checkpoint_published, session.pull_request_url,
+		       session.pull_request_head_branch, session.pull_request_head_sha
 		FROM sessions session
 		JOIN runs run ON run.id = session.run_id
 		JOIN executions e ON e.session_id = session.id
@@ -293,12 +295,21 @@ func (s *Store) claimDetail(ctx context.Context, attemptID string) (protocol.Cla
 		&claim.Session.Target.TargetKey, &claim.Session.Target.TargetKind,
 		&claim.Session.Target.RepositoryIdentity, &claim.Session.Target.SourceKind,
 		&claim.Session.Target.SourceKey, &claim.Session.Target.SourceReference,
-		&claim.Session.Target.ContextSnapshot, &claim.Session.Target.PublishBranch); err != nil {
+		&claim.Session.Target.ContextSnapshot, &claim.Session.Target.PublishBranch,
+		&claim.Session.PendingResumeSHA, &claim.Session.CheckpointPublished,
+		&claim.Session.PullRequestURL, &claim.Session.PullRequestHeadBranch,
+		&claim.Session.PullRequestHeadSHA); err != nil {
 		return claim, unavailable(err)
 	}
 	claim.Session.AdmittedAt = fromMillis(admittedAt)
 	claim.Session.Target.ID = claim.Session.ID
 	claim.Session.Target.RepositoryID = claim.Session.RepositoryID
+	if claim.Session.OutcomeContract == protocol.OutcomeAgentUpdate {
+		claim.Session.Prompt, err = s.continuationPrompt(ctx, claim.Session.ID)
+		if err != nil {
+			return claim, err
+		}
+	}
 	err = s.db.QueryRowContext(ctx, `
 		SELECT r.id, wr.display_key,
 		       COALESCE(
@@ -368,6 +379,9 @@ func isTerminal(state string) bool {
 }
 
 func (s *Store) StartAttempt(ctx context.Context, attemptID string, input protocol.StartAttemptRequest) (protocol.Attempt, error) {
+	if input.StartedFromSHA != "" && !validCommitSHA(input.StartedFromSHA) {
+		return protocol.Attempt{}, invalid("invalid_started_commit", "started_from_sha must be a full commit SHA")
+	}
 	now := s.now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -382,6 +396,21 @@ func (s *Store) StartAttempt(ctx context.Context, attemptID string, input protoc
 		return protocol.Attempt{}, err
 	}
 	if lease.attemptState == "preparing" {
+		var pendingResumeSHA string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT session.pending_resume_sha
+			FROM sessions session
+			JOIN executions execution ON execution.session_id = session.id
+			WHERE execution.id = ?
+		`, lease.executionID).Scan(&pendingResumeSHA); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
+		if pendingResumeSHA != "" && input.StartedFromSHA != pendingResumeSHA {
+			return protocol.Attempt{}, conflict(
+				"resume_commit_mismatch",
+				"the Attempt did not start from the authoritative pending resume commit",
+			)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE attempts SET state = 'running', supervisor_pid = ?, process_identity = ?,
 			       process_group_id = ?, started_at = ?
@@ -396,9 +425,10 @@ func (s *Store) StartAttempt(ctx context.Context, attemptID string, input protoc
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET state = 'running', started_at = COALESCE(started_at, ?),
-			       execution_owner = 'worker_attempt'
+			       execution_owner = 'worker_attempt',
+			       pending_resume_sha = CASE WHEN pending_resume_sha = ? THEN '' ELSE pending_resume_sha END
 			WHERE id = (SELECT session_id FROM executions WHERE id = ?) AND state = 'preparing'
-		`, now, lease.executionID); err != nil {
+		`, now, input.StartedFromSHA, lease.executionID); err != nil {
 			return protocol.Attempt{}, unavailable(err)
 		}
 	} else if lease.attemptState != "running" {
@@ -623,16 +653,16 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 		input.State, input.Result, input.Error = "cancelled", "", ""
 		workState, failureReason = protocol.WorkCancelled, ""
 		terminalMessage = "Cancelled by operator."
-	} else if lease.outcomeContract == protocol.OutcomeAgentUpdate && input.State == "succeeded" {
+	} else if lease.outcomeContract == protocol.OutcomeAgentUpdate {
 		outcome, hasOutcome, err = attemptOutcome(ctx, tx, attemptID)
 		if err != nil {
 			return protocol.Attempt{}, err
 		}
-		if !hasOutcome {
+		if input.State == "succeeded" && !hasOutcome {
 			const missingOutcome = "Agent exited without reporting an outcome."
 			input.State, input.Result, input.Error = "failed", "", missingOutcome
 			workState, failureReason, terminalMessage = protocol.WorkFailed, missingOutcome, missingOutcome
-		} else {
+		} else if input.State == "succeeded" {
 			// The Attempt succeeded because the agent completed its reporting
 			// contract. Work state remains the semantic outcome reported by the
 			// agent, and arbitrary final runtime prose is not interpreted.
@@ -671,13 +701,15 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET state = 'needs-input', terminal_at = NULL, result = NULL,
 			       failure_reason = NULL, terminal_message = ?, question = ?,
-			       checkpoint_sha = ?, pending_resume_sha = ?, execution_owner = 'none'
+			       checkpoint_sha = ?, pending_resume_sha = ?, checkpoint_published = ?,
+			       answer = '', execution_owner = 'none'
 			WHERE id = (SELECT session_id FROM executions WHERE id = ?)
 			  AND state = 'running'
-		`, terminalMessage, outcome.Message, outcome.CheckpointSHA, outcome.CheckpointSHA, lease.executionID); err != nil {
+		`, terminalMessage, outcome.Message, outcome.CheckpointSHA, outcome.CheckpointSHA,
+			outcome.CheckpointPublished, lease.executionID); err != nil {
 			return protocol.Attempt{}, unavailable(err)
 		}
-	} else if hasOutcome {
+	} else if hasOutcome && input.State == "succeeded" {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET state = ?, terminal_at = ?, result = NULL, failure_reason = ?,
 			       terminal_message = ?, pull_request_url = ?, pull_request_head_branch = ?,
@@ -686,6 +718,18 @@ func (s *Store) CompleteAttempt(ctx context.Context, attemptID string, input pro
 			  AND state = 'running'
 		`, workState, now, nullString(failureReason), terminalMessage, outcome.PullRequestURL,
 			outcome.PullRequestHeadBranch, outcome.PullRequestHeadSHA, lease.executionID); err != nil {
+			return protocol.Attempt{}, unavailable(err)
+		}
+	} else if hasOutcome && outcome.Status == protocol.WorkUpdateReady {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE sessions SET state = ?, terminal_at = ?, result = ?, failure_reason = ?,
+			       terminal_message = ?, pull_request_url = ?, pull_request_head_branch = ?,
+			       pull_request_head_sha = ?, execution_owner = 'none'
+			WHERE id = (SELECT session_id FROM executions WHERE id = ?)
+			  AND state IN ('preparing', 'running')
+		`, workState, now, nullString(input.Result), nullString(failureReason), terminalMessage,
+			outcome.PullRequestURL, outcome.PullRequestHeadBranch, outcome.PullRequestHeadSHA,
+			lease.executionID); err != nil {
 			return protocol.Attempt{}, unavailable(err)
 		}
 	} else if _, err := tx.ExecContext(ctx, `

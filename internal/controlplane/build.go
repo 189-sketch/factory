@@ -150,10 +150,12 @@ func (s *Store) AdmitBuild(ctx context.Context, input protocol.BuildRequest) (pr
 			PublishBranch:   workPublishBranch(workID),
 		}
 		resolvedPrompt := resolveStandardBuildPrompt(frozen)
-		if !protocol.AgentPromptFits(snapshot.Name, frozen.RepositoryIdentity, resolvedPrompt) {
+		if !agentContinuationReserveFits(
+			snapshot.Name, frozen.RepositoryIdentity, resolvedPrompt, frozen.PublishBranch,
+		) {
 			return protocol.BuildAdmission{}, conflict(
 				"agent_prompt_too_large",
-				"the frozen standard-build Procedure and work-item context cannot fit the Worker request",
+				"the frozen standard-build Procedure and work-item context cannot fit the Worker request with recovery reserves",
 			)
 		}
 		state, blockedReason := "blocked", taskConcurrencyBlockedReason

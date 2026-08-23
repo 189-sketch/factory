@@ -65,10 +65,11 @@ func (s *Store) AppendAgentUpdate(
 		if !input.ReplayOnly && !validCommitSHA(input.CheckpointSHA) {
 			return protocol.WorkUpdate{}, invalid("invalid_checkpoint", "needs-input requires a full checkpoint SHA")
 		}
-	} else if input.CheckpointSHA != "" {
+	} else if input.CheckpointSHA != "" || input.CheckpointPublished {
 		return protocol.WorkUpdate{}, invalid("unexpected_checkpoint", "only needs-input accepts a checkpoint SHA")
 	}
-	if input.ReplayOnly && (input.PullRequestHeadBranch != "" || input.PullRequestHeadSHA != "" || input.CheckpointSHA != "") {
+	if input.ReplayOnly && (input.PullRequestHeadBranch != "" || input.PullRequestHeadSHA != "" ||
+		input.CheckpointSHA != "" || input.CheckpointPublished) {
 		return protocol.WorkUpdate{}, invalid("unexpected_replay_evidence", "replay lookup cannot include Worker-derived evidence")
 	}
 
@@ -132,6 +133,11 @@ func (s *Store) AppendAgentUpdate(
 	if workState != string(protocol.WorkRunning) || owner != string(protocol.ExecutionOwnerWorkerAttempt) {
 		return protocol.WorkUpdate{}, conflict("update_not_active", "the Work is not owned by this active Attempt")
 	}
+	if input.Status == protocol.WorkUpdateNeedsInput {
+		if err := validateContinuationWithinTx(ctx, tx, workID, input.Message, strings.Repeat("a", protocol.MaxAnswerBytes)); err != nil {
+			return protocol.WorkUpdate{}, err
+		}
+	}
 
 	existingOutcome, hasOutcome, err := attemptOutcome(ctx, tx, attemptID)
 	if err != nil {
@@ -179,11 +185,11 @@ func (s *Store) AppendAgentUpdate(
 		INSERT INTO work_updates(
 			id, work_id, attempt_id, request_id, sequence, status, message,
 			pull_request_url, pull_request_head_branch, pull_request_head_sha,
-			checkpoint_sha, actor, accepted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?)
+			checkpoint_sha, checkpoint_published, actor, accepted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?)
 	`, updateID, workID, attemptID, input.RequestID, sequence, input.Status, input.Message,
 		input.PullRequestURL, input.PullRequestHeadBranch, input.PullRequestHeadSHA,
-		input.CheckpointSHA, now); err != nil {
+		input.CheckpointSHA, input.CheckpointPublished, now); err != nil {
 		return protocol.WorkUpdate{}, unavailable(err)
 	}
 	if err := storeAgentUpdateRequest(ctx, tx, attemptID, input.RequestID, digest, updateID, now); err != nil {
@@ -247,14 +253,16 @@ func storedAgentUpdateRequest(
 		SELECT stored_update.id, stored_update.work_id, COALESCE(stored_update.attempt_id, ''), stored_update.request_id,
 		       stored_update.sequence, stored_update.status, stored_update.message, stored_update.pull_request_url,
 		       stored_update.pull_request_head_branch, stored_update.pull_request_head_sha,
-		       stored_update.checkpoint_sha, stored_update.actor, stored_update.accepted_at, request.request_digest
+		       stored_update.checkpoint_sha, stored_update.checkpoint_published,
+		       stored_update.actor, stored_update.accepted_at, request.request_digest
 		FROM agent_update_requests request
 		JOIN work_updates stored_update ON stored_update.id = request.update_id
 		WHERE request.attempt_id = ? AND request.request_id = ?
 	`, attemptID, requestID).Scan(
 		&update.ID, &update.WorkID, &update.AttemptID, &update.RequestID, &update.Sequence,
 		&update.Status, &update.Message, &update.PullRequestURL, &update.PullRequestHeadBranch,
-		&update.PullRequestHeadSHA, &update.CheckpointSHA, &update.Actor, &acceptedAt, &digest,
+		&update.PullRequestHeadSHA, &update.CheckpointSHA, &update.CheckpointPublished,
+		&update.Actor, &acceptedAt, &digest,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.WorkUpdate{}, nil, false, nil
@@ -272,12 +280,12 @@ func attemptOutcome(ctx context.Context, tx *sql.Tx, attemptID string) (protocol
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, work_id, COALESCE(attempt_id, ''), request_id, sequence, status, message,
 		       pull_request_url, pull_request_head_branch, pull_request_head_sha,
-		       checkpoint_sha, actor, accepted_at
+		       checkpoint_sha, checkpoint_published, actor, accepted_at
 		FROM work_updates WHERE attempt_id = ? AND status != 'running'
 	`, attemptID).Scan(&update.ID, &update.WorkID, &update.AttemptID, &update.RequestID,
 		&update.Sequence, &update.Status, &update.Message, &update.PullRequestURL,
 		&update.PullRequestHeadBranch, &update.PullRequestHeadSHA, &update.CheckpointSHA,
-		&update.Actor, &acceptedAt)
+		&update.CheckpointPublished, &update.Actor, &acceptedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.WorkUpdate{}, false, nil
 	}
@@ -293,7 +301,8 @@ func sameAgentUpdate(update protocol.WorkUpdate, input protocol.AttemptUpdateReq
 		update.PullRequestURL == input.PullRequestURL &&
 		update.PullRequestHeadBranch == input.PullRequestHeadBranch &&
 		update.PullRequestHeadSHA == input.PullRequestHeadSHA &&
-		update.CheckpointSHA == input.CheckpointSHA
+		update.CheckpointSHA == input.CheckpointSHA &&
+		update.CheckpointPublished == input.CheckpointPublished
 }
 
 func storeAgentUpdateRequest(
@@ -319,12 +328,12 @@ func (s *Store) workUpdate(ctx context.Context, id string) (protocol.WorkUpdate,
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, work_id, COALESCE(attempt_id, ''), request_id, sequence, status, message,
 		       pull_request_url, pull_request_head_branch, pull_request_head_sha,
-		       checkpoint_sha, actor, accepted_at
+		       checkpoint_sha, checkpoint_published, actor, accepted_at
 		FROM work_updates WHERE id = ?
 	`, id).Scan(&update.ID, &update.WorkID, &update.AttemptID, &update.RequestID,
 		&update.Sequence, &update.Status, &update.Message, &update.PullRequestURL,
 		&update.PullRequestHeadBranch, &update.PullRequestHeadSHA, &update.CheckpointSHA,
-		&update.Actor, &acceptedAt)
+		&update.CheckpointPublished, &update.Actor, &acceptedAt)
 	if err != nil {
 		return protocol.WorkUpdate{}, unavailable(err)
 	}
@@ -381,7 +390,7 @@ func (s *Store) WorkUpdates(
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, work_id, COALESCE(attempt_id, ''), request_id, sequence, status, message,
 		       pull_request_url, pull_request_head_branch, pull_request_head_sha,
-		       checkpoint_sha, actor, accepted_at
+		       checkpoint_sha, checkpoint_published, actor, accepted_at
 		FROM work_updates
 		WHERE work_id = ? AND sequence > ?
 		ORDER BY sequence
@@ -398,7 +407,7 @@ func (s *Store) WorkUpdates(
 		if err := rows.Scan(&update.ID, &update.WorkID, &update.AttemptID, &update.RequestID,
 			&update.Sequence, &update.Status, &update.Message, &update.PullRequestURL,
 			&update.PullRequestHeadBranch, &update.PullRequestHeadSHA, &update.CheckpointSHA,
-			&update.Actor, &acceptedAt); err != nil {
+			&update.CheckpointPublished, &update.Actor, &acceptedAt); err != nil {
 			return protocol.WorkUpdatePage{}, unavailable(err)
 		}
 		update.AcceptedAt = fromMillis(acceptedAt)

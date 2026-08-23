@@ -64,15 +64,8 @@ func (s *Store) materializeBlockedSessionForWorker(
 				}
 				return err
 			}
-			executionID, err := newID()
-			if err != nil {
-				return unavailable(err)
-			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO executions(id, session_id, assigned_worker_id, required_runtime, state, created_at, updated_at)
-				VALUES (?, ?, ?, ?, 'queued', ?, ?)
-			`, executionID, value.id, selection.workerID, value.runtime, now, now); err != nil {
-				return unavailable(err)
+			if err := queueExistingExecution(ctx, tx, value.id, selection.workerID, value.runtime, now); err != nil {
+				return err
 			}
 			result, err := tx.ExecContext(ctx, `
 				UPDATE sessions SET state = 'queued', blocked_reason = NULL, assigned_worker_id = ?,

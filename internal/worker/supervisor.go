@@ -1213,15 +1213,19 @@ func resultPath(dataDirectory, attemptID string) (string, error) {
 	return path, nil
 }
 
-func supervisorStartRequest(process *supervisorProcess, token string) protocol.StartAttemptRequest {
+func supervisorStartRequest(process *supervisorProcess, token string, startedFromSHA ...string) protocol.StartAttemptRequest {
 	supervisorPID := process.supervisorPID
 	processGroupID := process.processGroupID
-	return protocol.StartAttemptRequest{
+	request := protocol.StartAttemptRequest{
 		LeaseToken:      token,
 		SupervisorPID:   &supervisorPID,
 		ProcessIdentity: process.supervisorIdentity,
 		ProcessGroupID:  &processGroupID,
 	}
+	if len(startedFromSHA) != 0 {
+		request.StartedFromSHA = startedFromSHA[0]
+	}
+	return request
 }
 
 func processSummary(process *supervisorProcess) string {

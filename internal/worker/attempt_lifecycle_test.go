@@ -43,8 +43,8 @@ func TestBuildPromptAddsUpdateContractOnlyForAgentUpdateWork(t *testing.T) {
 	prompt := buildPrompt(claim, worktree{Branch: "factory/local", BaseBranch: "main"})
 	for _, expected := range []string{
 		"This Work is unfinished until you call factory update.",
-		"running", "ready", "failed", "no-change", "Ready requires --pr",
-		"Needs-input is unavailable until verified checkpoint support is enabled",
+		"running", "ready", "needs-input", "failed", "no-change", "Ready requires --pr",
+		"Needs-input ends this Attempt", "clean worktree", "committed and pushed",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("agent-update prompt missing %q: %s", expected, prompt)

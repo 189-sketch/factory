@@ -12,6 +12,9 @@ const (
 	MaxAgentBranchBytes    = 1 << 10
 )
 
+const AgentUpdatePromptContract = `Factory update contract:
+This Work is unfinished until you call factory update. Use status running for useful progress only. Before exiting, report exactly one outcome: ready, needs-input, failed, or no-change. Ready requires --pr with the GitHub pull request URL. Needs-input ends this Attempt and requires a clean worktree with all changed work committed and pushed to the immutable Factory publish branch. Always include a concise non-empty --message.`
+
 func ResolveTaskSchedulePrompt(prompt string, scheduledAt time.Time, cron, timezone string) (string, error) {
 	occurrence, err := json.Marshal(struct {
 		Type        string    `json:"type"`
@@ -42,4 +45,16 @@ func FormatAgentPrompt(title, repository, workingBranch, targetBaseBranch, resol
 func AgentPromptFits(title, repository, resolvedPrompt string) bool {
 	maxBranch := strings.Repeat("x", MaxAgentBranchBytes)
 	return len([]byte(FormatAgentPrompt(title, repository, maxBranch, maxBranch, resolvedPrompt))) <= MaxAgentPromptBytes
+}
+
+func FormatAgentUpdatePrompt(title, repository, workingBranch, targetBaseBranch, resolvedPrompt string) string {
+	return FormatAgentPrompt(title, repository, workingBranch, targetBaseBranch, resolvedPrompt) +
+		"\n\n" + AgentUpdatePromptContract
+}
+
+func AgentUpdatePromptFits(title, repository, resolvedPrompt string) bool {
+	maxBranch := strings.Repeat("x", MaxAgentBranchBytes)
+	return len([]byte(FormatAgentUpdatePrompt(
+		title, repository, maxBranch, maxBranch, resolvedPrompt,
+	))) <= MaxAgentPromptBytes
 }

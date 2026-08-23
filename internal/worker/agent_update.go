@@ -160,11 +160,6 @@ func (manager *Manager) handleAgentUpdate(
 		writeAgentUpdateError(writer, http.StatusForbidden, "update_scope_mismatch", "the update capability is scoped to another Work or Attempt", false)
 		return
 	}
-	if input.Status == protocol.WorkUpdateNeedsInput {
-		writeAgentUpdateError(writer, http.StatusConflict, "checkpoint_required", "needs-input requires a verified durable checkpoint", false)
-		return
-	}
-
 	forward := protocol.AttemptUpdateRequest{
 		LeaseToken: leaseToken, RequestID: input.RequestID, Status: input.Status,
 		Message: input.Message, PullRequestURL: input.PullRequestURL,
@@ -194,6 +189,18 @@ func (manager *Manager) handleAgentUpdate(
 		}
 		forward.PullRequestHeadBranch = evidence.HeadBranch
 		forward.PullRequestHeadSHA = evidence.HeadSHA
+	} else if input.Status == protocol.WorkUpdateNeedsInput {
+		evidence, validationErr := manager.validateNeedsInputCheckpoint(request.Context(), claim, repository, value)
+		if validationErr != nil {
+			status := http.StatusConflict
+			if validationErr.retriable {
+				status = http.StatusServiceUnavailable
+			}
+			writeAgentUpdateError(writer, status, validationErr.code, validationErr.message, validationErr.retriable)
+			return
+		}
+		forward.CheckpointSHA = evidence.SHA
+		forward.CheckpointPublished = evidence.Published
 	}
 	update, err := manager.client.update(request.Context(), claim.Attempt.ID, forward)
 	if err != nil {
@@ -244,6 +251,85 @@ func writeAgentUpdateError(writer http.ResponseWriter, status int, code, message
 type readyDeliveryEvidence struct {
 	HeadBranch string
 	HeadSHA    string
+}
+
+type checkpointEvidence struct {
+	SHA       string
+	Published bool
+}
+
+func (manager *Manager) validateNeedsInputCheckpoint(
+	ctx context.Context,
+	claim protocol.Claim,
+	repository Repository,
+	value worktree,
+) (checkpointEvidence, *updateValidationError) {
+	release, err := manager.repositoryLocks.acquire(ctx, repositoryCoordinationKey(repository))
+	if err != nil {
+		return checkpointEvidence{}, &updateValidationError{
+			code: "checkpoint_validation_unavailable", message: "checkpoint validation is temporarily unavailable",
+			retriable: true, err: err,
+		}
+	}
+	defer release()
+	if err := validateRegisteredOrigin(ctx, manager.options.GitExecutable, repository); err != nil {
+		return checkpointEvidence{}, &updateValidationError{
+			code: "checkpoint_validation_unavailable", message: "repository origin validation failed",
+			retriable: true, err: err,
+		}
+	}
+	stdout, stderr, err := runGitCommand(
+		ctx, manager.options.GitExecutable, value.Path, 256<<10,
+		"status", "--porcelain=v1", "-z", "--untracked-files=all",
+	)
+	if err != nil {
+		return checkpointEvidence{}, &updateValidationError{
+			code: "checkpoint_validation_unavailable", message: "the Work worktree could not be inspected",
+			retriable: true, err: commandFailure("inspect checkpoint worktree", stdout, stderr, err),
+		}
+	}
+	if len(stdout) != 0 {
+		return checkpointEvidence{}, &updateValidationError{
+			code:    "checkpoint_worktree_dirty",
+			message: "needs-input requires a clean worktree; commit or remove every changed and untracked file",
+		}
+	}
+	stdout, stderr, err = runGitCommand(
+		ctx, manager.options.GitExecutable, value.Path, 64<<10,
+		"rev-parse", "--verify", "HEAD^{commit}",
+	)
+	if err != nil || !commitPattern.MatchString(strings.TrimSpace(string(stdout))) {
+		return checkpointEvidence{}, &updateValidationError{
+			code: "checkpoint_validation_unavailable", message: "local HEAD could not be resolved",
+			retriable: true, err: commandFailure("resolve checkpoint HEAD", stdout, stderr, err),
+		}
+	}
+	localSHA := strings.TrimSpace(string(stdout))
+	remoteSHA, found, err := remotePublishCommitOptional(
+		ctx, manager.options.GitExecutable, repository, claim.Session.Target.PublishBranch,
+	)
+	if err != nil {
+		return checkpointEvidence{}, &updateValidationError{
+			code: "checkpoint_validation_unavailable", message: "the Work publish branch could not be checked",
+			retriable: true, err: err,
+		}
+	}
+	if found {
+		if remoteSHA != localSHA {
+			return checkpointEvidence{}, &updateValidationError{
+				code:    "checkpoint_head_mismatch",
+				message: "local HEAD must match the fetched immutable Factory publish branch before needs-input",
+			}
+		}
+		return checkpointEvidence{SHA: localSHA, Published: true}, nil
+	}
+	if localSHA != value.BaseCommit {
+		return checkpointEvidence{}, &updateValidationError{
+			code:    "checkpoint_publish_required",
+			message: "changed Work must be committed and pushed to the immutable Factory publish branch before needs-input",
+		}
+	}
+	return checkpointEvidence{SHA: localSHA}, nil
 }
 
 type gitHubPullRequest struct {
@@ -359,23 +445,42 @@ func remotePublishCommit(
 	repository Repository,
 	branch string,
 ) (string, error) {
-	if err := validateBaseBranch(ctx, gitExecutable, repository, branch); err != nil {
+	commit, found, err := remotePublishCommitOptional(ctx, gitExecutable, repository, branch)
+	if err != nil {
 		return "", err
+	}
+	if !found {
+		return "", errors.New("publish branch does not exist")
+	}
+	return commit, nil
+}
+
+func remotePublishCommitOptional(
+	ctx context.Context,
+	gitExecutable string,
+	repository Repository,
+	branch string,
+) (string, bool, error) {
+	if err := validateBaseBranch(ctx, gitExecutable, repository, branch); err != nil {
+		return "", false, err
 	}
 	stdout, stderr, err := runGitCommand(ctx, gitExecutable, repository.Path, 64<<10,
 		"ls-remote", "--refs", "origin", "refs/heads/"+branch)
 	if err != nil {
-		return "", commandFailure("resolve publish branch", stdout, stderr, err)
+		return "", false, commandFailure("resolve publish branch", stdout, stderr, err)
 	}
 	fields := strings.Fields(string(stdout))
+	if len(fields) == 0 {
+		return "", false, nil
+	}
 	if len(fields) != 2 || fields[1] != "refs/heads/"+branch || !commitPattern.MatchString(fields[0]) {
-		return "", errors.New("publish branch does not exist")
+		return "", false, errors.New("publish branch returned malformed Git evidence")
 	}
 	commit := fields[0]
 	stdout, stderr, err = runGitCommand(ctx, gitExecutable, repository.Path, 256<<10,
 		"fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", "refs/heads/"+branch)
 	if err != nil {
-		return "", commandFailure("fetch publish branch", stdout, stderr, err)
+		return "", false, commandFailure("fetch publish branch", stdout, stderr, err)
 	}
 	stdout, stderr, err = runGitCommand(ctx, gitExecutable, repository.Path, 64<<10,
 		"rev-parse", "--verify", commit+"^{commit}")
@@ -383,7 +488,7 @@ func remotePublishCommit(
 		if err == nil {
 			err = errors.New("fetched publish branch did not contain its advertised commit")
 		}
-		return "", commandFailure("verify fetched publish branch", stdout, stderr, err)
+		return "", false, commandFailure("verify fetched publish branch", stdout, stderr, err)
 	}
-	return commit, nil
+	return commit, true, nil
 }

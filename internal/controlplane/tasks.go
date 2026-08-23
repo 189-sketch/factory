@@ -853,7 +853,13 @@ func (s *Store) admitTask(
 	materialized := 0
 	targets := make([]protocol.WorkTarget, 0, len(snapshot.Repositories))
 	for position, repository := range snapshot.Repositories {
-		if !protocol.AgentPromptFits(snapshot.Name, repository.RemoteIdentity, resolvedPrompt) {
+		promptFits := protocol.AgentPromptFits(snapshot.Name, repository.RemoteIdentity, resolvedPrompt)
+		if snapshot.OutcomeContract == protocol.OutcomeAgentUpdate {
+			promptFits = agentContinuationReserveFits(
+				snapshot.Name, repository.RemoteIdentity, resolvedPrompt, workPublishBranch(strings.Repeat("0", 36)),
+			)
+		}
+		if !promptFits {
 			return protocol.RunDetail{}, false, conflict("agent_prompt_too_large", "the frozen Task prompt cannot fit the Worker request")
 		}
 		sessionID, err := newID()
@@ -1324,7 +1330,8 @@ func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) 
 		       session.target_position, session.target_key, session.target_kind, session.source_kind,
 		       session.source_key, session.source_reference, session.context_snapshot, session.publish_branch,
 		       COALESCE(session.predecessor_work_id, ''), session.execution_owner, session.waiting_reason,
-		       session.latest_progress, session.question, session.checkpoint_sha, session.pending_resume_sha,
+		       session.latest_progress, session.question, session.answer, session.checkpoint_sha,
+		       session.pending_resume_sha, session.checkpoint_published,
 		       session.pull_request_url, session.pull_request_head_branch, session.pull_request_head_sha,
 		       session.terminal_message
 		FROM sessions session WHERE session.run_id = ? ORDER BY session.target_position, session.id
@@ -1348,7 +1355,8 @@ func (s *Store) Run(ctx context.Context, id string) (protocol.RunDetail, error) 
 			&session.Target.SourceKind, &session.Target.SourceKey, &session.Target.SourceReference,
 			&session.Target.ContextSnapshot, &session.Target.PublishBranch, &session.PredecessorWorkID,
 			&session.ExecutionOwner, &session.WaitingReason, &session.LatestProgress, &session.Question,
-			&session.CheckpointSHA, &session.PendingResumeSHA, &session.PullRequestURL,
+			&session.Answer, &session.CheckpointSHA, &session.PendingResumeSHA,
+			&session.CheckpointPublished, &session.PullRequestURL,
 			&session.PullRequestHeadBranch, &session.PullRequestHeadSHA, &session.TerminalMessage); err != nil {
 			rows.Close()
 			return detail, unavailable(err)
@@ -1646,14 +1654,16 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 	var runID, state, repositoryID, identity, runtime, backend, profileID string
 	var targetKind, sourceKind, sourceKey string
 	var owner protocol.ExecutionOwner
+	var previouslyStarted sql.NullInt64
 	var profileVersion int
 	err = tx.QueryRowContext(ctx, `
 		SELECT run_id, state, repository_id, repository_identity, required_runtime,
 		       execution_backend, execution_profile_id, execution_profile_version,
-		       target_kind, source_kind, source_key, execution_owner
+		       target_kind, source_kind, source_key, execution_owner, started_at
 		FROM sessions WHERE id = ? AND run_id = ?
 	`, sessionID, expectedRunID).Scan(&runID, &state, &repositoryID, &identity, &runtime,
-		&backend, &profileID, &profileVersion, &targetKind, &sourceKind, &sourceKey, &owner)
+		&backend, &profileID, &profileVersion, &targetKind, &sourceKind, &sourceKey, &owner,
+		&previouslyStarted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return protocol.RunDetail{}, ErrNotFound
 	}
@@ -1746,11 +1756,11 @@ func (s *Store) RetrySession(ctx context.Context, expectedRunID, sessionID strin
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE sessions SET state = 'queued', blocked_reason = NULL, assigned_worker_id = ?,
-		       cancellation_requested = 0, retry_may_repeat_effects = 1,
+		       cancellation_requested = 0, retry_may_repeat_effects = ?,
 		       started_at = NULL, terminal_at = NULL, result = NULL, failure_reason = NULL,
 		       terminal_message = '', waiting_reason = '', execution_owner = 'none'
 		WHERE id = ?
-	`, assignedWorkerID, sessionID); err != nil {
+	`, assignedWorkerID, previouslyStarted.Valid, sessionID); err != nil {
 		return protocol.RunDetail{}, unavailable(err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET updated_at = ?, terminal_at = NULL WHERE id = ?`, now, runID); err != nil {
