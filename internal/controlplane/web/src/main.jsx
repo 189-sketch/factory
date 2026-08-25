@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, Bot, ChevronDown, CircleDot, GitBranch, Moon, Play, Plus, Server, Sun, Workflow, X } from "lucide-react";
+import { Activity, Bot, ChevronDown, GitBranch, Moon, Play, Plus, Server, Sun, Workflow, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -79,7 +79,7 @@ function App() {
     return true;
   }), [filter, status.jobs]);
 
-  const busyWorkers = useMemo(() => new Set(status.jobs.flatMap((job) => job.runs.filter((run) => run.state === "running" && run.worker_name).map((run) => run.worker_name))), [status.jobs]);
+  const latestWorkerSeen = status.workers.reduce((latest, worker) => !latest || Date.parse(worker.last_seen_at) > Date.parse(latest) ? worker.last_seen_at : latest, "");
 
   async function submit(event) {
     event.preventDefault();
@@ -116,19 +116,17 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background text-foreground md:flex">
-      <aside className="sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-60 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3 md:py-4">
+      <aside className="sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-52 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3 md:py-4">
         <div className="flex h-10 items-center gap-2.5 px-2 text-sm font-semibold tracking-tight">
           <span className="grid size-7 place-items-center rounded-md border border-border bg-surface text-primary shadow-xs"><Workflow className="size-4" /></span>
           <span>Factory</span>
           <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground md:inline">v0.1</span>
         </div>
         <nav className="ml-4 flex flex-1 md:ml-0 md:mt-6 md:block" aria-label="Primary">
-          <p className="nav-label">Control plane</p>
           <div className="nav-item nav-item-active"><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></div>
-          <p className="nav-label mt-5">Infrastructure</p>
-          <div className="nav-item"><Server className="size-4" /><span>Workers</span><span className="ml-auto text-xs text-muted-foreground">{status.workers.length}</span></div>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
+          <div className="nav-item h-auto py-2"><Server className="size-4" /><span><span className="block">{status.workers.length} registered</span><span className="mt-0.5 block text-[10px]">{latestWorkerSeen ? `Last poll ${relativeTime(latestWorkerSeen)}` : "No workers"}</span></span></div>
           <button onClick={() => setDark((value) => !value)} className="nav-item w-full" aria-label={`Switch to ${dark ? "light" : "dark"} theme`}>
             {dark ? <Moon className="size-4" /> : <Sun className="size-4" />}<span>{dark ? "Dark" : "Light"} theme</span>
           </button>
@@ -136,24 +134,17 @@ function App() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        <header className="flex min-h-16 items-center justify-between border-b border-border px-4 sm:px-6 lg:px-8">
-          <div><h1 className="text-base font-semibold tracking-tight">Runs</h1><p className="hidden text-xs text-muted-foreground sm:block">Monitor work dispatched to your workers.</p></div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setDark((value) => !value)} aria-label="Toggle theme">{dark ? <Moon className="size-4" /> : <Sun className="size-4" />}</Button>
-            <Button onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
-          </div>
-        </header>
+        <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+          <header className="flex items-start justify-between gap-6">
+            <div><h1 className="text-xl font-semibold tracking-tight">Runs</h1><p className="mt-1 text-sm text-muted-foreground">Monitor work dispatched to your workers.</p></div>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setDark((value) => !value)} aria-label="Toggle theme">{dark ? <Moon className="size-4" /> : <Sun className="size-4" />}</Button>
+              <Button onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
+            </div>
+          </header>
 
-        <div className="mx-auto max-w-[1500px] space-y-5 p-4 sm:p-6 lg:p-8">
           {composerOpen && <RunComposer choices={choices} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
-
-          <section className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Run summary">
-            <Summary label="Active" value={counts.active} icon={Play} tone="text-warning" />
-            <Summary label="Succeeded" value={counts.succeeded} icon={CircleDot} tone="text-success" />
-            <Summary label="Failed" value={counts.failed} icon={CircleDot} tone="text-danger" />
-            <Summary label="Registered workers" value={status.workers.length} icon={Server} tone="text-primary" />
-          </section>
 
           <section>
             <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -162,7 +153,7 @@ function App() {
                   <Button key={value} variant={filter === value ? "outline" : "ghost"} size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={filter === value ? "bg-surface" : ""}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
                 ))}
               </div>
-              <p className="text-xs text-muted-foreground">Refreshes every 2 seconds</p>
+              <p className="text-xs text-muted-foreground">{counts.all} run{counts.all === 1 ? "" : "s"}</p>
             </div>
 
             <Card className="overflow-hidden">
@@ -173,7 +164,6 @@ function App() {
             </Card>
           </section>
 
-          <Workers workers={status.workers} busyWorkers={busyWorkers} />
         </div>
       </main>
     </div>
@@ -195,10 +185,6 @@ function RunComposer({ choices, selection, setSelection, repository, setReposito
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
     </form>
   </Card>;
-}
-
-function Summary({ label, value, icon: Icon, tone }) {
-  return <Card className="flex items-center justify-between p-4"><div><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{value}</p></div><Icon className={cn("size-4", tone)} /></Card>;
 }
 
 function RunRow({ job, open, toggle }) {
@@ -230,12 +216,6 @@ function State({ value }) {
 }
 
 function SelectionIcon({ kind }) { return kind === "pipeline" ? <Workflow className="size-3.5 shrink-0" /> : <Bot className="size-3.5 shrink-0" />; }
-
-function Workers({ workers, busyWorkers }) {
-  return <section><div className="mb-3 flex items-center justify-between"><div><h2 className="text-sm font-semibold">Workers</h2><p className="mt-0.5 text-xs text-muted-foreground">Machines known to this control plane.</p></div><Badge className="border-border bg-muted text-muted-foreground">{workers.length} registered</Badge></div>
-    <Card className="divide-y divide-border overflow-hidden">{workers.length ? workers.map((worker) => { const busy = busyWorkers.has(worker.name); return <div key={worker.instance_id} className="flex items-center gap-3 px-4 py-3"><span className="relative grid size-8 place-items-center rounded-md bg-muted text-muted-foreground"><Server className="size-4" />{busy && <span className="absolute -right-0.5 -top-0.5 size-2 rounded-full border-2 border-surface bg-success" />}</span><div className="min-w-0"><p className="truncate text-sm font-medium">{worker.name}</p><p className="truncate font-mono text-[11px] text-muted-foreground">{shortId(worker.instance_id)}</p></div><span className={cn("ml-auto text-xs", busy ? "text-success" : "text-muted-foreground")}>{busy ? "Running work" : `Seen ${relativeTime(worker.last_seen_at)}`}</span></div>; }) : <p className="p-5 text-sm text-muted-foreground">No workers have registered.</p>}</Card>
-  </section>;
-}
 
 function EmptyRuns({ filtered, openComposer }) {
   return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching runs" : "No runs yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Submit a prompt to an agent or pipeline. It will appear here as soon as the control plane admits it."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New run</Button>}</div>;
