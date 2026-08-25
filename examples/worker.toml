@@ -12,5 +12,6 @@ command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 [executors.claude]
 command = ["claude", "--print", "--dangerously-skip-permissions"]
 
-[repositories.factory]
-path = "/absolute/path/to/factory"
+# Register each repository that managed workers may run in.
+# [repositories.my-project]
+# path = "/absolute/path/to/my-project"

@@ -23,15 +23,14 @@ just build
 `worker.toml` contains machine-local executors, repositories, and credentials.
 
 ```sh
-mkdir -p ~/.factory/agents
-cp examples/worker.toml ~/.factory/worker.toml
-cp examples/config.toml ~/.factory/config.toml
-cp examples/agents/plan.md ~/.factory/agents/plan.md
-cp examples/agents/build.md ~/.factory/agents/build.md
-cp examples/agents/verify.md ~/.factory/agents/verify.md
+factory init
 ```
 
-Update the repository path in `~/.factory/worker.toml`:
+This installs editable defaults in `~/.factory`: shared configuration, worker
+configuration, the `plan`, `build`, and `verify` prompts, and a random worker token.
+Running it again creates any missing files and keeps every existing file unchanged.
+
+Add repositories to `~/.factory/worker.toml`:
 
 ```toml
 data_directory = "~/.factory/worker"
@@ -46,8 +45,8 @@ command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 [executors.claude]
 command = ["claude", "--print", "--dangerously-skip-permissions"]
 
-[repositories.factory]
-path = "/absolute/path/to/factory"
+# [repositories.my-project]
+# path = "/absolute/path/to/my-project"
 ```
 
 The optional worker `name` defaults to the machine hostname. Set it only when a
@@ -157,15 +156,9 @@ The optional local control plane stores jobs and runs in SQLite and serves an em
 React application. Node is needed only to rebuild the frontend; the resulting Factory
 binary contains the static assets.
 
-Create one shared worker token and copy the example configuration:
-
-```sh
-mkdir -p ~/.factory/server
-openssl rand -hex 32 > ~/.factory/server/worker.token
-chmod 600 ~/.factory/server/worker.token
-```
-
-Then start both processes. Each command reads its default configuration file:
+`factory init` creates the shared worker token. Start both processes after adding
+at least one repository to `worker.toml`. Each command reads its default configuration
+file:
 
 ```sh
 factory start
