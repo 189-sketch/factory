@@ -1,0 +1,13 @@
+name = "local-worker"
+data_directory = "~/.factory/worker"
+definition_file = "factory.toml"
+
+[control_plane]
+url = "http://127.0.0.1:7331"
+token_file = "~/.factory/server/worker.token"
+
+[executors.codex]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+
+[repositories.factory]
+path = "/absolute/path/to/factory"

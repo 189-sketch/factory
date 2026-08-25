@@ -1,0 +1,431 @@
+package controlplane
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/owainlewis/factory-v2/internal/config"
+	"github.com/owainlewis/factory-v2/internal/protocol"
+	_ "modernc.org/sqlite"
+)
+
+var (
+	ErrLeaseConflict = errors.New("run lease does not match")
+	ErrRunState      = errors.New("run is not active")
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+type Job struct {
+	ID            string    `json:"id"`
+	Prompt        string    `json:"prompt"`
+	Repository    string    `json:"repository"`
+	SelectionKind string    `json:"selection_kind"`
+	SelectionName string    `json:"selection_name"`
+	State         string    `json:"state"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	Runs          []Run     `json:"runs"`
+}
+
+type Run struct {
+	ID          string    `json:"id"`
+	Step        int       `json:"step"`
+	Agent       string    `json:"agent"`
+	Executor    string    `json:"executor"`
+	State       string    `json:"state"`
+	WorkerName  string    `json:"worker_name,omitempty"`
+	ExitCode    *int      `json:"exit_code,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
+type Worker struct {
+	InstanceID string    `json:"instance_id"`
+	Name       string    `json:"name"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+}
+
+type Snapshot struct {
+	Jobs    []Job    `json:"jobs"`
+	Workers []Worker `json:"workers"`
+}
+
+type RunOutput struct {
+	Result string
+	Events string
+}
+
+func OpenStore(path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("create database directory: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	store := &Store{db: db}
+	if err := store.initialize(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) initialize(ctx context.Context) error {
+	const schema = `
+PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  prompt TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  selection_kind TEXT NOT NULL,
+  selection_name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  step INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  agent_hash TEXT NOT NULL,
+  executor TEXT NOT NULL,
+  repository TEXT NOT NULL,
+  rendered_prompt TEXT NOT NULL,
+  timeout_ms INTEGER NOT NULL,
+  state TEXT NOT NULL,
+  worker_instance TEXT,
+  lease_token TEXT,
+  exit_code INTEGER,
+  error TEXT,
+  result TEXT,
+  events TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  UNIQUE(job_id, step)
+);
+CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id, step);
+CREATE TABLE IF NOT EXISTS workers (
+  instance_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);`
+	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("initialize database: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) CreateJob(ctx context.Context, prompt, repository, kind, name string, agents []config.ResolvedAgent) (string, error) {
+	if len(agents) == 0 {
+		return "", errors.New("job must contain at least one agent")
+	}
+	jobID, err := randomID("job", 12)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs(id,prompt,repository,selection_kind,selection_name,state,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)`, jobID, prompt, repository, kind, name, now, now); err != nil {
+		return "", fmt.Errorf("insert job: %w", err)
+	}
+	for index, agent := range agents {
+		runID, err := randomID("run", 12)
+		if err != nil {
+			return "", err
+		}
+		state := "pending"
+		if index == 0 {
+			state = "queued"
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,step,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?)`, runID, jobID, index, agent.Name, agent.Hash, agent.Executor, repository, agent.Prompt, agent.Timeout.Milliseconds(), state); err != nil {
+			return "", fmt.Errorf("insert run: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit job: %w", err)
+	}
+	return jobID, nil
+}
+
+func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protocol.RunSpec, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
+		return nil, fmt.Errorf("update worker: %w", err)
+	}
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &active, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	executors := stringSet(request.Executors)
+	repositories := stringSet(request.Repositories)
+	rows, err := tx.QueryContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms FROM runs WHERE state='queued' ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	var selected protocol.RunSpec
+	for rows.Next() {
+		var candidate protocol.RunSpec
+		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Agent, &candidate.AgentHash, &candidate.Executor, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if executors[candidate.Executor] && repositories[candidate.Repository] {
+			selected = candidate
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if selected.ID == "" {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	selected.LeaseToken, err = randomID("lease", 24)
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,lease_token=?,started_at=? WHERE id=? AND state='queued'`, request.InstanceID, selected.LeaseToken, now, selected.ID)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return nil, fmt.Errorf("lease run: concurrent state change")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='running',updated_at=? WHERE id=? AND state='queued'`, now, selected.JobID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &selected, nil
+}
+
+func (s *Store) Complete(ctx context.Context, runID string, completion protocol.Completion) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var jobID, state, instanceID, leaseToken string
+	var step int
+	if err := tx.QueryRowContext(ctx, `SELECT job_id,step,state,COALESCE(worker_instance,''),COALESCE(lease_token,'') FROM runs WHERE id=?`, runID).Scan(&jobID, &step, &state, &instanceID, &leaseToken); err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare([]byte(instanceID), []byte(completion.InstanceID)) != 1 || subtle.ConstantTimeCompare([]byte(leaseToken), []byte(completion.LeaseToken)) != 1 {
+		return ErrLeaseConflict
+	}
+	if terminalRunState(state) {
+		return tx.Commit()
+	}
+	if state != "running" {
+		return ErrRunState
+	}
+	if !terminalRunState(completion.State) || completion.State == "skipped" {
+		return fmt.Errorf("invalid terminal run state %q", completion.State)
+	}
+	if err := validateOutcome(completion.State, completion.ExitCode); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,completed_at=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, runID); err != nil {
+		return err
+	}
+	if completion.State == "succeeded" {
+		result, err := tx.ExecContext(ctx, `UPDATE runs SET state='queued' WHERE job_id=? AND step=? AND state='pending'`, jobID, step+1)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed == 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='succeeded',updated_at=? WHERE id=?`, now, jobID); err != nil {
+				return err
+			}
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='skipped' WHERE job_id=? AND state='pending'`, jobID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
+	jobs, err := s.listJobs(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	workers, err := s.listWorkers(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Jobs: jobs, Workers: workers}, nil
+}
+
+func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) {
+	var output RunOutput
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(result,''),COALESCE(events,'') FROM runs WHERE id=?`, runID).Scan(&output.Result, &output.Events)
+	return output, err
+}
+
+func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,prompt,repository,selection_kind,selection_name,state,created_at,updated_at FROM jobs ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	jobs := []Job{}
+	for rows.Next() {
+		var job Job
+		var created, updated string
+		if err := rows.Scan(&job.ID, &job.Prompt, &job.Repository, &job.SelectionKind, &job.SelectionName, &job.State, &created, &updated); err != nil {
+			return nil, err
+		}
+		job.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		job.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		jobs = append(jobs, job)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range jobs {
+		jobs[index].Runs, err = s.listRuns(ctx, jobs[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return jobs, nil
+}
+
+func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.step,r.agent,r.executor,r.state,COALESCE(w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,'') FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance WHERE r.job_id=? ORDER BY r.step`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := []Run{}
+	for rows.Next() {
+		var run Run
+		var started, completed string
+		if err := rows.Scan(&run.ID, &run.Step, &run.Agent, &run.Executor, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed); err != nil {
+			return nil, err
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		run.CompletedAt, _ = time.Parse(time.RFC3339Nano, completed)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT instance_id,name,last_seen_at FROM workers ORDER BY name,instance_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	workers := []Worker{}
+	for rows.Next() {
+		var worker Worker
+		var lastSeen string
+		if err := rows.Scan(&worker.InstanceID, &worker.Name, &lastSeen); err != nil {
+			return nil, err
+		}
+		worker.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeen)
+		workers = append(workers, worker)
+	}
+	return workers, rows.Err()
+}
+
+func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
+	var run protocol.RunSpec
+	err := row.Scan(&run.ID, &run.JobID, &run.Agent, &run.AgentHash, &run.Executor, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
+	return run, err
+}
+
+func stringSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, value := range values {
+		set[value] = true
+	}
+	return set
+}
+
+func terminalRunState(state string) bool {
+	return state == "succeeded" || state == "failed" || state == "timed_out" || state == "cancelled" || state == "skipped"
+}
+
+func validateOutcome(state string, exitCode int) error {
+	switch state {
+	case "succeeded":
+		if exitCode != 0 {
+			return errors.New("succeeded run must have exit code 0")
+		}
+	case "failed":
+		if exitCode == 0 {
+			return errors.New("failed run must have a non-zero exit code")
+		}
+	case "timed_out":
+		if exitCode != 124 {
+			return errors.New("timed out run must have exit code 124")
+		}
+	case "cancelled":
+		if exitCode != 130 {
+			return errors.New("cancelled run must have exit code 130")
+		}
+	}
+	return nil
+}
+
+func randomID(prefix string, byteCount int) (string, error) {
+	body := make([]byte, byteCount)
+	if _, err := rand.Read(body); err != nil {
+		return "", fmt.Errorf("generate %s ID: %w", prefix, err)
+	}
+	return prefix + "_" + hex.EncodeToString(body), nil
+}

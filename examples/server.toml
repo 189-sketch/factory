@@ -1,0 +1,4 @@
+listen = "127.0.0.1:7331"
+database = "~/.factory/server/factory.db"
+definition_file = "factory.toml"
+worker_token_file = "~/.factory/server/worker.token"

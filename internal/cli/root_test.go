@@ -221,7 +221,9 @@ func TestWorkerRunReturnsRuntimeFailureStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerBody := "data_directory = " + strconv.Quote(blockedDataDirectory) + "\n" +
-		"definition_file = \"factory.toml\"\n"
+		"definition_file = \"factory.toml\"\n\n" +
+		"[executors.default]\n" +
+		"command = [\"/bin/sh\", \"-c\", \"cat\"]\n"
 	if err := os.WriteFile(workerConfig, []byte(workerBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -272,19 +274,19 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		buildScript = "cat >/dev/null; exit 9"
 	}
 	definitionBody := "[agents.plan]\n" +
-		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
+		"executor = \"default\"\n" +
 		"prompt_file = \"plan.md\"\n" +
 		"timeout = \"5s\"\n\n" +
 		"[agents.review]\n" +
-		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
+		"executor = \"default\"\n" +
 		"prompt_file = \"review.md\"\n" +
 		"timeout = \"5s\"\n\n" +
 		"[agents.build]\n" +
-		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(buildScript) + "]\n" +
+		"executor = \"build\"\n" +
 		"prompt_file = \"build.md\"\n" +
 		"timeout = \"5s\"\n\n" +
 		"[agents.verify]\n" +
-		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
+		"executor = \"default\"\n" +
 		"prompt_file = \"verify.md\"\n" +
 		"timeout = \"5s\"\n\n" +
 		"[pipelines.code]\n" +
@@ -294,7 +296,11 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	}
 	worker := filepath.Join(directory, "worker.toml")
 	workerBody := "data_directory = \"" + filepath.ToSlash(filepath.Join(directory, "data")) + "\"\n" +
-		"definition_file = \"factory.toml\"\n"
+		"definition_file = \"factory.toml\"\n\n" +
+		"[executors.default]\n" +
+		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n\n" +
+		"[executors.build]\n" +
+		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(buildScript) + "]\n"
 	if err := os.WriteFile(worker, []byte(workerBody), 0o600); err != nil {
 		t.Fatal(err)
 	}

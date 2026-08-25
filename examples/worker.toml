@@ -1,3 +1,6 @@
 # Machine-local paths only. Agent prompts belong in factory.toml.
 data_directory = "~/.factory/worker"
 definition_file = "factory.toml"
+
+[executors.codex]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]

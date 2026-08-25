@@ -1,15 +1,15 @@
 [agents.plan]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/plan.md"
 timeout = "20m"
 
 [agents.build]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/build.md"
 timeout = "60m"
 
 [agents.verify]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/verify.md"
 timeout = "30m"
 

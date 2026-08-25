@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,15 +22,42 @@ const (
 	maxPromptBytes         = 256 << 10
 	maxInputPromptBytes    = 256 << 10
 	maxRenderedPromptBytes = maxPromptBytes + maxInputPromptBytes
+	maxTokenBytes          = 8 << 10
 	defaultWorkerDirName   = ".factory/worker"
+	defaultServerDirName   = ".factory/server"
 	promptParameter        = "{{factory.prompt}}"
 	factoryParameterPrefix = "{{factory"
 )
 
 type Worker struct {
-	DataDirectory  string `toml:"data_directory"`
-	DefinitionFile string `toml:"definition_file"`
+	Name           string                `toml:"name"`
+	DataDirectory  string                `toml:"data_directory"`
+	DefinitionFile string                `toml:"definition_file"`
+	ControlPlane   ControlPlane          `toml:"control_plane"`
+	Executors      map[string]Executor   `toml:"executors"`
+	Repositories   map[string]Repository `toml:"repositories"`
 	configDir      string
+}
+
+type ControlPlane struct {
+	URL       string `toml:"url"`
+	TokenFile string `toml:"token_file"`
+}
+
+type Executor struct {
+	Command []string `toml:"command"`
+}
+
+type Repository struct {
+	Path string `toml:"path"`
+}
+
+type Server struct {
+	Listen          string `toml:"listen"`
+	Database        string `toml:"database"`
+	DefinitionFile  string `toml:"definition_file"`
+	WorkerTokenFile string `toml:"worker_token_file"`
+	configDir       string
 }
 
 type Definition struct {
@@ -38,9 +66,9 @@ type Definition struct {
 }
 
 type Agent struct {
-	Command    []string `toml:"command"`
-	PromptFile string   `toml:"prompt_file"`
-	Timeout    string   `toml:"timeout"`
+	Executor   string `toml:"executor"`
+	PromptFile string `toml:"prompt_file"`
+	Timeout    string `toml:"timeout"`
 }
 
 type Pipeline struct {
@@ -49,6 +77,7 @@ type Pipeline struct {
 
 type ResolvedAgent struct {
 	Name       string
+	Executor   string
 	Command    []string
 	Prompt     string
 	Timeout    time.Duration
@@ -89,6 +118,32 @@ func LoadWorker(path string) (Worker, error) {
 	return applyWorkerDefaults(worker)
 }
 
+func LoadServer(path string) (Server, error) {
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Server{}, fmt.Errorf("find user home directory: %w", err)
+		}
+		path = filepath.Join(home, ".factory", "server.toml")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return Server{}, fmt.Errorf("resolve server config: %w", err)
+	}
+	body, err := readBoundedFile(absPath, maxConfigBytes)
+	if err != nil {
+		return Server{}, fmt.Errorf("read server config %q: %w", absPath, err)
+	}
+	var server Server
+	decoder := toml.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&server); err != nil {
+		return Server{}, fmt.Errorf("parse server config %q: %w", absPath, err)
+	}
+	server.configDir = filepath.Dir(absPath)
+	return applyServerDefaults(server)
+}
+
 func (w Worker) ResolveDefinition(override string) (string, error) {
 	path := override
 	base := ""
@@ -113,11 +168,61 @@ func (w Worker) ResolveDefinition(override string) (string, error) {
 	return filepath.Clean(absPath), nil
 }
 
+func (s Server) ResolveDefinition(override string) (string, error) {
+	path := override
+	if path == "" {
+		path = s.DefinitionFile
+	}
+	if path == "" {
+		path = "factory.toml"
+	}
+	return resolveConfigPath(path, s.configDir)
+}
+
+func (w Worker) ResolveAgent(agent ResolvedAgent) (ResolvedAgent, error) {
+	executor, ok := w.Executors[agent.Executor]
+	if !ok {
+		return ResolvedAgent{}, fmt.Errorf("executor %q is not configured on this worker", agent.Executor)
+	}
+	if err := validateCommand(agent.Executor, executor.Command); err != nil {
+		return ResolvedAgent{}, err
+	}
+	agent.Command = append([]string(nil), executor.Command...)
+	return agent, nil
+}
+
+func (w Worker) ResolveRepository(name string) (string, error) {
+	repository, ok := w.Repositories[name]
+	if !ok {
+		return "", fmt.Errorf("repository %q is not configured on this worker", name)
+	}
+	return resolveConfigPath(repository.Path, w.configDir)
+}
+
+func (w Worker) WorkerToken() (string, error) {
+	if strings.TrimSpace(w.ControlPlane.TokenFile) == "" {
+		return "", errors.New("control_plane.token_file is required")
+	}
+	path, err := resolveConfigPath(w.ControlPlane.TokenFile, w.configDir)
+	if err != nil {
+		return "", err
+	}
+	return readToken(path)
+}
+
+func (w Worker) ExecutorNames() []string { return sortedMapKeys(w.Executors) }
+
+func (w Worker) RepositoryNames() []string { return sortedMapKeys(w.Repositories) }
+
+func (s Server) WorkerToken() (string, error) {
+	return readToken(s.WorkerTokenFile)
+}
+
 func LoadAgent(definitionPath, name string) (ResolvedAgent, error) {
 	if strings.TrimSpace(name) == "" {
 		return ResolvedAgent{}, errors.New("agent name is required")
 	}
-	definition, err := loadDefinition(definitionPath)
+	definition, err := LoadDefinition(definitionPath)
 	if err != nil {
 		return ResolvedAgent{}, err
 	}
@@ -132,7 +237,7 @@ func LoadPipeline(definitionPath, name string) ([]ResolvedAgent, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("pipeline name is required")
 	}
-	definition, err := loadDefinition(definitionPath)
+	definition, err := LoadDefinition(definitionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +266,7 @@ func LoadPipeline(definitionPath, name string) ([]ResolvedAgent, error) {
 	return agents, nil
 }
 
-func loadDefinition(definitionPath string) (Definition, error) {
+func LoadDefinition(definitionPath string) (Definition, error) {
 	body, err := readBoundedFile(definitionPath, maxConfigBytes)
 	if err != nil {
 		return Definition{}, fmt.Errorf("read definition %q: %w", definitionPath, err)
@@ -176,13 +281,8 @@ func loadDefinition(definitionPath string) (Definition, error) {
 }
 
 func resolveAgent(definitionPath, name string, agent Agent) (ResolvedAgent, error) {
-	if len(agent.Command) == 0 || strings.TrimSpace(agent.Command[0]) == "" {
-		return ResolvedAgent{}, fmt.Errorf("agent %q must define a non-empty command", name)
-	}
-	for index, argument := range agent.Command {
-		if strings.ContainsRune(argument, '\x00') {
-			return ResolvedAgent{}, fmt.Errorf("agent %q command argument %d contains a null byte", name, index)
-		}
+	if strings.TrimSpace(agent.Executor) == "" {
+		return ResolvedAgent{}, fmt.Errorf("agent %q must define executor", name)
 	}
 	if strings.TrimSpace(agent.PromptFile) == "" {
 		return ResolvedAgent{}, fmt.Errorf("agent %q must define prompt_file", name)
@@ -217,7 +317,7 @@ func resolveAgent(definitionPath, name string, agent Agent) (ResolvedAgent, erro
 
 	resolved := ResolvedAgent{
 		Name:       name,
-		Command:    append([]string(nil), agent.Command...),
+		Executor:   agent.Executor,
 		Prompt:     string(prompt),
 		Timeout:    timeout,
 		Definition: definitionPath,
@@ -294,7 +394,99 @@ func applyWorkerDefaults(worker Worker) (Worker, error) {
 		return Worker{}, fmt.Errorf("resolve worker data directory: %w", err)
 	}
 	worker.DataDirectory = filepath.Clean(worker.DataDirectory)
+	for name, repository := range worker.Repositories {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(repository.Path) == "" {
+			return Worker{}, errors.New("repository names and paths must be non-empty")
+		}
+		path, err := resolveConfigPath(repository.Path, worker.configDir)
+		if err != nil {
+			return Worker{}, fmt.Errorf("resolve repository %q: %w", name, err)
+		}
+		repository.Path = path
+		worker.Repositories[name] = repository
+	}
+	for name, executor := range worker.Executors {
+		if err := validateCommand(name, executor.Command); err != nil {
+			return Worker{}, err
+		}
+	}
 	return worker, nil
+}
+
+func applyServerDefaults(server Server) (Server, error) {
+	if server.Listen == "" {
+		server.Listen = "127.0.0.1:7331"
+	}
+	if server.Database == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return Server{}, fmt.Errorf("find user home directory: %w", err)
+		}
+		server.Database = filepath.Join(home, filepath.FromSlash(defaultServerDirName), "factory.db")
+	} else {
+		path, err := resolveConfigPath(server.Database, server.configDir)
+		if err != nil {
+			return Server{}, fmt.Errorf("resolve database: %w", err)
+		}
+		server.Database = path
+	}
+	if strings.TrimSpace(server.WorkerTokenFile) == "" {
+		return Server{}, errors.New("worker_token_file is required")
+	}
+	tokenPath, err := resolveConfigPath(server.WorkerTokenFile, server.configDir)
+	if err != nil {
+		return Server{}, fmt.Errorf("resolve worker token file: %w", err)
+	}
+	server.WorkerTokenFile = tokenPath
+	return server, nil
+}
+
+func validateCommand(name string, command []string) error {
+	if len(command) == 0 || strings.TrimSpace(command[0]) == "" {
+		return fmt.Errorf("executor %q must define a non-empty command", name)
+	}
+	for index, argument := range command {
+		if strings.ContainsRune(argument, '\x00') {
+			return fmt.Errorf("executor %q command argument %d contains a null byte", name, index)
+		}
+	}
+	return nil
+}
+
+func resolveConfigPath(path, base string) (string, error) {
+	path, err := expandHome(path)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(path) && base != "" {
+		path = filepath.Join(base, path)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absPath), nil
+}
+
+func readToken(path string) (string, error) {
+	body, err := readBoundedFile(path, maxTokenBytes)
+	if err != nil {
+		return "", fmt.Errorf("read token file %q: %w", path, err)
+	}
+	token := strings.TrimSpace(string(body))
+	if token == "" {
+		return "", fmt.Errorf("token file %q is empty", path)
+	}
+	return token, nil
+}
+
+func sortedMapKeys[T any](values map[string]T) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func defaultWorkerConfigPath() (string, error) {
@@ -337,11 +529,11 @@ func readBoundedFile(path string, limit int64) ([]byte, error) {
 
 func agentHash(agent ResolvedAgent) (string, error) {
 	payload, err := json.Marshal(struct {
-		Name    string        `json:"name"`
-		Command []string      `json:"command"`
-		Prompt  string        `json:"prompt"`
-		Timeout time.Duration `json:"timeout"`
-	}{agent.Name, agent.Command, agent.Prompt, agent.Timeout})
+		Name     string        `json:"name"`
+		Executor string        `json:"executor"`
+		Prompt   string        `json:"prompt"`
+		Timeout  time.Duration `json:"timeout"`
+	}{agent.Name, agent.Executor, agent.Prompt, agent.Timeout})
 	if err != nil {
 		return "", fmt.Errorf("encode agent definition: %w", err)
 	}

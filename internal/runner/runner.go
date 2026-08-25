@@ -33,6 +33,7 @@ const (
 )
 
 type Options struct {
+	RunID         string
 	Agent         config.ResolvedAgent
 	Repository    string
 	DataDirectory string
@@ -89,9 +90,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err != nil {
 		return Result{}, err
 	}
-	runID, err := randomID("run", 12)
-	if err != nil {
-		return Result{}, &RuntimeError{Cause: err}
+	runID := options.RunID
+	if runID == "" {
+		runID, err = randomID("run", 12)
+		if err != nil {
+			return Result{}, &RuntimeError{Cause: err}
+		}
+	} else if !validRunID(runID) {
+		return Result{}, fmt.Errorf("invalid run ID %q", runID)
 	}
 	runDirectory := filepath.Join(options.DataDirectory, "runs", runID)
 	if err := createDurableDirectory(runDirectory); err != nil {
@@ -195,6 +201,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		return result, &OutcomeError{State: state, ExitCode: exitCode, Cause: outcome}
 	}
 	return result, nil
+}
+
+func validRunID(value string) bool {
+	if len(value) != len("run_")+24 || !strings.HasPrefix(value, "run_") {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "run_"))
+	return err == nil
 }
 
 func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {

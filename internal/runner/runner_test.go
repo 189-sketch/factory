@@ -110,6 +110,26 @@ func TestExecuteStreamsPromptAndPersistsOrderedResult(t *testing.T) {
 	}
 }
 
+func TestExecuteUsesManagedRunIDAndRejectsUnsafeIDs(t *testing.T) {
+	repository := newGitRepository(t)
+	dataDirectory := t.TempDir()
+	runID := "run_0123456789abcdef01234567"
+	result, err := Execute(t.Context(), Options{
+		RunID:         runID,
+		Agent:         helperAgent("echo", time.Second),
+		Repository:    repository,
+		DataDirectory: dataDirectory,
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	if err != nil || result.ID != runID {
+		t.Fatalf("result = %#v, %v", result, err)
+	}
+	if _, err := Execute(t.Context(), Options{RunID: "../escape", Agent: helperAgent("echo", time.Second), Repository: repository, DataDirectory: dataDirectory, Stdout: io.Discard, Stderr: io.Discard}); err == nil || !strings.Contains(err.Error(), "invalid run ID") {
+		t.Fatalf("unsafe run ID error = %v", err)
+	}
+}
+
 func TestExecuteUsesRepositoryAsWorkingDirectory(t *testing.T) {
 	repository := newGitRepository(t)
 	nested := filepath.Join(repository, "nested")
@@ -261,6 +281,34 @@ func TestEventLogTruncatesRecordingWithoutFailing(t *testing.T) {
 	}
 	if truncations != 1 {
 		t.Fatalf("truncation events = %d; events = %#v", truncations, events)
+	}
+}
+
+func TestEventLogBoundsActualFileAcrossTinyChunks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	log, err := newEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.fileLimit = 4 << 10
+	for range 1000 {
+		if err := log.appendOutput("stdout", []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > log.fileLimit {
+		t.Fatalf("event file size = %d, limit = %d", info.Size(), log.fileLimit)
+	}
+	events := readEvents(t, path)
+	if events[len(events)-1].Type != "process.output_truncated" {
+		t.Fatalf("last event = %#v", events[len(events)-1])
 	}
 }
 

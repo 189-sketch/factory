@@ -37,23 +37,26 @@ definition:
 ```toml
 data_directory = "~/.factory/worker"
 definition_file = "factory.toml"
+
+[executors.codex]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 ```
 
 The definition resolves prompt paths relative to itself:
 
 ```toml
 [agents.plan]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/plan.md"
 timeout = "20m"
 
 [agents.build]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/build.md"
 timeout = "60m"
 
 [agents.verify]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+executor = "codex"
 prompt_file = "agents/verify.md"
 timeout = "30m"
 
@@ -128,13 +131,54 @@ repository as its working directory. `--prompt` is required and replaces every
 other work request. Standard output and error remain live.
 Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
-`result.json` in the same directory. Event recording stops after 64 MiB and adds
-a truncation event, while live output and the agent run continue.
+`result.json` in the same directory. Recording stops after 64 MiB of process output or
+when the encoded event file reaches 32 MiB, and adds a truncation event while live output
+and the agent run continue.
 
 Ctrl-C cancels the complete agent process group. A configured timeout does the
 same. Factory returns the agent's exit status, `1` for a Worker runtime failure,
 `124` for timeout, `130` for cancellation, and `2` for invalid commands or
 configuration.
+
+## Control plane
+
+The optional local control plane stores jobs and runs in SQLite and serves an embedded
+React application. Node is needed only to rebuild the frontend; the resulting Factory
+binary contains the static assets.
+
+Create one shared worker token and copy the example configuration:
+
+```sh
+mkdir -p ~/.factory/server
+openssl rand -hex 32 > ~/.factory/server/worker.token
+chmod 600 ~/.factory/server/worker.token
+cp examples/server.toml ~/.factory/server.toml
+cp examples/managed-worker.toml ~/.factory/managed-worker.toml
+```
+
+Set `definition_file` in `server.toml` and the repository path in
+`managed-worker.toml`, then start both processes:
+
+```sh
+factory start --config=~/.factory/server.toml
+factory worker start --config=~/.factory/managed-worker.toml
+```
+
+Factory listens on [http://127.0.0.1:7331](http://127.0.0.1:7331). Port 8080 is not
+used. This first control-plane phase deliberately rejects non-loopback listeners. The
+server owns prompts and pipelines; the worker owns executor commands, repository paths,
+and credentials. Workers receive only a rendered prompt, executor name, repository key,
+timeout, and opaque lease.
+
+The control plane treats output as opaque. It records whether each agent process is
+queued, running, or terminal, but it does not interpret ticket labels or decide whether
+the requested product outcome is complete.
+
+Rebuild the React assets and Go binary together with:
+
+```sh
+just build
+```
 
 ## Verify
 

@@ -39,12 +39,65 @@ func TestLoadWorkerRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadManagedWorkerResolvesMachineConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret\n")
+	path := filepath.Join(directory, "worker.toml")
+	writeTestFile(t, path, `name = "local"
+data_directory = "state"
+
+[control_plane]
+url = "http://127.0.0.1:7331"
+token_file = "token"
+
+[executors.test]
+command = ["agent", "run"]
+
+[repositories.factory]
+path = "repository"
+`)
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository, err := worker.ResolveRepository("factory"); err != nil || repository != filepath.Join(directory, "repository") {
+		t.Fatalf("repository = %q, %v", repository, err)
+	}
+	if token, err := worker.WorkerToken(); err != nil || token != "secret" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+	resolved, err := worker.ResolveAgent(ResolvedAgent{Executor: "test"})
+	if err != nil || len(resolved.Command) != 2 || resolved.Command[1] != "run" {
+		t.Fatalf("agent = %#v, %v", resolved, err)
+	}
+}
+
+func TestLoadServerAppliesLocalDefaultsAndPaths(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "token"), "secret")
+	path := filepath.Join(directory, "server.toml")
+	writeTestFile(t, path, "database = \"state/factory.db\"\ndefinition_file = \"factory.toml\"\nworker_token_file = \"token\"\n")
+	server, err := LoadServer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.Listen != "127.0.0.1:7331" || server.Database != filepath.Join(directory, "state", "factory.db") {
+		t.Fatalf("server = %#v", server)
+	}
+	if definition, err := server.ResolveDefinition(""); err != nil || definition != filepath.Join(directory, "factory.toml") {
+		t.Fatalf("definition = %q, %v", definition, err)
+	}
+	if token, err := server.WorkerToken(); err != nil || token != "secret" {
+		t.Fatalf("token = %q, %v", token, err)
+	}
+}
+
 func TestLoadAgentResolvesPromptAndHashesDefinition(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository for {{factory.prompt}}.\n")
 	definition := filepath.Join(directory, "factory.toml")
 	writeTestFile(t, definition, `[agents.plan]
-command = ["agent", "run"]
+executor = "test"
 prompt_file = "plan.md"
 timeout = "45s"
 `)
@@ -59,8 +112,12 @@ timeout = "45s"
 	if agent.Timeout != 45*time.Second {
 		t.Fatalf("timeout = %s", agent.Timeout)
 	}
-	if len(agent.Command) != 2 || agent.Command[1] != "run" {
-		t.Fatalf("command = %#v", agent.Command)
+	resolved, err := (Worker{Executors: map[string]Executor{"test": {Command: []string{"agent", "run"}}}}).ResolveAgent(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved.Command) != 2 || resolved.Command[1] != "run" {
+		t.Fatalf("command = %#v", resolved.Command)
 	}
 	if len(agent.Hash) != 64 {
 		t.Fatalf("hash = %q", agent.Hash)
@@ -116,7 +173,7 @@ func TestLoadAgentRequiresPromptParameterAndRejectsUnsupportedFactoryParameter(t
 			directory := t.TempDir()
 			writeTestFile(t, filepath.Join(directory, "plan.md"), test.prompt)
 			definition := filepath.Join(directory, "factory.toml")
-			writeTestFile(t, definition, "[agents.plan]\ncommand = [\"agent\"]\nprompt_file = \"plan.md\"\n")
+			writeTestFile(t, definition, "[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\n")
 			if _, err := LoadAgent(definition, "plan"); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
 			}
@@ -129,15 +186,14 @@ func TestLoadAgentRejectsMissingAndInvalidDefinitions(t *testing.T) {
 	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan.\n")
 	definition := filepath.Join(directory, "factory.toml")
 	writeTestFile(t, definition, `[agents.plan]
-command = []
 prompt_file = "plan.md"
 `)
 
 	if _, err := LoadAgent(definition, "missing"); err == nil || !strings.Contains(err.Error(), "not defined") {
 		t.Fatalf("expected missing-agent error, got %v", err)
 	}
-	if _, err := LoadAgent(definition, "plan"); err == nil || !strings.Contains(err.Error(), "non-empty command") {
-		t.Fatalf("expected command error, got %v", err)
+	if _, err := LoadAgent(definition, "plan"); err == nil || !strings.Contains(err.Error(), "must define executor") {
+		t.Fatalf("expected executor error, got %v", err)
 	}
 }
 
@@ -147,11 +203,11 @@ func TestLoadPipelineResolvesAgentsInOrder(t *testing.T) {
 	writeTestFile(t, filepath.Join(directory, "build.md"), "Build {{factory.prompt}}.\n")
 	definition := filepath.Join(directory, "factory.toml")
 	writeTestFile(t, definition, `[agents.plan]
-command = ["agent", "plan"]
+executor = "plan"
 prompt_file = "plan.md"
 
 [agents.build]
-command = ["agent", "build"]
+executor = "build"
 prompt_file = "build.md"
 
 [pipelines.code]

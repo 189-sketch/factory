@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"github.com/owainlewis/factory-v2/internal/config"
+	"github.com/owainlewis/factory-v2/internal/controlplane"
+	"github.com/owainlewis/factory-v2/internal/managedworker"
 	"github.com/owainlewis/factory-v2/internal/runner"
 	"github.com/spf13/cobra"
 )
@@ -22,6 +24,7 @@ type commandOptions struct {
 	stdout         io.Writer
 	stderr         io.Writer
 	version        string
+	listen         string
 }
 
 func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
@@ -56,11 +59,13 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.PersistentFlags().StringVar(&options.configPath, "config", "", "worker configuration file (default ~/.factory/worker.toml)")
+	root.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file")
 	root.AddCommand(newRunCommand(options, true))
+	root.AddCommand(newStartCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Factory Worker"}
 	worker.AddCommand(newRunCommand(options, false))
+	worker.AddCommand(newWorkerStartCommand(options))
 	root.AddCommand(worker)
 
 	root.AddCommand(&cobra.Command{
@@ -72,6 +77,67 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		},
 	})
 	return root
+}
+
+func newStartCommand(options *commandOptions) *cobra.Command {
+	start := &cobra.Command{
+		Use:   "start",
+		Short: "Start the Factory control plane",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			serverConfig, err := config.LoadServer(options.configPath)
+			if err != nil {
+				return err
+			}
+			if options.listen != "" {
+				serverConfig.Listen = options.listen
+			}
+			definitionPath, err := serverConfig.ResolveDefinition("")
+			if err != nil {
+				return err
+			}
+			if _, err := config.LoadDefinition(definitionPath); err != nil {
+				return err
+			}
+			token, err := serverConfig.WorkerToken()
+			if err != nil {
+				return err
+			}
+			store, err := controlplane.OpenStore(serverConfig.Database)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+			server, err := controlplane.NewServer(store, definitionPath, token)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(options.stderr, "factory: control plane listening on http://%s\n", serverConfig.Listen)
+			return server.Serve(command.Context(), serverConfig.Listen)
+		},
+	}
+	start.Flags().StringVar(&options.listen, "listen", "", "loopback listen address (default 127.0.0.1:7331)")
+	return start
+}
+
+func newWorkerStartCommand(options *commandOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "start",
+		Short: "Start a managed Factory Worker",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			workerConfig, err := config.LoadWorker(options.configPath)
+			if err != nil {
+				return err
+			}
+			worker, err := managedworker.New(workerConfig, options.stdout, options.stderr)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(options.stderr, "factory: worker %s connecting to %s\n", workerConfig.Name, workerConfig.ControlPlane.URL)
+			return worker.Run(command.Context())
+		},
+	}
 }
 
 func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
@@ -134,6 +200,10 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 func runAgent(ctx context.Context, options *commandOptions, worker config.Worker, agent config.ResolvedAgent) error {
 	var err error
 	agent, err = config.RenderPrompt(agent, options.prompt)
+	if err != nil {
+		return err
+	}
+	agent, err = worker.ResolveAgent(agent)
 	if err != nil {
 		return err
 	}
