@@ -64,7 +64,8 @@ url = "http://127.0.0.1:7331"
 token_file = "~/.factory/worker.token"
 
 [executors.codex]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
+models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 
 [repositories.factory]
 path = "/workspace/factory"
@@ -86,6 +87,7 @@ run ID
 job ID
 agent name and definition hash
 executor name
+optional model alias
 repository key
 rendered prompt
 timeout

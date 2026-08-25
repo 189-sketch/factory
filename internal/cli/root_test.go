@@ -411,6 +411,24 @@ func TestWorkerRunReturnsAgentExitStatus(t *testing.T) {
 	}
 }
 
+func TestWorkerRunSelectsConfiguredModelAlias(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"worker", "run",
+		"--agent=plan",
+		"--model=luna",
+		"--prompt=test model selection",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "model"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.String() != "gpt-test-luna\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
 func TestWorkerRunReturnsRuntimeFailureStatus(t *testing.T) {
 	workerConfig := writeCLIConfig(t, "success")
 	blockedDataDirectory := filepath.Join(filepath.Dir(workerConfig), "blocked-data")
@@ -466,6 +484,9 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	if mode == "fail" {
 		script = "exit 9"
 	}
+	if mode == "model" {
+		script = `printf '%s\n' "$0"; cat >/dev/null`
+	}
 	buildScript := script
 	if mode == "fail-build" {
 		buildScript = "cat >/dev/null; exit 9"
@@ -492,10 +513,15 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	worker := filepath.Join(directory, "worker.toml")
+	defaultCommand := "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n"
+	if mode == "model" {
+		defaultCommand = "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + ", \"{{factory.model}}\"]\n" +
+			"models = { luna = \"gpt-test-luna\" }\n"
+	}
 	workerBody := "data_directory = \"" + filepath.ToSlash(filepath.Join(directory, "data")) + "\"\n" +
 		"\n" +
 		"[executors.default]\n" +
-		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n\n" +
+		defaultCommand + "\n" +
 		"[executors.build]\n" +
 		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(buildScript) + "]\n"
 	if err := os.WriteFile(worker, []byte(workerBody), 0o600); err != nil {

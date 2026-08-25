@@ -51,6 +51,7 @@ type submitRequest struct {
 	Repository string `json:"repository"`
 	Agent      string `json:"agent"`
 	Pipeline   string `json:"pipeline"`
+	Model      string `json:"model"`
 }
 
 type agentDefinitionResponse struct {
@@ -208,6 +209,11 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
 		return
 	}
+	input.Model = strings.TrimSpace(input.Model)
+	if len(input.Model) > 128 || strings.ContainsAny(input.Model, "\x00\r\n") {
+		writeError(response, http.StatusBadRequest, errors.New("model must be at most 128 characters on one line"))
+		return
+	}
 	if (input.Agent == "") == (input.Pipeline == "") {
 		writeError(response, http.StatusBadRequest, errors.New("exactly one agent or pipeline is required"))
 		return
@@ -237,6 +243,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
+		agents[index].Model = input.Model
 	}
 	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, kind, name, agents)
 	if err != nil {

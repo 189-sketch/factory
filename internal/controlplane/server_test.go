@@ -47,14 +47,14 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	foreign.Body.Close()
 
 	headers := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
-	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "factory", "agent": "plan"}, headers)
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "factory", "agent": "plan", "model": "luna"}, headers)
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d", created.StatusCode)
 	}
 	created.Body.Close()
 
 	status = getStatus(t, webServer.URL)
-	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "Work locally" || status.Jobs[0].Runs[0].State != "queued" {
+	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "Work locally" || status.Jobs[0].Runs[0].State != "queued" || status.Jobs[0].Runs[0].Model != "luna" {
 		t.Fatalf("jobs = %#v", status.Jobs)
 	}
 

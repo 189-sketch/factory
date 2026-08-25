@@ -46,6 +46,7 @@ type Run struct {
 	Step        int       `json:"step"`
 	Agent       string    `json:"agent"`
 	Executor    string    `json:"executor"`
+	Model       string    `json:"model,omitempty"`
 	State       string    `json:"state"`
 	WorkerName  string    `json:"worker_name,omitempty"`
 	ExitCode    *int      `json:"exit_code,omitempty"`
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS runs (
   agent TEXT NOT NULL,
   agent_hash TEXT NOT NULL,
   executor TEXT NOT NULL,
+  model TEXT NOT NULL DEFAULT '',
   repository TEXT NOT NULL,
   rendered_prompt TEXT NOT NULL,
   timeout_ms INTEGER NOT NULL,
@@ -142,6 +144,9 @@ CREATE TABLE IF NOT EXISTS worker_repositories (
 		return fmt.Errorf("initialize database: %w", err)
 	}
 	if err := s.addColumnIfMissing(ctx, "runs", "lease_expires_at", "INTEGER"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "runs", "model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
@@ -207,7 +212,7 @@ func (s *Store) CreateJob(ctx context.Context, prompt, repository, kind, name st
 		if index == 0 {
 			state = "queued"
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,step,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?)`, runID, jobID, index, agent.Name, agent.Hash, agent.Executor, repository, agent.Prompt, agent.Timeout.Milliseconds(), state); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO runs(id,job_id,step,agent,agent_hash,executor,model,repository,rendered_prompt,timeout_ms,state) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, runID, jobID, index, agent.Name, agent.Hash, agent.Executor, agent.Model, repository, agent.Prompt, agent.Timeout.Milliseconds(), state); err != nil {
 			return "", fmt.Errorf("insert run: %w", err)
 		}
 	}
@@ -239,7 +244,7 @@ func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protoc
 			return nil, fmt.Errorf("store worker repository: %w", err)
 		}
 	}
-	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
 	if err == nil {
 		if err := tx.Commit(); err != nil {
 			return nil, err
@@ -252,18 +257,18 @@ func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protoc
 
 	executors := stringSet(request.Executors)
 	repositories := stringSet(request.Repositories)
-	rows, err := tx.QueryContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms FROM runs WHERE state='queued' ORDER BY rowid`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,model,repository,rendered_prompt,timeout_ms FROM runs WHERE state='queued' ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
 	var selected protocol.RunSpec
 	for rows.Next() {
 		var candidate protocol.RunSpec
-		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Agent, &candidate.AgentHash, &candidate.Executor, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis); err != nil {
+		if err := rows.Scan(&candidate.ID, &candidate.JobID, &candidate.Agent, &candidate.AgentHash, &candidate.Executor, &candidate.Model, &candidate.Repository, &candidate.RenderedPrompt, &candidate.TimeoutMillis); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		if executors[candidate.Executor] && repositories[candidate.Repository] {
+		if executors[candidate.Executor] && repositories[candidate.Repository] && supportsModel(request.Models, candidate.Executor, candidate.Model) {
 			selected = candidate
 			break
 		}
@@ -465,7 +470,7 @@ func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
 }
 
 func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.step,r.agent,r.executor,r.state,COALESCE(w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,'') FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance WHERE r.job_id=? ORDER BY r.step`, jobID)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.step,r.agent,r.executor,r.model,r.state,COALESCE(w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,'') FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance WHERE r.job_id=? ORDER BY r.step`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +479,7 @@ func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
 	for rows.Next() {
 		var run Run
 		var started, completed string
-		if err := rows.Scan(&run.ID, &run.Step, &run.Agent, &run.Executor, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed); err != nil {
+		if err := rows.Scan(&run.ID, &run.Step, &run.Agent, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed); err != nil {
 			return nil, err
 		}
 		run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
@@ -533,7 +538,7 @@ func (s *Store) listWorkerRepositories(ctx context.Context, instanceID string) (
 
 func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
 	var run protocol.RunSpec
-	err := row.Scan(&run.ID, &run.JobID, &run.Agent, &run.AgentHash, &run.Executor, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
+	err := row.Scan(&run.ID, &run.JobID, &run.Agent, &run.AgentHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
 	return run, err
 }
 
@@ -543,6 +548,20 @@ func stringSet(values []string) map[string]bool {
 		set[value] = true
 	}
 	return set
+}
+
+func supportsModel(capabilities map[string][]string, executor, model string) bool {
+	if model == "" {
+		return true
+	}
+	models, ok := capabilities[executor]
+	if !ok {
+		return false
+	}
+	if len(models) == 0 {
+		return true
+	}
+	return stringSet(models)[model]
 }
 
 func terminalRunState(state string) bool {

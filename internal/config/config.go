@@ -26,6 +26,7 @@ const (
 	defaultWorkerDirName   = ".factory/worker"
 	defaultServerDirName   = ".factory/server"
 	promptParameter        = "{{factory.prompt}}"
+	modelParameter         = "{{factory.model}}"
 	factoryParameterPrefix = "{{factory"
 )
 
@@ -44,7 +45,8 @@ type ControlPlane struct {
 }
 
 type Executor struct {
-	Command []string `toml:"command"`
+	Command []string          `toml:"command"`
+	Models  map[string]string `toml:"models"`
 }
 
 type Repository struct {
@@ -79,6 +81,7 @@ type ResolvedAgent struct {
 	Name       string
 	Executor   string
 	Command    []string
+	Model      string
 	Prompt     string
 	Timeout    time.Duration
 	Definition string
@@ -180,6 +183,10 @@ func (w Worker) ResolveFactoryConfig(override string) (string, error) {
 }
 
 func (w Worker) ResolveAgent(agent ResolvedAgent) (ResolvedAgent, error) {
+	return w.ResolveAgentModel(agent, "")
+}
+
+func (w Worker) ResolveAgentModel(agent ResolvedAgent, requestedModel string) (ResolvedAgent, error) {
 	executor, ok := w.Executors[agent.Executor]
 	if !ok {
 		return ResolvedAgent{}, fmt.Errorf("executor %q is not configured on this worker", agent.Executor)
@@ -187,8 +194,42 @@ func (w Worker) ResolveAgent(agent ResolvedAgent) (ResolvedAgent, error) {
 	if err := validateCommand(agent.Executor, executor.Command); err != nil {
 		return ResolvedAgent{}, err
 	}
-	agent.Command = append([]string(nil), executor.Command...)
+	model, err := resolveModel(agent.Executor, executor, requestedModel)
+	if err != nil {
+		return ResolvedAgent{}, err
+	}
+	agent.Command = make([]string, 0, len(executor.Command))
+	for _, argument := range executor.Command {
+		if model == "" && strings.Contains(argument, modelParameter) {
+			continue
+		}
+		agent.Command = append(agent.Command, strings.ReplaceAll(argument, modelParameter, model))
+	}
+	agent.Model = model
 	return agent, nil
+}
+
+func resolveModel(name string, executor Executor, requested string) (string, error) {
+	model := strings.TrimSpace(requested)
+	hasParameter := false
+	for _, argument := range executor.Command {
+		hasParameter = hasParameter || strings.Contains(argument, modelParameter)
+	}
+	if model == "" {
+		return "", nil
+	}
+	if !hasParameter {
+		return "", fmt.Errorf("executor %q does not support model selection; add %s to its command", name, modelParameter)
+	}
+	if resolved, ok := executor.Models[model]; ok {
+		model = strings.TrimSpace(resolved)
+	} else if len(executor.Models) > 0 {
+		return "", fmt.Errorf("model %q is not configured for executor %q", model, name)
+	}
+	if model == "" || len(model) > 128 || strings.ContainsAny(model, "\x00\r\n") {
+		return "", fmt.Errorf("executor %q model is invalid", name)
+	}
+	return model, nil
 }
 
 func (w Worker) ResolveRepository(name string) (string, error) {
@@ -211,6 +252,19 @@ func (w Worker) WorkerToken() (string, error) {
 }
 
 func (w Worker) ExecutorNames() []string { return sortedMapKeys(w.Executors) }
+
+func (w Worker) ModelCapabilities() map[string][]string {
+	capabilities := make(map[string][]string)
+	for name, executor := range w.Executors {
+		for _, argument := range executor.Command {
+			if strings.Contains(argument, modelParameter) {
+				capabilities[name] = sortedMapKeys(executor.Models)
+				break
+			}
+		}
+	}
+	return capabilities
+}
 
 func (w Worker) RepositoryNames() []string { return sortedMapKeys(w.Repositories) }
 
@@ -412,6 +466,20 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		if err := validateCommand(name, executor.Command); err != nil {
 			return Worker{}, err
 		}
+		for alias, model := range executor.Models {
+			if strings.TrimSpace(alias) == "" || strings.TrimSpace(model) == "" {
+				return Worker{}, fmt.Errorf("executor %q model aliases and values must be non-empty", name)
+			}
+		}
+		if len(executor.Models) > 0 {
+			hasParameter := false
+			for _, argument := range executor.Command {
+				hasParameter = hasParameter || strings.Contains(argument, modelParameter)
+			}
+			if !hasParameter {
+				return Worker{}, fmt.Errorf("executor %q defines models but its command does not contain %s", name, modelParameter)
+			}
+		}
 	}
 	return worker, nil
 }
@@ -451,6 +519,9 @@ func validateCommand(name string, command []string) error {
 	for index, argument := range command {
 		if strings.ContainsRune(argument, '\x00') {
 			return fmt.Errorf("executor %q command argument %d contains a null byte", name, index)
+		}
+		if index == 0 && strings.Contains(argument, modelParameter) {
+			return fmt.Errorf("executor %q command executable cannot contain %s", name, modelParameter)
 		}
 	}
 	return nil

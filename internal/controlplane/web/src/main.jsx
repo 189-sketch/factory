@@ -17,6 +17,7 @@ function App() {
   const [selection, setSelection] = useState("");
   const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("");
   const [statusError, setStatusError] = useState("");
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -104,7 +105,7 @@ function App() {
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Factory-CSRF": status.csrf_token },
-        body: JSON.stringify({ prompt, repository, [kind]: name }),
+        body: JSON.stringify({ prompt, repository, model: model.trim(), [kind]: name }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -161,7 +162,7 @@ function App() {
             </div>
           </header>
 
-          {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
@@ -188,7 +189,7 @@ function App() {
   );
 }
 
-function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, submitting, submit, close }) {
+function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, model, setModel, submitting, submit, close }) {
   return <Card className="overflow-hidden border-primary/25">
     <div className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-5">
       <h2 className="text-sm font-semibold">New run</h2>
@@ -199,6 +200,7 @@ function RunComposer({ choices, repositories, selection, setSelection, repositor
         <label><span className="field-label">Run with</span><select className="field-control" value={selection} onChange={(event) => setSelection(event.target.value)} required>{choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
         <label><span className="field-label">Repository</span><select className="field-control font-mono" value={repository} onChange={(event) => setRepository(event.target.value)} disabled={!repositories.length} required>{repositories.length ? repositories.map((name) => <option key={name} value={name}>{name}</option>) : <option value="">No registered repositories</option>}</select></label>
       </div>
+      <label><span className="field-label">Model <span className="font-normal normal-case tracking-normal text-muted-foreground">optional</span></span><input className="field-control font-mono" value={model} onChange={(event) => setModel(event.target.value)} placeholder="luna" maxLength={128} /></label>
       <label><span className="field-label">Prompt</span><textarea className="field-control min-h-28 resize-y" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Work on ticket https://github.com/acme/repo/issues/123" required /></label>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection || !repository}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
     </form>
@@ -224,7 +226,7 @@ function RunRow({ job, open, toggle }) {
 function RunSteps({ id, job }) {
   return <div id={id} className="border-t border-border bg-muted/20 px-4 py-4 lg:pl-[9rem]"><div className="grid gap-2 xl:grid-cols-3">{job.runs.map((run, index) => <div key={run.id} className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-surface p-3">
     <span className="grid size-6 shrink-0 place-items-center rounded-full border border-border font-mono text-xs text-muted-foreground">{index + 1}</span>
-    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{run.worker_name || run.executor}{duration(run) ? ` · ${duration(run)}` : ""}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
+    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{run.worker_name || run.executor}{run.model ? ` · ${run.model}` : ""}{duration(run) ? ` · ${duration(run)}` : ""}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
   </div>)}</div></div>;
 }
 

@@ -41,10 +41,12 @@ url = "http://127.0.0.1:7331"
 token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
-command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
+models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 
 [executors.claude]
-command = ["claude", "--print", "--dangerously-skip-permissions"]
+command = ["claude", "--print", "--model={{factory.model}}", "--dangerously-skip-permissions"]
+models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
 
 # [repositories.my-project]
 # path = "/absolute/path/to/my-project"
@@ -52,6 +54,11 @@ command = ["claude", "--print", "--dangerously-skip-permissions"]
 
 The optional worker `name` defaults to the machine hostname. Set it only when a
 different display name is useful.
+
+Choose a model for one task with `--model=luna`. Factory resolves the alias through
+the selected executor and substitutes `{{factory.model}}` in that executor's command.
+Omit `--model` to use the coding agent's normal default. The control-plane New run
+form accepts the same optional alias.
 
 The shared configuration resolves prompt paths relative to itself:
 

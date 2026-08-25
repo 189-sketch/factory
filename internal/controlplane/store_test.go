@@ -21,6 +21,7 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 		testAgent("build", "Build request"),
 		testAgent("verify", "Verify request"),
 	}
+	agents[0].Model = "luna"
 	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "code", agents)
 	if err != nil {
 		t.Fatal(err)
@@ -30,11 +31,19 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 	if err != nil || incompatible != nil {
 		t.Fatalf("incompatible poll = %#v, %v", incompatible, err)
 	}
-	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
-	if err != nil || first == nil || first.Agent != "plan" || first.RenderedPrompt != "Plan request" {
+	wrongModel := pollRequest("worker-b", []string{"codex"}, []string{"factory"})
+	wrongModel.Models = map[string][]string{"codex": {"terra"}}
+	incompatible, err = store.Poll(t.Context(), wrongModel)
+	if err != nil || incompatible != nil {
+		t.Fatalf("wrong-model poll = %#v, %v", incompatible, err)
+	}
+	compatible := pollRequest("worker-a", []string{"codex"}, []string{"factory"})
+	compatible.Models = map[string][]string{"codex": {"luna"}}
+	first, err := store.Poll(t.Context(), compatible)
+	if err != nil || first == nil || first.Agent != "plan" || first.RenderedPrompt != "Plan request" || first.Model != "luna" {
 		t.Fatalf("first lease = %#v, %v", first, err)
 	}
-	repeated, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	repeated, err := store.Poll(t.Context(), compatible)
 	if err != nil || repeated == nil || repeated.ID != first.ID || repeated.LeaseToken != first.LeaseToken {
 		t.Fatalf("repeated lease = %#v, %v", repeated, err)
 	}
@@ -63,6 +72,9 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 	snapshot, err := store.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if snapshot.Jobs[0].Runs[0].Model != "luna" {
+		t.Fatalf("stored model = %q", snapshot.Jobs[0].Runs[0].Model)
 	}
 	assertFailedPipeline(t, snapshot, jobID)
 	if err := store.Close(); err != nil {
@@ -274,7 +286,7 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
 	store.now = clock.Now
 
-	var expiryColumn int
+	var expiryColumn, modelColumn int
 	rows, err := store.db.QueryContext(t.Context(), `PRAGMA table_info(runs)`)
 	if err != nil {
 		t.Fatal(err)
@@ -289,12 +301,18 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 		if name == "lease_expires_at" {
 			expiryColumn++
 		}
+		if name == "model" {
+			modelColumn++
+		}
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if expiryColumn != 1 {
 		t.Fatalf("lease_expires_at columns = %d", expiryColumn)
+	}
+	if modelColumn != 1 {
+		t.Fatalf("model columns = %d", modelColumn)
 	}
 	output, err := store.RunOutput(t.Context(), "run-completed")
 	if err != nil || output.Result != `{"answer":42}` || output.Events != "completed event\n" {
@@ -303,6 +321,9 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 	snapshot, err := store.Snapshot(t.Context())
 	if err != nil || len(snapshot.Jobs) != 2 || len(snapshot.Workers) != 1 {
 		t.Fatalf("preserved snapshot = %#v, %v", snapshot, err)
+	}
+	if snapshot.Jobs[0].Runs[0].Model != "" {
+		t.Fatalf("migrated model = %q", snapshot.Jobs[0].Runs[0].Model)
 	}
 
 	run, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"}))
