@@ -90,6 +90,26 @@ func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	}
 }
 
+func TestServerExposesReadOnlyDefinitions(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	response, err := http.Get(webServer.URL + "/api/v1/definitions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var definitions definitionsResponse
+	if err := json.NewDecoder(response.Body).Decode(&definitions); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || len(definitions.Agents) != 1 || definitions.Agents[0].Name != "plan" || definitions.Agents[0].Executor != "test" || definitions.Agents[0].Timeout != "1m0s" || !strings.Contains(definitions.Agents[0].Prompt, "{{factory.prompt}}") {
+		t.Fatalf("definitions = %#v", definitions)
+	}
+	if len(definitions.Pipelines) != 1 || definitions.Pipelines[0].Name != "default" || len(definitions.Pipelines[0].Agents) != 1 || definitions.Pipelines[0].Agents[0] != "plan" {
+		t.Fatalf("pipelines = %#v", definitions.Pipelines)
+	}
+}
+
 func TestCompletionLimitFitsMaximumRecordedOutput(t *testing.T) {
 	// encoding/json can double a string when every byte requires escaping.
 	worstCaseEncodedEvents := 2 * runner.MaxEventLogBytes
@@ -107,7 +127,7 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 		t.Fatal(err)
 	}
 	definitionPath := filepath.Join(directory, "config.toml")
-	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n\n[pipelines.default]\nagents = [\"plan\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := openTestStore(t, filepath.Join(directory, "factory.db"))

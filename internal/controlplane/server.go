@@ -53,6 +53,24 @@ type submitRequest struct {
 	Pipeline   string `json:"pipeline"`
 }
 
+type agentDefinitionResponse struct {
+	Name     string `json:"name"`
+	Executor string `json:"executor"`
+	Timeout  string `json:"timeout"`
+	Hash     string `json:"hash"`
+	Prompt   string `json:"prompt"`
+}
+
+type pipelineDefinitionResponse struct {
+	Name   string   `json:"name"`
+	Agents []string `json:"agents"`
+}
+
+type definitionsResponse struct {
+	Agents    []agentDefinitionResponse    `json:"agents"`
+	Pipelines []pipelineDefinitionResponse `json:"pipelines"`
+}
+
 func NewServer(store *Store, definitionPath, workerToken string) (*Server, error) {
 	csrfToken, err := randomID("csrf", 24)
 	if err != nil {
@@ -109,11 +127,44 @@ func (s *Server) routes() (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", s.status)
+	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs", s.submit)
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.Handle("/", http.FileServer(http.FS(dist)))
 	return securityHeaders(mux), nil
+}
+
+func (s *Server) definitions(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	definition, err := config.LoadDefinitions(s.definitionPath)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	agents := make([]agentDefinitionResponse, 0, len(definition.Agents))
+	for _, name := range mapKeys(definition.Agents) {
+		agent, err := config.LoadAgent(s.definitionPath, name)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		agents = append(agents, agentDefinitionResponse{Name: agent.Name, Executor: agent.Executor, Timeout: agent.Timeout.String(), Hash: agent.Hash, Prompt: agent.Prompt})
+	}
+	pipelines := make([]pipelineDefinitionResponse, 0, len(definition.Pipelines))
+	for _, name := range mapKeys(definition.Pipelines) {
+		resolved, err := config.LoadPipeline(s.definitionPath, name)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		agentNames := make([]string, 0, len(resolved))
+		for _, agent := range resolved {
+			agentNames = append(agentNames, agent.Name)
+		}
+		pipelines = append(pipelines, pipelineDefinitionResponse{Name: name, Agents: agentNames})
+	}
+	writeJSON(response, http.StatusOK, definitionsResponse{Agents: agents, Pipelines: pipelines})
 }
 
 func (s *Server) status(response http.ResponseWriter, request *http.Request) {

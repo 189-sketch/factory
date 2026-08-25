@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Activity, BarChart3, Bot, ChevronDown, GitBranch, Moon, Play, Plus, Server, Sun, Workflow, X } from "lucide-react";
 import { Analytics } from "@/analytics";
+import { AgentsPage, PipelinesPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -17,13 +18,14 @@ function App() {
   const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
   const [statusError, setStatusError] = useState("");
+  const [statusLoaded, setStatusLoaded] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [expanded, setExpanded] = useState(new Set());
   const [dark, setDark] = useState(() => localStorage.getItem("factory-theme") !== "light");
-  const [view, setView] = useState(() => window.location.hash === "#/analytics" ? "analytics" : "runs");
+  const [view, setView] = useState(() => viewFromHash(window.location.hash));
 
   async function refresh() {
     const response = await fetch("/api/v1/status", { headers: { Accept: "application/json" } });
@@ -45,7 +47,7 @@ function App() {
   }, [dark]);
 
   useEffect(() => {
-    const updateView = () => setView(window.location.hash === "#/analytics" ? "analytics" : "runs");
+    const updateView = () => setView(viewFromHash(window.location.hash));
     window.addEventListener("hashchange", updateView);
     return () => window.removeEventListener("hashchange", updateView);
   }, []);
@@ -56,7 +58,7 @@ function App() {
     const load = async () => {
       try {
         await refresh();
-        if (!stopped) setStatusError("");
+        if (!stopped) { setStatusError(""); setStatusLoaded(true); }
       } catch (requestError) {
         if (!stopped) setStatusError(requestError.message);
       }
@@ -134,9 +136,12 @@ function App() {
           <span>Factory</span>
           <span className="ml-auto hidden font-mono text-xs font-normal text-muted-foreground md:inline">v0.1</span>
         </div>
-        <nav className="ml-4 flex flex-1 md:ml-0 md:mt-6 md:block" aria-label="Primary">
+        <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-6 md:block md:overflow-visible" aria-label="Primary">
           <a href="#/runs" aria-current={view === "runs" ? "page" : undefined} className={cn("nav-item", view === "runs" && "nav-item-active")}><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
           <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
+          <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
+          <a href="#/agents" aria-current={view === "agents" ? "page" : undefined} className={cn("nav-item", view === "agents" && "nav-item-active")}><Bot className="size-4" /><span>Agents</span></a>
+          <a href="#/pipelines" aria-current={view === "pipelines" ? "page" : undefined} className={cn("nav-item", view === "pipelines" && "nav-item-active")}><Workflow className="size-4" /><span>Pipelines</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
           <div className="nav-item h-auto py-2"><Server className="size-4" /><span><span className="block">{status.workers.length} registered</span><span className="mt-0.5 block text-xs">{latestWorkerSeen ? `Last poll ${relativeTime(latestWorkerSeen)}` : "No workers"}</span></span></div>
@@ -147,7 +152,7 @@ function App() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        {view === "analytics" ? <Analytics jobs={status.jobs} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "analytics" ? <Analytics jobs={status.jobs} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage /> : view === "pipelines" ? <PipelinesPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <header className="flex items-start justify-between gap-6">
             <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
             <div className="flex items-center gap-2">
@@ -235,6 +240,7 @@ function EmptyRuns({ filtered, openComposer }) {
 }
 
 function firstSelection(status) { if (status.pipelines?.length) return `pipeline:${status.pipelines[0]}`; if (status.agents?.length) return `agent:${status.agents[0]}`; return ""; }
+function viewFromHash(hash) { const value = hash.replace(/^#\//, ""); return ["runs", "analytics", "workers", "agents", "pipelines"].includes(value) ? value : "runs"; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }
 function relativeTime(value) { if (!value || value === zeroTime) return "Not started"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000)); if (seconds < 10) return "just now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
 function duration(run) { if (!run.started_at || run.started_at === zeroTime) return ""; const end = !run.completed_at || run.completed_at === zeroTime ? Date.now() : Date.parse(run.completed_at); const seconds = Math.max(0, Math.floor((end - Date.parse(run.started_at)) / 1000)); if (seconds < 60) return `${seconds}s`; return `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
