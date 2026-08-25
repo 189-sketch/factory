@@ -40,7 +40,13 @@ definition_file = "factory.toml"
 
 [executors.codex]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+
+[executors.claude]
+command = ["claude", "--print", "--dangerously-skip-permissions"]
 ```
+
+The optional worker `name` defaults to the machine hostname. Set it only when a
+different display name is useful.
 
 The definition resolves prompt paths relative to itself:
 

@@ -4,3 +4,6 @@ definition_file = "factory.toml"
 
 [executors.codex]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+
+[executors.claude]
+command = ["claude", "--print", "--dangerously-skip-permissions"]

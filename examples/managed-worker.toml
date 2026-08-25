@@ -1,4 +1,4 @@
-name = "local-worker"
+# name is optional and defaults to the machine hostname.
 data_directory = "~/.factory/worker"
 definition_file = "factory.toml"
 
@@ -8,6 +8,9 @@ token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+
+[executors.claude]
+command = ["claude", "--print", "--dangerously-skip-permissions"]
 
 [repositories.factory]
 path = "/absolute/path/to/factory"

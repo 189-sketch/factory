@@ -375,6 +375,21 @@ func validatePromptParameters(agentName, prompt string) error {
 }
 
 func applyWorkerDefaults(worker Worker) (Worker, error) {
+	return applyWorkerDefaultsWithHostname(worker, os.Hostname)
+}
+
+func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, error)) (Worker, error) {
+	worker.Name = strings.TrimSpace(worker.Name)
+	if worker.Name == "" {
+		hostname, err := getHostname()
+		if err != nil {
+			return Worker{}, fmt.Errorf("find machine hostname: %w", err)
+		}
+		worker.Name = strings.TrimSpace(hostname)
+		if worker.Name == "" {
+			return Worker{}, errors.New("find machine hostname: hostname is empty")
+		}
+	}
 	if worker.DataDirectory == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

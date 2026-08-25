@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,46 @@ func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
 	}
 	if definition != filepath.Join(directory, "factory.toml") {
 		t.Fatalf("definition = %q", definition)
+	}
+}
+
+func TestLoadWorkerDefaultsNameToHostname(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.toml")
+	writeTestFile(t, path, "data_directory = \"state\"\n")
+
+	worker, err := LoadWorker(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Name != hostname {
+		t.Fatalf("worker name = %q, want hostname %q", worker.Name, hostname)
+	}
+}
+
+func TestWorkerNameDefaultsReportHostnameFailure(t *testing.T) {
+	want := errors.New("hostname unavailable")
+	_, err := applyWorkerDefaultsWithHostname(Worker{DataDirectory: t.TempDir()}, func() (string, error) {
+		return "", want
+	})
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), "find machine hostname") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWorkerExplicitNameDoesNotReadHostname(t *testing.T) {
+	worker, err := applyWorkerDefaultsWithHostname(Worker{Name: " configured-worker ", DataDirectory: t.TempDir()}, func() (string, error) {
+		t.Fatal("hostname lookup called for explicit worker name")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worker.Name != "configured-worker" {
+		t.Fatalf("worker name = %q", worker.Name)
 	}
 }
 
