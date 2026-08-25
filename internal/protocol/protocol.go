@@ -25,6 +25,11 @@ type RunSpec struct {
 	LeaseToken     string `json:"lease_token"`
 }
 
+type Heartbeat struct {
+	InstanceID string `json:"instance_id"`
+	LeaseToken string `json:"lease_token"`
+}
+
 type Completion struct {
 	InstanceID string          `json:"instance_id"`
 	LeaseToken string          `json:"lease_token"`

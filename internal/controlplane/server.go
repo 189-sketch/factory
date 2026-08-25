@@ -108,6 +108,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("POST /api/v1/jobs", s.submit)
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
+	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
 	mux.Handle("/", http.FileServer(http.FS(dist)))
 	return securityHeaders(mux), nil
@@ -216,6 +217,33 @@ func (s *Server) complete(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	err := s.store.Complete(request.Context(), request.PathValue("id"), input)
+	if errors.Is(err, ErrLeaseConflict) || errors.Is(err, ErrRunState) {
+		writeError(response, http.StatusConflict, err)
+		return
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(response, http.StatusNotFound, errors.New("run not found"))
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(response, request.Body, 1<<20)
+	var input protocol.Heartbeat
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if input.InstanceID == "" || input.LeaseToken == "" {
+		writeError(response, http.StatusBadRequest, errors.New("instance_id and lease_token are required"))
+		return
+	}
+	err := s.store.Heartbeat(request.Context(), request.PathValue("id"), input)
 	if errors.Is(err, ErrLeaseConflict) || errors.Is(err, ErrRunState) {
 		writeError(response, http.StatusConflict, err)
 		return

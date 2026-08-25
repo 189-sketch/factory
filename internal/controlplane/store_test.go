@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -147,6 +148,170 @@ func TestConcurrentPollsLeaseRunOnce(t *testing.T) {
 	}
 }
 
+func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	store.now = clock.Now
+	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "code", []config.ResolvedAgent{
+		testAgent("plan", "Plan request"),
+		testAgent("build", "Build request"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	if err != nil || first == nil {
+		t.Fatalf("first lease = %#v, %v", first, err)
+	}
+	assertLeaseExpiry(t, store, first.ID, clock.Now().Add(leaseDuration))
+	clock.Advance(9 * time.Second)
+	repeated, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	if err != nil || repeated == nil || repeated.LeaseToken != first.LeaseToken {
+		t.Fatalf("repeated lease = %#v, %v", repeated, err)
+	}
+	assertLeaseExpiry(t, store, first.ID, time.Date(2026, time.August, 25, 12, 0, 30, 0, time.UTC))
+
+	heartbeat := protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: first.LeaseToken}
+	if err := store.Heartbeat(t.Context(), first.ID, heartbeat); err != nil {
+		t.Fatal(err)
+	}
+	assertLeaseExpiry(t, store, first.ID, clock.Now().Add(leaseDuration))
+	if err := store.Heartbeat(t.Context(), first.ID, protocol.Heartbeat{InstanceID: "worker-b", LeaseToken: first.LeaseToken}); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("cross-worker heartbeat error = %v", err)
+	}
+	if err := store.Heartbeat(t.Context(), first.ID, protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: "stale"}); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("stale heartbeat error = %v", err)
+	}
+	assertLeaseExpiry(t, store, first.ID, clock.Now().Add(leaseDuration))
+
+	clock.Advance(leaseDuration)
+	if err := store.Heartbeat(t.Context(), first.ID, heartbeat); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("expired heartbeat error = %v", err)
+	}
+	staleCompletion := protocol.Completion{InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0, Result: []byte(`{"stale":true}`)}
+	if err := store.Complete(t.Context(), first.ID, staleCompletion); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("expired completion error = %v", err)
+	}
+
+	incompatible, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"other"}, []string{"factory"}))
+	if err != nil || incompatible != nil {
+		t.Fatalf("incompatible poll = %#v, %v", incompatible, err)
+	}
+	assertReclaimedRun(t, store, first.ID, jobID)
+
+	redispatched, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"factory"}))
+	if err != nil || redispatched == nil || redispatched.ID != first.ID || redispatched.LeaseToken == first.LeaseToken {
+		t.Fatalf("redispatched lease = %#v, %v", redispatched, err)
+	}
+	if err := store.Complete(t.Context(), first.ID, staleCompletion); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("stale completion after redispatch error = %v", err)
+	}
+	output, err := store.RunOutput(t.Context(), first.ID)
+	if err != nil || output.Result != "" || output.Events != "" {
+		t.Fatalf("stale output = %#v, %v", output, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil || snapshot.Jobs[0].Runs[1].State != "pending" {
+		t.Fatalf("pipeline advanced after stale completion: %#v, %v", snapshot, err)
+	}
+}
+
+func TestConcurrentPollsReclaimExpiredRunOnce(t *testing.T) {
+	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	store.now = clock.Now
+	if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(leaseDuration)
+
+	start := make(chan struct{})
+	results := make(chan *protocol.RunSpec, 2)
+	errorsChannel := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, instance := range []string{"worker-b", "worker-c"} {
+		group.Add(1)
+		go func(instance string) {
+			defer group.Done()
+			<-start
+			run, pollErr := store.Poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"factory"}))
+			results <- run
+			errorsChannel <- pollErr
+		}(instance)
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	close(errorsChannel)
+	for pollErr := range errorsChannel {
+		if pollErr != nil {
+			t.Fatal(pollErr)
+		}
+	}
+	leases := 0
+	for run := range results {
+		if run != nil {
+			leases++
+			if run.ID != initial.ID || run.LeaseToken == initial.LeaseToken {
+				t.Fatalf("reclaimed lease = %#v", run)
+			}
+		}
+	}
+	if leases != 1 {
+		t.Fatalf("reclaimed leases = %d, want 1", leases)
+	}
+}
+
+func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "factory.db")
+	createPreviousDatabase(t, database)
+	store := openTestStore(t, database)
+	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
+	store.now = clock.Now
+
+	var expiryColumn int
+	rows, err := store.db.QueryContext(t.Context(), `PRAGMA table_info(runs)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == "lease_expires_at" {
+			expiryColumn++
+		}
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if expiryColumn != 1 {
+		t.Fatalf("lease_expires_at columns = %d", expiryColumn)
+	}
+	output, err := store.RunOutput(t.Context(), "run-completed")
+	if err != nil || output.Result != `{"answer":42}` || output.Events != "completed event\n" {
+		t.Fatalf("preserved output = %#v, %v", output, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil || len(snapshot.Jobs) != 2 || len(snapshot.Workers) != 1 {
+		t.Fatalf("preserved snapshot = %#v, %v", snapshot, err)
+	}
+
+	run, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"}))
+	if err != nil || run == nil || run.ID != "run-running" || run.LeaseToken == "old-token" {
+		t.Fatalf("recovered pre-migration lease = %#v, %v", run, err)
+	}
+	assertLeaseExpiry(t, store, run.ID, clock.Now().Add(leaseDuration))
+}
+
 func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
 	store, err := OpenStore(path)
@@ -176,5 +341,92 @@ func assertFailedPipeline(t *testing.T, snapshot Snapshot, jobID string) {
 	}
 	if runs[1].Error != "build failed" {
 		t.Fatalf("run payloads = %#v", runs)
+	}
+}
+
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock(now time.Time) *testClock {
+	return &testClock{now: now}
+}
+
+func (clock *testClock) Now() time.Time {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	return clock.now
+}
+
+func (clock *testClock) Advance(duration time.Duration) {
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	clock.now = clock.now.Add(duration)
+}
+
+func assertLeaseExpiry(t *testing.T, store *Store, runID string, want time.Time) {
+	t.Helper()
+	var got sql.NullInt64
+	if err := store.db.QueryRowContext(t.Context(), `SELECT lease_expires_at FROM runs WHERE id=?`, runID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Valid || got.Int64 != want.UnixNano() {
+		t.Fatalf("lease expiry = %v, want %d", got, want.UnixNano())
+	}
+}
+
+func assertReclaimedRun(t *testing.T, store *Store, runID, jobID string) {
+	t.Helper()
+	var state string
+	var worker, token, expiry, started any
+	if err := store.db.QueryRowContext(t.Context(), `SELECT state,worker_instance,lease_token,lease_expires_at,started_at FROM runs WHERE id=?`, runID).Scan(&state, &worker, &token, &expiry, &started); err != nil {
+		t.Fatal(err)
+	}
+	if state != "queued" || worker != nil || token != nil || expiry != nil || started != nil {
+		t.Fatalf("reclaimed run = state %q worker %v token %v expiry %v started %v", state, worker, token, expiry, started)
+	}
+	var jobState string
+	if err := store.db.QueryRowContext(t.Context(), `SELECT state FROM jobs WHERE id=?`, jobID).Scan(&jobState); err != nil {
+		t.Fatal(err)
+	}
+	if jobState != "running" {
+		t.Fatalf("job state = %q, want running", jobState)
+	}
+}
+
+func createPreviousDatabase(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	const schema = `
+CREATE TABLE jobs (
+  id TEXT PRIMARY KEY, prompt TEXT NOT NULL, repository TEXT NOT NULL,
+  selection_kind TEXT NOT NULL, selection_name TEXT NOT NULL, state TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), step INTEGER NOT NULL,
+  agent TEXT NOT NULL, agent_hash TEXT NOT NULL, executor TEXT NOT NULL,
+  repository TEXT NOT NULL, rendered_prompt TEXT NOT NULL, timeout_ms INTEGER NOT NULL,
+  state TEXT NOT NULL, worker_instance TEXT, lease_token TEXT, exit_code INTEGER,
+  error TEXT, result TEXT, events TEXT, started_at TEXT, completed_at TEXT,
+  UNIQUE(job_id, step)
+);
+CREATE TABLE workers (
+  instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL
+);
+INSERT INTO jobs VALUES ('job-completed','done','factory','agent','plan','succeeded','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
+INSERT INTO jobs VALUES ('job-running','active','factory','agent','plan','running','2026-08-24T13:00:00Z','2026-08-24T13:01:00Z');
+INSERT INTO workers VALUES ('worker-old','old worker','2026-08-24T13:01:00Z');
+INSERT INTO runs VALUES ('run-completed','job-completed',0,'plan','plan-hash','codex','factory','Done',60000,'succeeded','worker-old','completed-token',0,'','{"answer":42}','completed event
+','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
+INSERT INTO runs VALUES ('run-running','job-running',0,'plan','plan-hash','codex','factory','Active',60000,'running','worker-old','old-token',NULL,'',NULL,NULL,'2026-08-24T13:01:00Z',NULL);
+`
+	if _, err := db.ExecContext(t.Context(), schema); err != nil {
+		t.Fatal(err)
 	}
 }

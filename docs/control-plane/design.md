@@ -108,29 +108,38 @@ skipped.
 ```text
 job: queued -> running -> succeeded | failed
 run: pending -> queued -> running -> succeeded | failed | timed_out | cancelled
+                ^          |
+                +----------+ expired lease
      pending -----------------------------------------------> skipped
 ```
 
 Each worker process generates a random instance ID at startup; the configured worker name
 is display metadata only. Leasing selects a compatible queued run, creates an opaque
 lease token, and changes the run to running for that instance in one SQLite transaction.
-Completion requires the lease token. Two concurrent polls cannot receive the same run.
+The lease expires after 30 seconds. Completion requires the lease token. Two concurrent
+polls cannot receive the same run.
 
 Polling is idempotent for a worker instance. If a lease commits but its HTTP response is
-lost, the instance's next poll returns the same active run and lease token instead of
-claiming new work. A worker instance therefore has at most one active run.
+lost, the instance's next poll before expiry returns the same active run and lease token
+instead of claiming new work. A worker instance therefore has at most one active run.
 
-There is no execution retry, reassignment, or abandoned-run recovery in V1. One worker
-executes at most one run at a time. A worker process interruption can leave a run marked
-running; the operator can see that state and restart the demo with a new job.
+While its agent process runs, the worker renews the lease every 10 seconds. Each accepted
+heartbeat extends the expiry to 30 seconds after the server receives it. Polling first
+returns every expired running lease to queued in the same transaction used to select
+work. Reclaim clears the old worker, token, expiry, and attempt start time while leaving
+the job running. A compatible worker can then receive a new token and execute the run.
+The old worker may continue locally during a network partition, but its stale token
+cannot renew or complete the redispatched run. This provides abandoned-run recovery, not
+exactly-once agent side effects or process resumption.
 
 ## 6. Persistence
 
 SQLite stores:
 
 - `jobs`: input prompt, repository key, selection, state, and timestamps.
-- `runs`: ordered agent runs, immutable rendered prompt metadata, worker, process outcome,
-  and timestamps.
+- `runs`: ordered agent runs, immutable rendered prompt metadata, worker, lease expiry,
+  process outcome, and timestamps. Existing databases add the nullable expiry field on
+  open; a running row without an expiry is recoverable on the next poll.
 - `workers`: worker instance ID, display name, and last poll time.
 
 The worker continues writing its existing local `events.jsonl` and `result.json`. On
@@ -149,7 +158,7 @@ server acknowledges it or the worker is stopped. Permanent HTTP 4xx responses st
 worker instead of retrying an impossible payload forever. This retries result delivery,
 never the agent execution. The server rejects terminal states that contradict their exit
 code. Live log streaming is not in V1. Losing the control-plane connection does not
-terminate the local agent process.
+terminate the local agent process, including when heartbeat delivery temporarily fails.
 
 ## 7. HTTP surface
 
@@ -161,7 +170,11 @@ terminate the local agent process.
 - `POST /api/v1/workers/poll`: authenticate a worker, update last-seen state, and lease
   one compatible run when available. The request includes the worker name and its
   process instance ID, executor names, and repository names. Repeated polls return that
-  instance's existing active lease.
+  instance's existing unexpired active lease. Polling also reclaims expired leases before
+  selecting work.
+- `POST /api/v1/runs/{id}/heartbeat`: authenticate the owning worker and renew its active
+  lease. Unknown runs return 404. Non-running, expired, differently owned, and stale-token
+  leases return 409 without changing state.
 - `POST /api/v1/runs/{id}/complete`: authenticate the owning worker and record the
   terminal result and optional result/events payload. The request must include the opaque
   lease token.
@@ -184,8 +197,8 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
   tickets, labels, or control-plane semantics.
 - INV-4: one worker process instance has at most one active run, and it receives only work
   matching its advertised executor and repository names.
-- INV-5: a run is transactionally leased once to one worker instance and opaque lease
-  token; V1 never retries or reassigns its execution automatically.
+- INV-5: one unexpired run lease belongs to one worker instance and opaque token. Expired
+  leases are transactionally reclaimed during polling and redispatched with a new token.
 - INV-6: the control plane advances pipelines only from process terminal state.
 - INV-7: job, run, result, and completed output state survives a server restart.
 
@@ -209,11 +222,18 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
   idempotently and does not advance a pipeline twice.
 - AC-10: polling again after a committed-but-unacknowledged lease returns the same run and
   lease token to the same worker instance; another instance cannot complete it.
+- AC-11: workers renew active leases every 10 seconds, each valid heartbeat sets expiry
+  30 seconds from server receipt, and invalid heartbeats do not change the lease.
+- AC-12: polling transactionally reclaims expired or pre-migration running leases and a
+  compatible worker can receive the run with a new token while the job remains running.
+- AC-13: an expired token cannot upload output or advance a pipeline, even if the old
+  worker continues executing locally.
 
 ## 10. Out of scope
 
 GitHub or Linear intake, ticket synchronization, label interpretation, prompt result
-interpretation, live log streaming, worker enrollment, token issuance, execution retries,
-reassignment, heartbeats, cancellation, repository cloning, worktrees, scheduling,
+interpretation, live log streaming, worker enrollment, token issuance, general retry
+counts or backoff policy, interrupted-process resumption, event-file transfer,
+exactly-once side effects, cancellation, repository cloning, worktrees, scheduling,
 multiple control-plane replicas, non-loopback serving, TLS, and production web
 authentication.

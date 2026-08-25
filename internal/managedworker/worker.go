@@ -23,13 +23,17 @@ import (
 )
 
 type Worker struct {
-	config     config.Worker
-	token      string
-	instanceID string
-	client     *http.Client
-	stdout     io.Writer
-	stderr     io.Writer
+	config         config.Worker
+	token          string
+	instanceID     string
+	client         *http.Client
+	stdout         io.Writer
+	stderr         io.Writer
+	heartbeatTicks <-chan time.Time
+	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
 }
+
+const heartbeatInterval = 10 * time.Second
 
 type responseError struct {
 	status int
@@ -91,12 +95,42 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		completion := w.execute(ctx, *run)
+		completion := w.executeWithHeartbeats(ctx, *run)
 		if err := w.deliver(ctx, run.ID, completion); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
+		}
+	}
+}
+
+func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
+	ticks := w.heartbeatTicks
+	var ticker *time.Ticker
+	if ticks == nil {
+		ticker = time.NewTicker(heartbeatInterval)
+		ticks = ticker.C
+		defer ticker.Stop()
+	}
+	execute := w.executeRun
+	if execute == nil {
+		execute = w.execute
+	}
+	done := make(chan protocol.Completion, 1)
+	go func() {
+		done <- execute(ctx, spec)
+	}()
+	for {
+		select {
+		case completion := <-done:
+			return completion
+		case <-ticks:
+			if err := w.heartbeat(ctx, spec); err != nil {
+				fmt.Fprintf(w.stderr, "factory: heartbeat run %s: %v\n", spec.ID, err)
+			}
+		case <-ctx.Done():
+			return <-done
 		}
 	}
 }
@@ -178,6 +212,13 @@ func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.
 			}
 		}
 	}
+}
+
+func (w *Worker) heartbeat(ctx context.Context, spec protocol.RunSpec) error {
+	return w.post(ctx, "/api/v1/runs/"+url.PathEscape(spec.ID)+"/heartbeat", protocol.Heartbeat{
+		InstanceID: w.instanceID,
+		LeaseToken: spec.LeaseToken,
+	}, nil)
 }
 
 func (w *Worker) post(ctx context.Context, path string, input, output any) error {
