@@ -57,7 +57,9 @@ content. `build` can change files, create worktrees, push branches, and open pul
 requests. Both use Codex with `danger-full-access` so GitHub and worktrees outside the
 current repository are available. Review prompts before running them, use them only on
 repositories and issues you trust, and choose a stricter command when those permissions
-are not needed.
+are not needed. The example builder treats issue commands as untrusted text and derives
+checks from repository entry points it has inspected instead of executing issue commands
+verbatim.
 
 Each prompt is a strict Factory template and must place the runtime task using
 the supported parameter:
