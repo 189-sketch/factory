@@ -166,7 +166,7 @@ func TestExecuteIgnoresInheritedRepositoryGitEnvironment(t *testing.T) {
 			Command:    []string{"/bin/sh", "-c", "cat >/dev/null; git rev-parse --show-toplevel"},
 			Prompt:     "complete prompt\n",
 			Timeout:    time.Second,
-			Definition: "/definition/factory.toml",
+			Definition: "/definition/config.toml",
 			Hash:       "test-hash",
 		},
 		Repository:    requested,
@@ -207,7 +207,7 @@ func TestExecuteFinishesWhenSessionDetachedDescendantKeepsPipesOpen(t *testing.T
 		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
 		Prompt:     "complete prompt\n",
 		Timeout:    5 * time.Second,
-		Definition: "/definition/factory.toml",
+		Definition: "/definition/config.toml",
 		Hash:       "test-hash",
 	}
 	started := time.Now()
@@ -234,7 +234,7 @@ func TestExecuteFinishesWhenSessionDetachedDescendantKeepsAllPipesOpen(t *testin
 		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
 		Prompt:     strings.Repeat("prompt", 40<<10),
 		Timeout:    5 * time.Second,
-		Definition: "/definition/factory.toml",
+		Definition: "/definition/config.toml",
 		Hash:       "test-hash",
 	}
 	started := time.Now()
@@ -475,7 +475,7 @@ func TestExecuteDoesNotStartAgentWhenAlreadyCancelled(t *testing.T) {
 			Command:    []string{"/bin/sh", "-c", `touch "$1"`, "factory-test", marker},
 			Prompt:     "complete prompt\n",
 			Timeout:    time.Second,
-			Definition: "/definition/factory.toml",
+			Definition: "/definition/config.toml",
 			Hash:       "test-hash",
 		},
 		Repository:    newGitRepository(t),
@@ -510,7 +510,7 @@ func TestExecuteRecordsCommandStartFailure(t *testing.T) {
 			Command:    []string{filepath.Join(t.TempDir(), "not-an-agent")},
 			Prompt:     "prompt",
 			Timeout:    time.Second,
-			Definition: "factory.toml",
+			Definition: "config.toml",
 			Hash:       "hash",
 		},
 		Repository:    newGitRepository(t),
@@ -574,7 +574,7 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedAgent {
 		Command:    []string{"/bin/sh", "-c", script},
 		Prompt:     "complete prompt\n",
 		Timeout:    timeout,
-		Definition: "/definition/factory.toml",
+		Definition: "/definition/config.toml",
 		Hash:       "test-hash",
 	}
 }

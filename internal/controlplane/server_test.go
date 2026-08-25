@@ -97,7 +97,7 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 	if err := os.WriteFile(promptPath, []byte("Plan this request:\n{{factory.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	definitionPath := filepath.Join(directory, "factory.toml")
+	definitionPath := filepath.Join(directory, "config.toml")
 	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

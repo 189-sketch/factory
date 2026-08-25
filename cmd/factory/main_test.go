@@ -153,12 +153,12 @@ func setupBinaryRun(t *testing.T, directory string, agentCommand []string, timeo
 		"executor = \"test\"\n" +
 		"prompt_file = \"plan.md\"\n" +
 		"timeout = " + strconv.Quote(timeout) + "\n"
-	if err := os.WriteFile(filepath.Join(directory, "factory.toml"), []byte(definition), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "config.toml"), []byte(definition), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	workerPath := filepath.Join(directory, "worker.toml")
 	worker := "data_directory = " + strconv.Quote(filepath.Join(directory, "data")) + "\n" +
-		"definition_file = \"factory.toml\"\n\n" +
+		"\n" +
 		"[executors.test]\n" +
 		"command = [" + strings.Join(quotedCommand, ", ") + "]\n"
 	if err := os.WriteFile(workerPath, []byte(worker), 0o600); err != nil {

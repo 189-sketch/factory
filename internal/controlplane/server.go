@@ -119,7 +119,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	definition, err := config.LoadDefinition(s.definitionPath)
+	definition, err := config.LoadDefinitions(s.definitionPath)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return

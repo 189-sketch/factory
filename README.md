@@ -19,36 +19,41 @@ just build
 
 ## Configure
 
-Agent definitions are shared configuration. Worker configuration contains only
-machine-local paths.
+`config.toml` contains shared server, agent, and pipeline configuration.
+`worker.toml` contains machine-local executors, repositories, and credentials.
 
 ```sh
 mkdir -p ~/.factory/agents
 cp examples/worker.toml ~/.factory/worker.toml
-cp examples/factory.toml ~/.factory/factory.toml
+cp examples/config.toml ~/.factory/config.toml
 cp examples/agents/plan.md ~/.factory/agents/plan.md
 cp examples/agents/build.md ~/.factory/agents/build.md
 cp examples/agents/verify.md ~/.factory/agents/verify.md
 ```
 
-Update `~/.factory/worker.toml` so `definition_file` points to the copied
-definition:
+Update the repository path in `~/.factory/worker.toml`:
 
 ```toml
 data_directory = "~/.factory/worker"
-definition_file = "factory.toml"
+
+[control_plane]
+url = "http://127.0.0.1:7331"
+token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 
 [executors.claude]
 command = ["claude", "--print", "--dangerously-skip-permissions"]
+
+[repositories.factory]
+path = "/absolute/path/to/factory"
 ```
 
 The optional worker `name` defaults to the machine hostname. Set it only when a
 different display name is useful.
 
-The definition resolves prompt paths relative to itself:
+The shared configuration resolves prompt paths relative to itself:
 
 ```toml
 [agents.plan]
@@ -158,16 +163,13 @@ Create one shared worker token and copy the example configuration:
 mkdir -p ~/.factory/server
 openssl rand -hex 32 > ~/.factory/server/worker.token
 chmod 600 ~/.factory/server/worker.token
-cp examples/server.toml ~/.factory/server.toml
-cp examples/managed-worker.toml ~/.factory/managed-worker.toml
 ```
 
-Set `definition_file` in `server.toml` and the repository path in
-`managed-worker.toml`, then start both processes:
+Then start both processes. Each command reads its default configuration file:
 
 ```sh
-factory start --config=~/.factory/server.toml
-factory worker start --config=~/.factory/managed-worker.toml
+factory start
+factory worker start
 ```
 
 Factory listens on [http://127.0.0.1:7331](http://127.0.0.1:7331). Port 8080 is not

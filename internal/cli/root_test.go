@@ -221,7 +221,7 @@ func TestWorkerRunReturnsRuntimeFailureStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerBody := "data_directory = " + strconv.Quote(blockedDataDirectory) + "\n" +
-		"definition_file = \"factory.toml\"\n\n" +
+		"\n" +
 		"[executors.default]\n" +
 		"command = [\"/bin/sh\", \"-c\", \"cat\"]\n"
 	if err := os.WriteFile(workerConfig, []byte(workerBody), 0o600); err != nil {
@@ -264,7 +264,7 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	if err := os.WriteFile(filepath.Join(directory, "verify.md"), []byte("configured verify prompt\n\nPrompt:\n{{factory.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	definition := filepath.Join(directory, "factory.toml")
+	definition := filepath.Join(directory, "config.toml")
 	script := "cat"
 	if mode == "fail" {
 		script = "exit 9"
@@ -296,7 +296,7 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	}
 	worker := filepath.Join(directory, "worker.toml")
 	workerBody := "data_directory = \"" + filepath.ToSlash(filepath.Join(directory, "data")) + "\"\n" +
-		"definition_file = \"factory.toml\"\n\n" +
+		"\n" +
 		"[executors.default]\n" +
 		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n\n" +
 		"[executors.build]\n" +

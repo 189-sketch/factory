@@ -1,9 +1,16 @@
-# Machine-local paths only. Agent prompts belong in factory.toml.
+# Machine-local paths only. Agents and pipelines belong in config.toml.
+# name is optional and defaults to the machine hostname.
 data_directory = "~/.factory/worker"
-definition_file = "factory.toml"
+
+[control_plane]
+url = "http://127.0.0.1:7331"
+token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 
 [executors.claude]
 command = ["claude", "--print", "--dangerously-skip-permissions"]
+
+[repositories.factory]
+path = "/absolute/path/to/factory"

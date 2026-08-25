@@ -24,7 +24,7 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	definitionPath := filepath.Join(directory, "factory.toml")
+	definitionPath := filepath.Join(directory, "config.toml")
 	promptPath := filepath.Join(directory, "plan.md")
 	if err := os.WriteFile(promptPath, []byte("{{factory.prompt}}"), 0o600); err != nil {
 		t.Fatal(err)

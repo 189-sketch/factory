@@ -14,17 +14,17 @@ import (
 )
 
 type commandOptions struct {
-	configPath     string
-	definitionPath string
-	agentName      string
-	pipelineName   string
-	prompt         string
-	repository     string
-	stdin          io.Reader
-	stdout         io.Writer
-	stderr         io.Writer
-	version        string
-	listen         string
+	configPath        string
+	factoryConfigPath string
+	agentName         string
+	pipelineName      string
+	prompt            string
+	repository        string
+	stdin             io.Reader
+	stdout            io.Writer
+	stderr            io.Writer
+	version           string
+	listen            string
 }
 
 func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
@@ -85,19 +85,13 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 		Short: "Start the Factory control plane",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			serverConfig, err := config.LoadServer(options.configPath)
+			factoryConfig, err := config.LoadConfig(options.configPath)
 			if err != nil {
 				return err
 			}
+			serverConfig := factoryConfig.Server
 			if options.listen != "" {
 				serverConfig.Listen = options.listen
-			}
-			definitionPath, err := serverConfig.ResolveDefinition("")
-			if err != nil {
-				return err
-			}
-			if _, err := config.LoadDefinition(definitionPath); err != nil {
-				return err
 			}
 			token, err := serverConfig.WorkerToken()
 			if err != nil {
@@ -108,7 +102,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			server, err := controlplane.NewServer(store, definitionPath, token)
+			server, err := controlplane.NewServer(store, factoryConfig.Path(), token)
 			if err != nil {
 				return err
 			}
@@ -163,7 +157,7 @@ func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
 	}
 	run.Flags().StringVar(&options.prompt, "prompt", "", "work request supplied to the agent prompt (required)")
 	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
-	run.Flags().StringVar(&options.definitionPath, "definition", "", "Factory definition file")
+	run.Flags().StringVar(&options.factoryConfigPath, "factory-config", "", "shared Factory configuration file")
 	_ = run.MarkFlagRequired("prompt")
 	return run
 }
@@ -173,7 +167,7 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
-	definitionPath, err := worker.ResolveDefinition(options.definitionPath)
+	definitionPath, err := worker.ResolveFactoryConfig(options.factoryConfigPath)
 	if err != nil {
 		return err
 	}

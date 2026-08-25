@@ -26,7 +26,7 @@ factory run --pipeline=code --prompt="Work on ticket LINEAR-123"
 Managed mode uses two long-running commands:
 
 ```sh
-factory start --config=/path/to/server.toml
+factory start --config=/path/to/config.toml
 factory worker start --config=/path/to/worker.toml
 ```
 
@@ -37,9 +37,14 @@ surface and TLS boundary before Factory exposes the server beyond the host.
 
 ## 3. Configuration ownership
 
-The shared Factory definition owns portable prompts and pipelines:
+The shared Factory configuration owns the server, portable prompts, and pipelines:
 
 ```toml
+[server]
+listen = "127.0.0.1:7331"
+database = "~/.factory/server/factory.db"
+worker_token_file = "~/.factory/server/worker.token"
+
 [agents.plan]
 executor = "codex"
 prompt_file = "agents/plan.md"
@@ -49,12 +54,10 @@ timeout = "20m"
 agents = ["plan", "build", "verify"]
 ```
 
-The worker file owns machine-specific execution and credentials:
+The worker file owns machine-specific execution, repositories, and credentials:
 
 ```toml
-name = "local-worker"
 data_directory = "~/.factory/worker"
-definition_file = "factory.toml"
 
 [control_plane]
 url = "http://127.0.0.1:7331"
@@ -67,17 +70,8 @@ command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 path = "/workspace/factory"
 ```
 
-The server file owns its address, database, worker token, and central definition:
-
-```toml
-listen = "127.0.0.1:7331"
-database = "~/.factory/server/factory.db"
-definition_file = "factory.toml"
-worker_token_file = "~/.factory/server/worker.token"
-```
-
-Direct mode reads the local definition and resolves its named executor through
-`worker.toml`. Managed mode renders the central definition on the server and the worker
+Direct mode reads `config.toml` and resolves its named executor through `worker.toml`.
+Managed mode renders the same configuration on the server and the worker
 resolves the named executor and repository through its own `worker.toml`.
 
 ## 4. Shared execution boundary

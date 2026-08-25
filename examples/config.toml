@@ -1,3 +1,8 @@
+[server]
+listen = "127.0.0.1:7331"
+database = "~/.factory/server/factory.db"
+worker_token_file = "~/.factory/server/worker.token"
+
 [agents.plan]
 executor = "codex"
 prompt_file = "agents/plan.md"

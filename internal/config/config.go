@@ -30,13 +30,12 @@ const (
 )
 
 type Worker struct {
-	Name           string                `toml:"name"`
-	DataDirectory  string                `toml:"data_directory"`
-	DefinitionFile string                `toml:"definition_file"`
-	ControlPlane   ControlPlane          `toml:"control_plane"`
-	Executors      map[string]Executor   `toml:"executors"`
-	Repositories   map[string]Repository `toml:"repositories"`
-	configDir      string
+	Name          string                `toml:"name"`
+	DataDirectory string                `toml:"data_directory"`
+	ControlPlane  ControlPlane          `toml:"control_plane"`
+	Executors     map[string]Executor   `toml:"executors"`
+	Repositories  map[string]Repository `toml:"repositories"`
+	configDir     string
 }
 
 type ControlPlane struct {
@@ -55,14 +54,15 @@ type Repository struct {
 type Server struct {
 	Listen          string `toml:"listen"`
 	Database        string `toml:"database"`
-	DefinitionFile  string `toml:"definition_file"`
 	WorkerTokenFile string `toml:"worker_token_file"`
 	configDir       string
 }
 
-type Definition struct {
+type Config struct {
+	Server    Server              `toml:"server"`
 	Agents    map[string]Agent    `toml:"agents"`
 	Pipelines map[string]Pipeline `toml:"pipelines"`
+	path      string
 }
 
 type Agent struct {
@@ -118,41 +118,52 @@ func LoadWorker(path string) (Worker, error) {
 	return applyWorkerDefaults(worker)
 }
 
-func LoadServer(path string) (Server, error) {
+func LoadConfig(path string) (Config, error) {
 	if path == "" {
-		home, err := os.UserHomeDir()
+		defaultPath, err := defaultFactoryConfigPath()
 		if err != nil {
-			return Server{}, fmt.Errorf("find user home directory: %w", err)
+			return Config{}, err
 		}
-		path = filepath.Join(home, ".factory", "server.toml")
+		path = defaultPath
 	}
+	factoryConfig, err := loadConfigFile(path)
+	if err != nil {
+		return Config{}, err
+	}
+	factoryConfig.Server.configDir = filepath.Dir(factoryConfig.path)
+	factoryConfig.Server, err = applyServerDefaults(factoryConfig.Server)
+	if err != nil {
+		return Config{}, err
+	}
+	return factoryConfig, nil
+}
+
+func loadConfigFile(path string) (Config, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return Server{}, fmt.Errorf("resolve server config: %w", err)
+		return Config{}, fmt.Errorf("resolve Factory config: %w", err)
 	}
 	body, err := readBoundedFile(absPath, maxConfigBytes)
 	if err != nil {
-		return Server{}, fmt.Errorf("read server config %q: %w", absPath, err)
+		return Config{}, fmt.Errorf("read Factory config %q: %w", absPath, err)
 	}
-	var server Server
+	factoryConfig := Config{path: absPath}
 	decoder := toml.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&server); err != nil {
-		return Server{}, fmt.Errorf("parse server config %q: %w", absPath, err)
+	if err := decoder.Decode(&factoryConfig); err != nil {
+		return Config{}, fmt.Errorf("parse Factory config %q: %w", absPath, err)
 	}
-	server.configDir = filepath.Dir(absPath)
-	return applyServerDefaults(server)
+	return factoryConfig, nil
 }
 
-func (w Worker) ResolveDefinition(override string) (string, error) {
+func (c Config) Path() string { return c.path }
+
+func (w Worker) ResolveFactoryConfig(override string) (string, error) {
 	path := override
 	base := ""
 	if path == "" {
-		path = w.DefinitionFile
+		path = "config.toml"
 		base = w.configDir
-	}
-	if path == "" {
-		path = "factory.toml"
 	}
 	path, err := expandHome(path)
 	if err != nil {
@@ -163,20 +174,9 @@ func (w Worker) ResolveDefinition(override string) (string, error) {
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve definition file: %w", err)
+		return "", fmt.Errorf("resolve Factory config: %w", err)
 	}
 	return filepath.Clean(absPath), nil
-}
-
-func (s Server) ResolveDefinition(override string) (string, error) {
-	path := override
-	if path == "" {
-		path = s.DefinitionFile
-	}
-	if path == "" {
-		path = "factory.toml"
-	}
-	return resolveConfigPath(path, s.configDir)
 }
 
 func (w Worker) ResolveAgent(agent ResolvedAgent) (ResolvedAgent, error) {
@@ -222,7 +222,7 @@ func LoadAgent(definitionPath, name string) (ResolvedAgent, error) {
 	if strings.TrimSpace(name) == "" {
 		return ResolvedAgent{}, errors.New("agent name is required")
 	}
-	definition, err := LoadDefinition(definitionPath)
+	definition, err := loadConfigFile(definitionPath)
 	if err != nil {
 		return ResolvedAgent{}, err
 	}
@@ -237,7 +237,7 @@ func LoadPipeline(definitionPath, name string) ([]ResolvedAgent, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("pipeline name is required")
 	}
-	definition, err := LoadDefinition(definitionPath)
+	definition, err := loadConfigFile(definitionPath)
 	if err != nil {
 		return nil, err
 	}
@@ -266,19 +266,7 @@ func LoadPipeline(definitionPath, name string) ([]ResolvedAgent, error) {
 	return agents, nil
 }
 
-func LoadDefinition(definitionPath string) (Definition, error) {
-	body, err := readBoundedFile(definitionPath, maxConfigBytes)
-	if err != nil {
-		return Definition{}, fmt.Errorf("read definition %q: %w", definitionPath, err)
-	}
-	var definition Definition
-	decoder := toml.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&definition); err != nil {
-		return Definition{}, fmt.Errorf("parse definition %q: %w", definitionPath, err)
-	}
-	return definition, nil
-}
+func LoadDefinitions(path string) (Config, error) { return loadConfigFile(path) }
 
 func resolveAgent(definitionPath, name string, agent Agent) (ResolvedAgent, error) {
 	if strings.TrimSpace(agent.Executor) == "" {
@@ -510,6 +498,14 @@ func defaultWorkerConfigPath() (string, error) {
 		return "", fmt.Errorf("find user home directory: %w", err)
 	}
 	return filepath.Join(home, ".factory", "worker.toml"), nil
+}
+
+func defaultFactoryConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("find user home directory: %w", err)
+	}
+	return filepath.Join(home, ".factory", "config.toml"), nil
 }
 
 func expandHome(path string) (string, error) {

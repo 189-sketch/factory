@@ -12,7 +12,7 @@ import (
 func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "worker.toml")
-	writeTestFile(t, path, "data_directory = \"state\"\ndefinition_file = \"factory.toml\"\n")
+	writeTestFile(t, path, "data_directory = \"state\"\n")
 
 	worker, err := LoadWorker(path)
 	if err != nil {
@@ -21,11 +21,11 @@ func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
 	if worker.DataDirectory != filepath.Join(directory, "state") {
 		t.Fatalf("data directory = %q", worker.DataDirectory)
 	}
-	definition, err := worker.ResolveDefinition("")
+	definition, err := worker.ResolveFactoryConfig("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if definition != filepath.Join(directory, "factory.toml") {
+	if definition != filepath.Join(directory, "config.toml") {
 		t.Fatalf("definition = %q", definition)
 	}
 }
@@ -113,20 +113,32 @@ path = "repository"
 	}
 }
 
-func TestLoadServerAppliesLocalDefaultsAndPaths(t *testing.T) {
+func TestLoadConfigCombinesServerAgentsAndPipelines(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "token"), "secret")
-	path := filepath.Join(directory, "server.toml")
-	writeTestFile(t, path, "database = \"state/factory.db\"\ndefinition_file = \"factory.toml\"\nworker_token_file = \"token\"\n")
-	server, err := LoadServer(path)
+	path := filepath.Join(directory, "config.toml")
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{factory.prompt}}.\n")
+	writeTestFile(t, path, `[server]
+database = "state/factory.db"
+worker_token_file = "token"
+
+[agents.plan]
+executor = "test"
+prompt_file = "plan.md"
+
+[pipelines.code]
+agents = ["plan"]
+`)
+	factoryConfig, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	server := factoryConfig.Server
 	if server.Listen != "127.0.0.1:7331" || server.Database != filepath.Join(directory, "state", "factory.db") {
 		t.Fatalf("server = %#v", server)
 	}
-	if definition, err := server.ResolveDefinition(""); err != nil || definition != filepath.Join(directory, "factory.toml") {
-		t.Fatalf("definition = %q, %v", definition, err)
+	if factoryConfig.Path() != path || len(factoryConfig.Agents) != 1 || len(factoryConfig.Pipelines) != 1 {
+		t.Fatalf("Factory config = %#v, path = %q", factoryConfig, factoryConfig.Path())
 	}
 	if token, err := server.WorkerToken(); err != nil || token != "secret" {
 		t.Fatalf("token = %q, %v", token, err)
@@ -136,7 +148,7 @@ func TestLoadServerAppliesLocalDefaultsAndPaths(t *testing.T) {
 func TestLoadAgentResolvesPromptAndHashesDefinition(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository for {{factory.prompt}}.\n")
-	definition := filepath.Join(directory, "factory.toml")
+	definition := filepath.Join(directory, "config.toml")
 	writeTestFile(t, definition, `[agents.plan]
 executor = "test"
 prompt_file = "plan.md"
@@ -213,7 +225,7 @@ func TestLoadAgentRequiresPromptParameterAndRejectsUnsupportedFactoryParameter(t
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()
 			writeTestFile(t, filepath.Join(directory, "plan.md"), test.prompt)
-			definition := filepath.Join(directory, "factory.toml")
+			definition := filepath.Join(directory, "config.toml")
 			writeTestFile(t, definition, "[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\n")
 			if _, err := LoadAgent(definition, "plan"); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
@@ -225,7 +237,7 @@ func TestLoadAgentRequiresPromptParameterAndRejectsUnsupportedFactoryParameter(t
 func TestLoadAgentRejectsMissingAndInvalidDefinitions(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan.\n")
-	definition := filepath.Join(directory, "factory.toml")
+	definition := filepath.Join(directory, "config.toml")
 	writeTestFile(t, definition, `[agents.plan]
 prompt_file = "plan.md"
 `)
@@ -242,7 +254,7 @@ func TestLoadPipelineResolvesAgentsInOrder(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{factory.prompt}}.\n")
 	writeTestFile(t, filepath.Join(directory, "build.md"), "Build {{factory.prompt}}.\n")
-	definition := filepath.Join(directory, "factory.toml")
+	definition := filepath.Join(directory, "config.toml")
 	writeTestFile(t, definition, `[agents.plan]
 executor = "plan"
 prompt_file = "plan.md"
@@ -275,7 +287,7 @@ func TestLoadPipelineRejectsMissingEmptyAndUndefinedAgents(t *testing.T) {
 		{name: "undefined agent", body: "[pipelines.code]\nagents = [\"missing\"]\n", want: `references undefined agent "missing"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			definition := filepath.Join(t.TempDir(), "factory.toml")
+			definition := filepath.Join(t.TempDir(), "config.toml")
 			writeTestFile(t, definition, test.body)
 			if _, err := LoadPipeline(definition, "code"); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("expected %q error, got %v", test.want, err)
@@ -285,7 +297,7 @@ func TestLoadPipelineRejectsMissingEmptyAndUndefinedAgents(t *testing.T) {
 }
 
 func TestExampleAgentDefinitionsLoad(t *testing.T) {
-	definition := filepath.Join("..", "..", "examples", "factory.toml")
+	definition := filepath.Join("..", "..", "examples", "config.toml")
 	for _, name := range []string{"plan", "build", "verify"} {
 		t.Run(name, func(t *testing.T) {
 			agent, err := LoadAgent(definition, name)
