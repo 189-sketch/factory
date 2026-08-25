@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { formatDurationMillis, formatTokenUsage } from "@/run-metrics";
 import "./styles.css";
 
 const activeStates = new Set(["queued", "running"]);
@@ -224,7 +225,7 @@ function RunRow({ job, open, toggle }) {
 function RunSteps({ id, job }) {
   return <div id={id} className="border-t border-border bg-muted/20 px-4 py-4 lg:pl-[9rem]"><div className="grid gap-2 xl:grid-cols-3">{job.runs.map((run, index) => <div key={run.id} className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-surface p-3">
     <span className="grid size-6 shrink-0 place-items-center rounded-full border border-border font-mono text-xs text-muted-foreground">{index + 1}</span>
-    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{run.worker_name || run.executor}{duration(run) ? ` · ${duration(run)}` : ""}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
+    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{runDetails(run)}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
   </div>)}</div></div>;
 }
 
@@ -243,6 +244,6 @@ function firstSelection(status) { if (status.pipelines?.length) return `pipeline
 function viewFromHash(hash) { const value = hash.replace(/^#\//, ""); return ["runs", "analytics", "workers", "agents", "pipelines"].includes(value) ? value : "runs"; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }
 function relativeTime(value) { if (!value || value === zeroTime) return "Not started"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000)); if (seconds < 10) return "just now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
-function duration(run) { if (!run.started_at || run.started_at === zeroTime) return ""; const end = !run.completed_at || run.completed_at === zeroTime ? Date.now() : Date.parse(run.completed_at); const seconds = Math.max(0, Math.floor((end - Date.parse(run.started_at)) / 1000)); if (seconds < 60) return `${seconds}s`; return `${Math.floor(seconds / 60)}m ${seconds % 60}s`; }
+function runDetails(run) { const values = [run.worker_name || run.executor]; if (Number.isSafeInteger(run.duration_millis)) values.push(formatDurationMillis(run.duration_millis)); if (run.completed_at && run.completed_at !== zeroTime) values.push(`${formatTokenUsage(run.token_usage)} tokens`); return values.join(" · "); }
 
 createRoot(document.getElementById("root")).render(<App />);

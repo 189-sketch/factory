@@ -142,9 +142,10 @@ factory run \
 ```
 
 The foreman writes each subagent prompt from the latest task state. It allows at most two
-targeted repair attempts, records every phase and attempt in the run output, opens a draft
-pull request, waits for available CI and automated review, and marks the result ready for
-human review. It never merges.
+targeted repair attempts, requires one-line subagent summaries, records every phase and
+attempt in the run output, and opens a non-draft pull request after local approval. The
+issue stays in `factory:verifying` while available CI and automated review run, and changes
+to `factory:ready-for-review` only when every review gate passes. The foreman never merges.
 
 Or pass the repository and configuration explicitly:
 
@@ -163,6 +164,10 @@ Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
 `result.json` in the same directory. Managed redispatches place each lease attempt under
 `<data_directory>/runs/<run-id>/<lease-token>/` so an abandoned attempt remains intact.
+Every result records measured duration. An executor may explicitly report its exact total
+token usage by writing one non-negative base-10 integer to `FACTORY_TOKEN_USAGE_PATH`.
+Factory stores and displays that value without estimating it; when the file is not written
+or is invalid, token usage remains unavailable rather than becoming zero.
 Recording stops after 64 MiB of process output or
 when the encoded event file reaches 32 MiB, and adds a truncation event while live output
 and the agent run continue.

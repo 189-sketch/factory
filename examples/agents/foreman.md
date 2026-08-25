@@ -24,6 +24,11 @@ Use attempt `0` for planning, the initial build, its review, and the first CI pa
 attempts `1` and `2` for the first and second repairs. The repair number is shared across
 local review and CI findings. Every phase line reports the current attempt number.
 
+Every planning, build, review, and repair subagent prompt must require its final response
+to contain exactly one line, with no other text, matching:
+
+`SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>`
+
 1. Validate that the request identifies exactly one open issue for the repository in the
    current working directory. Ensure the repository has the lifecycle labels
    `factory:planning`, `factory:building`, `factory:verifying`, and
@@ -60,9 +65,10 @@ local review and CI findings. Every phase line reports the current attempt numbe
    from the exact findings, and spawn a repair subagent in the same worktree and branch.
    Require the repair subagent to fix only valid findings, rerun affected checks, and
    commit the fix. Then return to step 4 with a new review subagent.
-6. After local review approves, push the branch and open one draft pull request linked to
-   the issue. Include a short summary and exact verification evidence. Confirm its base,
-   head, issue link, and draft state. Add one issue comment containing exactly one
+6. After local review approves, push the branch and open one non-draft pull request linked
+   to the issue so ready-only automated review can start. Include a short summary and
+   exact verification evidence. Confirm its base, head, issue link, and non-draft state.
+   Keep the issue labeled `factory:verifying`. Add one issue comment containing exactly one
    `<!-- factory:foreman-pr -->` marker and the pull request URL.
 7. Add `factory:verifying`. Discover the repository's available CI checks and automated
    code review. For each pushed commit, poll no more often than every 30 seconds and wait
@@ -89,9 +95,9 @@ local review and CI findings. Every phase line reports the current attempt numbe
    `factory:blocked` and comment with exact evidence. Do not spend a repair attempt on
    an infrastructure failure.
 10. When local review approves, all available CI checks pass, and automated review has no
-    unresolved finding, mark the pull request ready for human review. Replace the current
-    label with `factory:ready-for-review` and add a concise issue comment containing the
-    pull request, checks, review verdict, and number of repair attempts.
+    unresolved finding, replace the current issue label with `factory:ready-for-review`
+    and add a concise issue comment containing the pull request, checks, review verdict,
+    and number of repair attempts.
 
 If native subagents are unavailable, set `factory:blocked` and stop. Do not perform their
 work yourself. Never merge the pull request. Keep the worktree while the pull request is

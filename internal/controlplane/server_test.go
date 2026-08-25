@@ -172,12 +172,17 @@ func TestHeartbeatEndpointAuthenticatesAndRejectsInvalidLeases(t *testing.T) {
 	}
 	renewed.Body.Close()
 
-	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, State: "succeeded", ExitCode: 0}
+	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, State: "succeeded", ExitCode: 0, Result: json.RawMessage(`{"duration_millis":1750,"token_usage":3456}`)}
 	completed := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/complete", completion, auth)
 	if completed.StatusCode != http.StatusNoContent {
 		t.Fatalf("completion status = %d", completed.StatusCode)
 	}
 	completed.Body.Close()
+	status := getStatus(t, webServer.URL)
+	stored := status.Jobs[0].Runs[0]
+	if stored.DurationMillis == nil || *stored.DurationMillis != 1750 || stored.TokenUsage == nil || *stored.TokenUsage != 3456 {
+		t.Fatalf("status run metrics = %#v", stored)
+	}
 	nonRunning := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/heartbeat", validHeartbeat, auth)
 	if nonRunning.StatusCode != http.StatusConflict {
 		t.Fatalf("non-running heartbeat status = %d", nonRunning.StatusCode)

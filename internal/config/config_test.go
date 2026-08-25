@@ -328,6 +328,10 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"Use at most two repair attempts",
 		"Use attempt `0` for planning",
 		"attempts `1` and `2` for the first and second repairs",
+		"Every planning, build, review, and repair subagent prompt",
+		"SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>",
+		"open one non-draft pull request",
+		"Keep the issue labeled `factory:verifying`",
 		"poll no more often than every 30 seconds",
 		"at most 20 minutes",
 		"set `factory:blocked`",
@@ -337,6 +341,11 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	} {
 		if !strings.Contains(foreman.Prompt, rule) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
+		}
+	}
+	for _, forbidden := range []string{"open one draft pull request", "mark the pull request ready for human review"} {
+		if strings.Contains(foreman.Prompt, forbidden) {
+			t.Fatalf("foreman prompt still contains %q", forbidden)
 		}
 	}
 }
