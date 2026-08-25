@@ -46,26 +46,45 @@ prompt_file = "agents/plan.md"
 timeout = "20m"
 ```
 
+Each prompt is a strict Factory template and must place the runtime task using
+the supported parameter:
+
+```text
+Assess whether this task is ready to build:
+
+<task>
+{{factory.task}}
+</task>
+```
+
+Factory substitutes the task as plain text. It does not evaluate the task as a
+shell command or recursively expand parameters inside it. The rendered prompt
+is limited to 512 KiB.
+
 ## Run
 
-Define each coding task as a named agent prompt, then run it from a Git
-repository:
+Define each coding role as a named agent prompt, then pass the task when running
+it from a Git repository:
 
 ```sh
-factory worker run --agent=plan
+factory worker run \
+  --agent=plan \
+  --task="https://github.com/your-org/your-repo/issues/123"
 ```
 
 Or pass the repository and configuration explicitly:
 
 ```sh
 factory worker run --agent=plan \
+  --task="Fix the failing account creation flow" \
   --repo=/absolute/path/to/repository \
   --config=/absolute/path/to/worker.toml
 ```
 
-The agent receives the configured prompt unchanged on standard input and runs
-with the Git repository as its working directory. Its standard output and error
-remain live. Factory records byte-faithful output chunks as base64 under
+The agent receives the rendered prompt on standard input and runs with the Git
+repository as its working directory. `--task` is required and replaces every
+`{{factory.task}}` token byte-for-byte. Standard output and error remain live.
+Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
 `result.json` in the same directory. Event recording stops after 64 MiB and adds
 a truncation event, while live output and the agent run continue.

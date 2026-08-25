@@ -16,10 +16,14 @@ import (
 )
 
 const (
-	defaultTimeout       = 30 * time.Minute
-	maxConfigBytes       = 1 << 20
-	maxPromptBytes       = 256 << 10
-	defaultWorkerDirName = ".factory/worker"
+	defaultTimeout         = 30 * time.Minute
+	maxConfigBytes         = 1 << 20
+	maxPromptBytes         = 256 << 10
+	maxTaskBytes           = 256 << 10
+	maxRenderedPromptBytes = maxPromptBytes + maxTaskBytes
+	defaultWorkerDirName   = ".factory/worker"
+	taskParameter          = "{{factory.task}}"
+	factoryParameterPrefix = "{{factory"
 )
 
 type Worker struct {
@@ -147,6 +151,9 @@ func LoadAgent(definitionPath, name string) (ResolvedAgent, error) {
 	if strings.TrimSpace(string(prompt)) == "" {
 		return ResolvedAgent{}, fmt.Errorf("agent %q prompt is empty", name)
 	}
+	if err := validatePromptParameters(name, string(prompt)); err != nil {
+		return ResolvedAgent{}, err
+	}
 	timeout := defaultTimeout
 	if agent.Timeout != "" {
 		timeout, err = time.ParseDuration(agent.Timeout)
@@ -170,6 +177,51 @@ func LoadAgent(definitionPath, name string) (ResolvedAgent, error) {
 		return ResolvedAgent{}, err
 	}
 	return resolved, nil
+}
+
+func RenderTask(agent ResolvedAgent, task string) (ResolvedAgent, error) {
+	if strings.TrimSpace(task) == "" {
+		return ResolvedAgent{}, errors.New("task is required")
+	}
+	if len(task) > maxTaskBytes {
+		return ResolvedAgent{}, fmt.Errorf("task exceeds %d bytes", maxTaskBytes)
+	}
+	parameterCount := strings.Count(agent.Prompt, taskParameter)
+	if parameterCount == 0 {
+		return ResolvedAgent{}, fmt.Errorf("agent %q prompt must include %s", agent.Name, taskParameter)
+	}
+	literalBytes := len(agent.Prompt) - parameterCount*len(taskParameter)
+	if literalBytes > maxRenderedPromptBytes || len(task) > (maxRenderedPromptBytes-literalBytes)/parameterCount {
+		return ResolvedAgent{}, fmt.Errorf("rendered agent prompt exceeds %d bytes", maxRenderedPromptBytes)
+	}
+	agent.Prompt = strings.ReplaceAll(agent.Prompt, taskParameter, task)
+	return agent, nil
+}
+
+func validatePromptParameters(agentName, prompt string) error {
+	hasTask := false
+	remaining := prompt
+	for {
+		start := strings.Index(remaining, factoryParameterPrefix)
+		if start < 0 {
+			break
+		}
+		remaining = remaining[start:]
+		end := strings.Index(remaining, "}}")
+		if end < 0 {
+			return fmt.Errorf("agent %q prompt contains a malformed Factory parameter", agentName)
+		}
+		parameter := remaining[:end+2]
+		if parameter != taskParameter {
+			return fmt.Errorf("agent %q prompt uses unsupported Factory parameter %q", agentName, parameter)
+		}
+		hasTask = true
+		remaining = remaining[end+2:]
+	}
+	if !hasTask {
+		return fmt.Errorf("agent %q prompt must include %s", agentName, taskParameter)
+	}
+	return nil
 }
 
 func applyWorkerDefaults(worker Worker) (Worker, error) {
