@@ -108,6 +108,8 @@ func TestLoadAgentRequiresTaskParameterAndRejectsUnsupportedFactoryParameter(t *
 	}{
 		{name: "missing task", prompt: "Plan this ticket.\n", want: "must include {{factory.task}}"},
 		{name: "unsupported parameter", prompt: "Plan {{factory.task}} in {{factory.repository}}.\n", want: "unsupported Factory parameter"},
+		{name: "empty parameter", prompt: "Plan {{factory.task}} with {{factory.}}.\n", want: "unsupported Factory parameter"},
+		{name: "unclosed parameter", prompt: "Plan {{factory.task}} with {{factory.repository.\n", want: "malformed Factory parameter"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()

@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -24,9 +23,8 @@ const (
 	maxRenderedPromptBytes = maxPromptBytes + maxTaskBytes
 	defaultWorkerDirName   = ".factory/worker"
 	taskParameter          = "{{factory.task}}"
+	factoryParameterPrefix = "{{factory"
 )
-
-var factoryParameterPattern = regexp.MustCompile(`\{\{factory\.[^{}]+\}\}`)
 
 type Worker struct {
 	DataDirectory  string `toml:"data_directory"`
@@ -202,11 +200,23 @@ func RenderTask(agent ResolvedAgent, task string) (ResolvedAgent, error) {
 
 func validatePromptParameters(agentName, prompt string) error {
 	hasTask := false
-	for _, parameter := range factoryParameterPattern.FindAllString(prompt, -1) {
+	remaining := prompt
+	for {
+		start := strings.Index(remaining, factoryParameterPrefix)
+		if start < 0 {
+			break
+		}
+		remaining = remaining[start:]
+		end := strings.Index(remaining, "}}")
+		if end < 0 {
+			return fmt.Errorf("agent %q prompt contains a malformed Factory parameter", agentName)
+		}
+		parameter := remaining[:end+2]
 		if parameter != taskParameter {
 			return fmt.Errorf("agent %q prompt uses unsupported Factory parameter %q", agentName, parameter)
 		}
 		hasTask = true
+		remaining = remaining[end+2:]
 	}
 	if !hasTask {
 		return fmt.Errorf("agent %q prompt must include %s", agentName, taskParameter)
