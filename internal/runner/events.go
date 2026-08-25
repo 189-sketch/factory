@@ -3,7 +3,6 @@ package runner
 import (
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -11,8 +10,6 @@ import (
 )
 
 const maxRecordedOutputBytes = 64 << 20
-
-var errOutputLimit = errors.New("agent output exceeded the 64 MiB recording limit")
 
 type Event struct {
 	Sequence int64     `json:"sequence"`
@@ -27,30 +24,56 @@ type Event struct {
 func (log *eventLog) appendOutput(stream string, data []byte) error {
 	log.mu.Lock()
 	defer log.mu.Unlock()
-	if log.outputBytes+int64(len(data)) > maxRecordedOutputBytes {
-		return errOutputLimit
+	if log.outputTruncated {
+		return nil
 	}
-	log.outputBytes += int64(len(data))
-	log.sequence++
-	if err := log.encoder.Encode(Event{
-		Sequence: log.sequence,
-		Time:     time.Now().UTC(),
-		Type:     "process.output",
-		Stream:   stream,
-		Encoding: "base64",
-		Data:     base64.StdEncoding.EncodeToString(data),
-	}); err != nil {
-		return fmt.Errorf("write event log: %w", err)
+	remaining := log.outputLimit - log.outputBytes
+	recorded := data
+	truncated := int64(len(data)) > remaining
+	if truncated {
+		if remaining > 0 {
+			recorded = data[:remaining]
+		} else {
+			recorded = nil
+		}
+	}
+	if len(recorded) > 0 {
+		log.outputBytes += int64(len(recorded))
+		log.sequence++
+		if err := log.encoder.Encode(Event{
+			Sequence: log.sequence,
+			Time:     time.Now().UTC(),
+			Type:     "process.output",
+			Stream:   stream,
+			Encoding: "base64",
+			Data:     base64.StdEncoding.EncodeToString(recorded),
+		}); err != nil {
+			return fmt.Errorf("write event log: %w", err)
+		}
+	}
+	if truncated {
+		log.outputTruncated = true
+		log.sequence++
+		if err := log.encoder.Encode(Event{
+			Sequence: log.sequence,
+			Time:     time.Now().UTC(),
+			Type:     "process.output_truncated",
+			Message:  fmt.Sprintf("recording stopped after %d bytes; live output continues", log.outputLimit),
+		}); err != nil {
+			return fmt.Errorf("write event log: %w", err)
+		}
 	}
 	return nil
 }
 
 type eventLog struct {
-	mu          sync.Mutex
-	file        *os.File
-	encoder     *json.Encoder
-	sequence    int64
-	outputBytes int64
+	mu              sync.Mutex
+	file            *os.File
+	encoder         *json.Encoder
+	sequence        int64
+	outputBytes     int64
+	outputLimit     int64
+	outputTruncated bool
 }
 
 func newEventLog(path string) (*eventLog, error) {
@@ -58,7 +81,7 @@ func newEventLog(path string) (*eventLog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create event log: %w", err)
 	}
-	return &eventLog{file: file, encoder: json.NewEncoder(file)}, nil
+	return &eventLog{file: file, encoder: json.NewEncoder(file), outputLimit: maxRecordedOutputBytes}, nil
 }
 
 func (log *eventLog) append(eventType, stream, message string) error {

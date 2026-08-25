@@ -171,13 +171,20 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	streams.Add(2)
 	go pumpStream(&streams, stdoutReader, options.Stdout, "stdout", log, streamErrors)
 	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	streamsDone := make(chan struct{})
+	go func() {
+		streams.Wait()
+		close(streamsDone)
+	}()
 	processResult := make(chan processWait, 1)
 	go func() {
 		state, err := command.Process.Wait()
 		processResult <- processWait{state: state, err: err}
 	}()
 
-	state, exitCode, outcome := supervise(ctx, command.Process, options.Agent.Timeout, processResult, inputResult, streamErrors, &streams, options.Stdout, options.Stderr)
+	closeInput := func() { _ = stdinWriter.Close() }
+	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
+	state, exitCode, outcome := supervise(ctx, command.Process, options.Agent.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
 	if err := finish(&result, log, runDirectory, state, exitCode, outcome); err != nil {
 		if outcome != nil {
 			return result, &OutcomeError{State: state, ExitCode: exitCode, Cause: errors.Join(outcome, err)}
@@ -190,7 +197,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	return result, nil
 }
 
-func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streams *sync.WaitGroup, outputWriters ...io.Writer) (State, int, error) {
+func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	timeoutAt := time.Now().Add(timeout)
@@ -202,13 +209,15 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 		select {
 		case waited := <-processResult:
 			killErr := terminateProcessTree(process)
-			setOutputDeadline(earlierDeadline(timeoutAt, time.Now().Add(outputDrainGrace)), outputWriters...)
+			closeInput()
+			drainDeadline := earlierDeadline(timeoutAt, time.Now().Add(outputDrainGrace))
+			setOutputDeadline(drainDeadline, outputWriters...)
 			state, exitCode, outcome := processOutcome(waited)
 			if outcome == nil && killErr != nil {
 				state, exitCode, outcome = StateFailed, 1, fmt.Errorf("stop remaining agent processes: %w", killErr)
 			}
 			inputErr = awaitInput(inputResult, inputDone, inputErr)
-			streams.Wait()
+			waitForStreams(streamsDone, closeStreams, time.Until(drainDeadline))
 			if outcome == nil && inputErr != nil {
 				state, exitCode, outcome = StateFailed, 1, inputErr
 			}
@@ -224,32 +233,57 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 			if err != nil {
 				setOutputDeadline(time.Now(), outputWriters...)
 				_ = terminateProcessTree(process)
+				closeInput()
+				closeStreams()
 				waited := <-processResult
-				streams.Wait()
+				<-streamsDone
 				return operationFailure(waited, err)
 			}
 		case err := <-streamErrors:
 			setOutputDeadline(time.Now(), outputWriters...)
 			_ = terminateProcessTree(process)
+			closeInput()
+			closeStreams()
 			waited := <-processResult
 			inputErr = awaitInput(inputResult, inputDone, inputErr)
-			streams.Wait()
+			<-streamsDone
 			return operationFailure(waited, errors.Join(err, inputErr))
 		case <-ctx.Done():
 			setOutputDeadline(time.Now(), outputWriters...)
 			_ = terminateProcessTree(process)
+			closeInput()
+			closeStreams()
 			<-processResult
 			_ = awaitInput(inputResult, inputDone, inputErr)
-			streams.Wait()
+			<-streamsDone
 			return StateCancelled, 130, errors.New("run cancelled")
 		case <-timer.C:
 			setOutputDeadline(time.Now(), outputWriters...)
 			_ = terminateProcessTree(process)
+			closeInput()
+			closeStreams()
 			<-processResult
 			_ = awaitInput(inputResult, inputDone, inputErr)
-			streams.Wait()
+			<-streamsDone
 			return StateTimedOut, 124, fmt.Errorf("agent exceeded timeout %s", timeout)
 		}
+	}
+}
+
+func waitForStreams(done <-chan struct{}, closeStreams func(), grace time.Duration) {
+	if grace <= 0 {
+		closeStreams()
+		<-done
+		return
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+		closeStreams()
+		<-done
 	}
 }
 
@@ -330,7 +364,7 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 			}
 		}
 		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
+			if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, os.ErrClosed) {
 				sendError(errorsChannel, fmt.Errorf("read %s: %w", stream, readErr))
 			}
 			return
@@ -338,9 +372,15 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 	}
 }
 
-func writePrompt(destination *os.File, prompt string, result chan<- error) {
-	_, writeErr := io.WriteString(destination, prompt)
+func writePrompt(destination io.WriteCloser, prompt string, result chan<- error) {
+	written, writeErr := io.WriteString(destination, prompt)
+	if writeErr == nil && written != len(prompt) {
+		writeErr = io.ErrShortWrite
+	}
 	closeErr := destination.Close()
+	if written == len(prompt) && errors.Is(closeErr, os.ErrClosed) {
+		closeErr = nil
+	}
 	result <- errors.Join(writeErr, closeErr)
 }
 

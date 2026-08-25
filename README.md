@@ -67,7 +67,8 @@ The agent receives the configured prompt unchanged on standard input and runs
 with the Git repository as its working directory. Its standard output and error
 remain live. Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
-`result.json` in the same directory.
+`result.json` in the same directory. Event recording stops after 64 MiB and adds
+a truncation event, while live output and the agent run continue.
 
 Ctrl-C cancels the complete agent process group. A configured timeout does the
 same. Factory returns the agent's exit status, `1` for a Worker runtime failure,

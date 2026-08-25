@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,28 @@ import (
 
 	"github.com/owainlewis/factory-v2/internal/config"
 )
+
+func TestEscapedDescendantHelper(t *testing.T) {
+	if os.Getenv("FACTORY_TEST_ESCAPED") != "1" {
+		return
+	}
+	if os.Getenv("FACTORY_TEST_HOLD_STDIN") != "1" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	}
+	if _, err := syscall.Setsid(); err != nil {
+		os.Exit(2)
+	}
+	marker := os.Getenv("FACTORY_TEST_MARKER")
+	if err := os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		os.Exit(3)
+	}
+	for {
+		if _, err := os.Stdout.Write([]byte(".")); err != nil {
+			os.Exit(0)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 func TestExecuteStreamsPromptAndPersistsOrderedResult(t *testing.T) {
 	repository := newGitRepository(t)
@@ -153,6 +176,115 @@ func TestExecuteFinishesWhenDescendantKeepsOutputPipesOpen(t *testing.T) {
 	}
 	if result.State != StateSucceeded || time.Since(started) > 2*time.Second {
 		t.Fatalf("result = %#v, duration = %s", result, time.Since(started))
+	}
+}
+
+func TestExecuteFinishesWhenSessionDetachedDescendantKeepsPipesOpen(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "detached.pid")
+	script := `cat >/dev/null; FACTORY_TEST_ESCAPED=1 FACTORY_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
+	agent := config.ResolvedAgent{
+		Name:       "plan",
+		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
+		Prompt:     "complete prompt\n",
+		Timeout:    5 * time.Second,
+		Definition: "/definition/factory.toml",
+		Hash:       "test-hash",
+	}
+	started := time.Now()
+	result, err := Execute(context.Background(), Options{
+		Agent:         agent,
+		Repository:    newGitRepository(t),
+		DataDirectory: t.TempDir(),
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != StateSucceeded || time.Since(started) > 3*time.Second {
+		t.Fatalf("result = %#v, duration = %s", result, time.Since(started))
+	}
+}
+
+func TestExecuteFinishesWhenSessionDetachedDescendantKeepsAllPipesOpen(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "detached.pid")
+	script := `FACTORY_TEST_ESCAPED=1 FACTORY_TEST_HOLD_STDIN=1 FACTORY_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
+	agent := config.ResolvedAgent{
+		Name:       "plan",
+		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
+		Prompt:     strings.Repeat("prompt", 40<<10),
+		Timeout:    5 * time.Second,
+		Definition: "/definition/factory.toml",
+		Hash:       "test-hash",
+	}
+	started := time.Now()
+	result, err := Execute(context.Background(), Options{
+		Agent:         agent,
+		Repository:    newGitRepository(t),
+		DataDirectory: t.TempDir(),
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	var outcome *OutcomeError
+	if !errors.As(err, &outcome) || outcome.ExitCode != 1 || outcome.State != StateFailed {
+		t.Fatalf("error = %#v", err)
+	}
+	if result.State != StateFailed || time.Since(started) > 3*time.Second {
+		t.Fatalf("result = %#v, duration = %s", result, time.Since(started))
+	}
+}
+
+func TestEventLogTruncatesRecordingWithoutFailing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	log, err := newEventLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.outputLimit = 5
+	for _, chunk := range []string{"abc", "def", "ghi"} {
+		if err := log.appendOutput("stdout", []byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.close(); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, path)
+	if got := outputFor(t, events, "stdout"); got != "abcde" {
+		t.Fatalf("recorded output = %q", got)
+	}
+	truncations := 0
+	for _, event := range events {
+		if event.Type == "process.output_truncated" {
+			truncations++
+		}
+	}
+	if truncations != 1 {
+		t.Fatalf("truncation events = %d; events = %#v", truncations, events)
+	}
+}
+
+func TestWritePromptAcceptsSupervisorCloseAfterCompleteDelivery(t *testing.T) {
+	result := make(chan error, 1)
+	writePrompt(completeThenClosedWriter{}, "complete prompt\n", result)
+	if err := <-result; err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+}
+
+func TestExecuteSucceedsWhenAgentReadsExactPromptLength(t *testing.T) {
+	result, err := Execute(context.Background(), Options{
+		Agent:         helperAgent("exact-prompt", time.Second),
+		Repository:    newGitRepository(t),
+		DataDirectory: t.TempDir(),
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != StateSucceeded || result.ExitCode != 0 {
+		t.Fatalf("result = %#v", result)
 	}
 }
 
@@ -384,6 +516,8 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedAgent {
 		script = "cat >/dev/null; printf partial; sleep 1; printf done"
 	case "flood":
 		script = "cat >/dev/null; yes factory"
+	case "exact-prompt":
+		script = "dd bs=16 count=1 of=/dev/null 2>/dev/null"
 	default:
 		panic("unknown helper mode")
 	}
@@ -517,3 +651,8 @@ func (writer *signalWriter) String() string {
 type errorWriter struct{ err error }
 
 func (writer errorWriter) Write([]byte) (int, error) { return 0, writer.err }
+
+type completeThenClosedWriter struct{}
+
+func (completeThenClosedWriter) Write(data []byte) (int, error) { return len(data), nil }
+func (completeThenClosedWriter) Close() error                   { return os.ErrClosed }
