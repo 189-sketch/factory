@@ -23,7 +23,7 @@ export function formatDurationMillis(milliseconds) {
 }
 
 export function formatTokenUsage(value) {
-  return Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString() : "Unavailable";
+  return typeof value === "string" && /^(0|[1-9]\d*)$/.test(value) ? value.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "Unavailable";
 }
 
 function validDate(value) { return Boolean(value && value !== zeroTime && Number.isFinite(Date.parse(value))); }

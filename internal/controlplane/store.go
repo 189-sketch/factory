@@ -54,7 +54,7 @@ type Run struct {
 	StartedAt      time.Time `json:"started_at,omitempty"`
 	CompletedAt    time.Time `json:"completed_at,omitempty"`
 	DurationMillis *int64    `json:"duration_millis,omitempty"`
-	TokenUsage     *int64    `json:"token_usage,omitempty"`
+	TokenUsage     *int64    `json:"token_usage,omitempty,string"`
 }
 
 type Worker struct {

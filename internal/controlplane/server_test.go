@@ -3,6 +3,7 @@ package controlplane
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,15 +173,30 @@ func TestHeartbeatEndpointAuthenticatesAndRejectsInvalidLeases(t *testing.T) {
 	}
 	renewed.Body.Close()
 
-	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, State: "succeeded", ExitCode: 0, Result: json.RawMessage(`{"duration_millis":1750,"token_usage":3456}`)}
+	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, State: "succeeded", ExitCode: 0, Result: json.RawMessage(`{"duration_millis":1750,"token_usage":9007199254740993}`)}
 	completed := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/complete", completion, auth)
 	if completed.StatusCode != http.StatusNoContent {
 		t.Fatalf("completion status = %d", completed.StatusCode)
 	}
 	completed.Body.Close()
-	status := getStatus(t, webServer.URL)
+	response, err := http.Get(webServer.URL + "/api/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(statusBody, []byte(`"token_usage":"9007199254740993"`)) {
+		t.Fatalf("status token usage lost precision: %s", statusBody)
+	}
+	var status statusResponse
+	if err := json.Unmarshal(statusBody, &status); err != nil {
+		t.Fatal(err)
+	}
 	stored := status.Jobs[0].Runs[0]
-	if stored.DurationMillis == nil || *stored.DurationMillis != 1750 || stored.TokenUsage == nil || *stored.TokenUsage != 3456 {
+	if stored.DurationMillis == nil || *stored.DurationMillis != 1750 || stored.TokenUsage == nil || *stored.TokenUsage != 9007199254740993 {
 		t.Fatalf("status run metrics = %#v", stored)
 	}
 	nonRunning := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/heartbeat", validHeartbeat, auth)

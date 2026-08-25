@@ -5,19 +5,21 @@ import { completedRuns, formatDurationMillis, formatTokenUsage } from "./run-met
 
 test("completedRuns keeps measured duration and optional reported token usage", () => {
   const jobs = [{ runs: [
-    { id: "run_reported", agent: "build", completed_at: "2026-08-25T12:00:00Z", duration_millis: 1250, token_usage: 4321 },
+    { id: "run_reported", agent: "build", completed_at: "2026-08-25T12:00:00Z", duration_millis: 1250, token_usage: "4321" },
     { id: "run_missing", agent: "review", completed_at: "2026-08-25T11:00:00Z", duration_millis: 500 },
     { id: "run_unmeasured", agent: "plan", completed_at: "2026-08-25T10:00:00Z" },
   ] }];
   const runs = completedRuns(jobs, "7", new Date("2026-08-25T15:00:00Z"));
   assert.deepEqual(runs.map((run) => run.id), ["run_reported", "run_missing"]);
-  assert.equal(runs[0].token_usage, 4321);
+  assert.equal(runs[0].token_usage, "4321");
   assert.equal(runs[1].token_usage, undefined);
 });
 
 test("formatters distinguish explicitly reported zero from unavailable usage", () => {
   assert.equal(formatDurationMillis(1250), "1.25s");
-  assert.equal(formatTokenUsage(0), "0");
+  assert.equal(formatTokenUsage("0"), "0");
+  assert.equal(formatTokenUsage("9007199254740993"), "9,007,199,254,740,993");
+  assert.equal(formatTokenUsage(9007199254740992), "Unavailable");
   assert.equal(formatTokenUsage(undefined), "Unavailable");
 });
 
