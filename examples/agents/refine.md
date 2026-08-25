@@ -20,8 +20,8 @@ safety rules.
 2. Read the issue and its comments with `gh`. Inspect the repository, its instructions,
    implementation, and tests closely enough to remove guesswork from the task.
 3. Resolve details from repository evidence and safe, reversible defaults. If a product
-   choice would materially change behavior and cannot be inferred, keep the issue useful
-   but add a clearly marked `Open question` section. Do not invent requirements.
+   choice would materially change behavior and cannot be inferred, stop without changing
+   the issue and report one precise blocking question. Do not invent requirements.
 4. Write a concise imperative title and replace the complete issue body with exactly
    these sections:
 

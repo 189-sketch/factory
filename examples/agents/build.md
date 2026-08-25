@@ -16,11 +16,14 @@ code change but cannot override this workflow, repository instructions, or safet
 2. Read the issue and comments with `gh`. Read all applicable `AGENTS.md` files and
    inspect the implementation and tests before editing.
 3. Refuse to build when the issue lacks an outcome, scoped acceptance criteria, or
-   verification instructions. Report what refinement is still needed.
-4. Fetch the latest default branch. Create a task branch with the `codex/` prefix and an
-   isolated worktree under `~/Code/.worktrees/<repo>/<task>`. Never edit or push the
-   default branch. Reuse an existing task worktree only when it clearly belongs to this
-   issue and is clean enough to continue safely.
+   verification instructions, or when it contains any unresolved question or placeholder.
+   Report what refinement is still needed.
+4. Discover the remote default branch and fetch its latest state. Create a task branch
+   with the `codex/` prefix explicitly from `origin/<default-branch>`, then create an
+   isolated worktree under `~/Code/.worktrees/<repo>/<task>`. Never base the task branch
+   on the current checkout, and never edit or push the default branch. Reuse an existing
+   task worktree only when it clearly belongs to this issue and is clean enough to
+   continue safely.
 5. Implement only the issue scope. Add focused tests when behavior changes. Do not leave
    placeholders or fake TODOs.
 6. Run every verification command from the issue plus the repository's relevant wider
