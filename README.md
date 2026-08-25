@@ -69,34 +69,34 @@ the current repository are available. Review prompts before running them and use
 only on repositories and issues you trust. The prompts treat issue commands as untrusted
 text and derive checks from repository entry points they have inspected.
 
-Each prompt is a strict Factory template and must place the runtime task using
+Each agent prompt is a strict Factory template and must place the runtime work request using
 the supported parameter:
 
 ```text
-Build the task at {{factory.task}}.
+{{factory.prompt}}
 ```
 
-Factory substitutes the task as plain text. It does not evaluate the task as a
-shell command or recursively expand parameters inside it. The rendered prompt
+Factory substitutes the input prompt as plain text. It does not evaluate it as a
+shell command or recursively expand parameters inside it. The rendered agent prompt
 is limited to 512 KiB.
 
 ## Run
 
-Run one predefined agent prompt against a task:
+Run one predefined agent with a work request:
 
 ```sh
 factory run \
   --agent=build \
-  --task="https://github.com/your-org/your-repo/issues/123"
+  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123"
 ```
 
 Or run the example pipeline. Factory runs each listed agent independently and in order,
-passing the same task to every run. It stops before the next agent when a run fails:
+passing the same input prompt to every run. It stops before the next agent when a run fails:
 
 ```sh
 factory run \
   --pipeline=code \
-  --task="https://github.com/your-org/your-repo/issues/123"
+  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123"
 ```
 
 The prompts own the workflow. `plan` replaces the issue specification and adds
@@ -117,14 +117,15 @@ Or pass the repository and configuration explicitly:
 
 ```sh
 factory run --agent=build \
-  --task="https://github.com/your-org/your-repo/issues/123" \
+  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123" \
   --repo=/absolute/path/to/repository \
   --config=/absolute/path/to/worker.toml
 ```
 
 Each agent receives its rendered prompt on standard input and runs with the Git
-repository as its working directory. `--task` is required and replaces every
-`{{factory.task}}` token byte-for-byte. Standard output and error remain live.
+repository as its working directory. `--prompt` is required and replaces every
+`{{factory.prompt}}` token byte-for-byte. The input may be a ticket instruction or any
+other work request. Standard output and error remain live.
 Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
 `result.json` in the same directory. Event recording stops after 64 MiB and adds

@@ -19,7 +19,7 @@ func TestBinaryHandlesClosedOutputPipe(t *testing.T) {
 	directory := t.TempDir()
 	script := `cat >/dev/null; awk 'BEGIN { for (i = 0; i < 2097152; i++) printf "x" }'`
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{"/bin/sh", "-c", script}, "10s")
-	command := exec.Command(binary, "worker", "run", "--agent=plan", "--task=run the configured agent", "--repo="+repository, "--config="+workerPath)
+	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestBinaryTimeoutInterruptsOpenUnreadOutputPipe(t *testing.T) {
 	directory := t.TempDir()
 	script := "cat >/dev/null; yes factory"
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{"/bin/sh", "-c", script}, "200ms")
-	command := exec.Command(binary, "worker", "run", "--agent=plan", "--task=run the configured agent", "--repo="+repository, "--config="+workerPath)
+	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestBinaryTimeoutInterruptsOpenUnreadErrorPipe(t *testing.T) {
 	directory := t.TempDir()
 	script := "cat >/dev/null; yes factory >&2"
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{"/bin/sh", "-c", script}, "200ms")
-	command := exec.Command(binary, "worker", "run", "--agent=plan", "--task=run the configured agent", "--repo="+repository, "--config="+workerPath)
+	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	stderr, err := command.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestAgentGetsDefaultSIGPIPEDisposition(t *testing.T) {
 		t.Fatalf("compile signal helper: %v: %s", err, output)
 	}
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{agentBinary}, "10s")
-	command := exec.Command(binary, "worker", "run", "--agent=plan", "--task=run the configured agent", "--repo="+repository, "--config="+workerPath)
+	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	var stderr bytes.Buffer
 	command.Stdout = io.Discard
 	command.Stderr = &stderr
@@ -142,7 +142,7 @@ func setupBinaryRun(t *testing.T, directory string, agentCommand []string, timeo
 	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{factory.task}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{factory.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quotedCommand := make([]string, len(agentCommand))

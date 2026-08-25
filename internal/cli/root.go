@@ -16,7 +16,7 @@ type commandOptions struct {
 	definitionPath string
 	agentName      string
 	pipelineName   string
-	task           string
+	prompt         string
 	repository     string
 	stdin          io.Reader
 	stdout         io.Writer
@@ -95,10 +95,10 @@ func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
 	} else {
 		_ = run.MarkFlagRequired("agent")
 	}
-	run.Flags().StringVar(&options.task, "task", "", "task text, ticket ID, or ticket URL (required)")
+	run.Flags().StringVar(&options.prompt, "prompt", "", "work request supplied to the agent prompt (required)")
 	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
 	run.Flags().StringVar(&options.definitionPath, "definition", "", "Factory definition file")
-	_ = run.MarkFlagRequired("task")
+	_ = run.MarkFlagRequired("prompt")
 	return run
 }
 
@@ -133,7 +133,7 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 
 func runAgent(ctx context.Context, options *commandOptions, worker config.Worker, agent config.ResolvedAgent) error {
 	var err error
-	agent, err = config.RenderTask(agent, options.task)
+	agent, err = config.RenderPrompt(agent, options.prompt)
 	if err != nil {
 		return err
 	}

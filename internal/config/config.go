@@ -19,10 +19,10 @@ const (
 	defaultTimeout         = 30 * time.Minute
 	maxConfigBytes         = 1 << 20
 	maxPromptBytes         = 256 << 10
-	maxTaskBytes           = 256 << 10
-	maxRenderedPromptBytes = maxPromptBytes + maxTaskBytes
+	maxInputPromptBytes    = 256 << 10
+	maxRenderedPromptBytes = maxPromptBytes + maxInputPromptBytes
 	defaultWorkerDirName   = ".factory/worker"
-	taskParameter          = "{{factory.task}}"
+	promptParameter        = "{{factory.prompt}}"
 	factoryParameterPrefix = "{{factory"
 )
 
@@ -229,27 +229,27 @@ func resolveAgent(definitionPath, name string, agent Agent) (ResolvedAgent, erro
 	return resolved, nil
 }
 
-func RenderTask(agent ResolvedAgent, task string) (ResolvedAgent, error) {
-	if strings.TrimSpace(task) == "" {
-		return ResolvedAgent{}, errors.New("task is required")
+func RenderPrompt(agent ResolvedAgent, prompt string) (ResolvedAgent, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return ResolvedAgent{}, errors.New("prompt is required")
 	}
-	if len(task) > maxTaskBytes {
-		return ResolvedAgent{}, fmt.Errorf("task exceeds %d bytes", maxTaskBytes)
+	if len(prompt) > maxInputPromptBytes {
+		return ResolvedAgent{}, fmt.Errorf("prompt exceeds %d bytes", maxInputPromptBytes)
 	}
-	parameterCount := strings.Count(agent.Prompt, taskParameter)
+	parameterCount := strings.Count(agent.Prompt, promptParameter)
 	if parameterCount == 0 {
-		return ResolvedAgent{}, fmt.Errorf("agent %q prompt must include %s", agent.Name, taskParameter)
+		return ResolvedAgent{}, fmt.Errorf("agent %q prompt must include %s", agent.Name, promptParameter)
 	}
-	literalBytes := len(agent.Prompt) - parameterCount*len(taskParameter)
-	if literalBytes > maxRenderedPromptBytes || len(task) > (maxRenderedPromptBytes-literalBytes)/parameterCount {
+	literalBytes := len(agent.Prompt) - parameterCount*len(promptParameter)
+	if literalBytes > maxRenderedPromptBytes || len(prompt) > (maxRenderedPromptBytes-literalBytes)/parameterCount {
 		return ResolvedAgent{}, fmt.Errorf("rendered agent prompt exceeds %d bytes", maxRenderedPromptBytes)
 	}
-	agent.Prompt = strings.ReplaceAll(agent.Prompt, taskParameter, task)
+	agent.Prompt = strings.ReplaceAll(agent.Prompt, promptParameter, prompt)
 	return agent, nil
 }
 
 func validatePromptParameters(agentName, prompt string) error {
-	hasTask := false
+	hasPrompt := false
 	remaining := prompt
 	for {
 		start := strings.Index(remaining, factoryParameterPrefix)
@@ -262,14 +262,14 @@ func validatePromptParameters(agentName, prompt string) error {
 			return fmt.Errorf("agent %q prompt contains a malformed Factory parameter", agentName)
 		}
 		parameter := remaining[:end+2]
-		if parameter != taskParameter {
+		if parameter != promptParameter {
 			return fmt.Errorf("agent %q prompt uses unsupported Factory parameter %q", agentName, parameter)
 		}
-		hasTask = true
+		hasPrompt = true
 		remaining = remaining[end+2:]
 	}
-	if !hasTask {
-		return fmt.Errorf("agent %q prompt must include %s", agentName, taskParameter)
+	if !hasPrompt {
+		return fmt.Errorf("agent %q prompt must include %s", agentName, promptParameter)
 	}
 	return nil
 }
