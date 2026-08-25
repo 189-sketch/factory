@@ -38,7 +38,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 			t.Fatalf("installed %s does not match its default", name)
 		}
 	}
-	for _, name := range []string{"plan", "build", "verify"} {
+	for _, name := range []string{"plan", "build", "verify", "foreman"} {
 		prompt, err := os.ReadFile(filepath.Join(directory, "agents", name+".md"))
 		if err != nil {
 			t.Fatal(err)
@@ -69,7 +69,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	}
 
 	definition := filepath.Join(directory, "config.toml")
-	for _, name := range []string{"plan", "build", "verify"} {
+	for _, name := range []string{"plan", "build", "verify", "foreman"} {
 		if _, err := config.LoadAgent(definition, name); err != nil {
 			t.Fatalf("load installed agent %s: %v", name, err)
 		}

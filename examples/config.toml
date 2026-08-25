@@ -18,5 +18,10 @@ executor = "codex"
 prompt_file = "agents/verify.md"
 timeout = "30m"
 
+[agents.foreman]
+executor = "codex"
+prompt_file = "agents/foreman.md"
+timeout = "120m"
+
 [pipelines.code]
 agents = ["plan", "build", "verify"]

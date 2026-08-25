@@ -27,7 +27,8 @@ factory init
 ```
 
 This installs editable defaults in `~/.factory`: shared configuration, worker
-configuration, the `plan`, `build`, and `verify` prompts, and a random worker token.
+configuration, the `plan`, `build`, `verify`, and `foreman` prompts, and a random worker
+token.
 Running it again creates any missing files and keeps every existing file unchanged.
 
 Add repositories to `~/.factory/worker.toml`:
@@ -69,6 +70,11 @@ timeout = "60m"
 executor = "codex"
 prompt_file = "agents/verify.md"
 timeout = "30m"
+
+[agents.foreman]
+executor = "codex"
+prompt_file = "agents/foreman.md"
+timeout = "120m"
 
 [pipelines.code]
 agents = ["plan", "build", "verify"]
@@ -125,6 +131,20 @@ doing work. After `factory:needs-human` or `factory:blocked`, later agents finis
 changing code or workflow state. A zero pipeline exit status means every agent process
 completed, not that the ticket necessarily reached `factory:ready-for-review`; the label
 is the task outcome.
+
+Use the foreman when the task should cycle through fresh planning, build, and review
+subagents instead of stopping after one verification pass:
+
+```sh
+factory run \
+  --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123"
+```
+
+The foreman writes each subagent prompt from the latest task state. It allows at most two
+targeted repair attempts, records every phase and attempt in the run output, opens a draft
+pull request, waits for available CI and automated review, and marks the result ready for
+human review. It never merges.
 
 Or pass the repository and configuration explicitly:
 
