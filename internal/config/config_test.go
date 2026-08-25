@@ -330,6 +330,10 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"attempts `1` and `2` for the first and second repairs",
 		"Every planning, build, review, and repair subagent prompt",
 		"SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>",
+		"print or paste a complete diff",
+		"replace it with a fresh subagent on the same immutable head",
+		"issue URL, acceptance criteria, worktree, branch, base SHA, head SHA",
+		"Never inline or print the diff",
 		"open one non-draft pull request",
 		"Keep the issue labeled `factory:verifying`",
 		"poll no more often than every 30 seconds",
@@ -343,7 +347,7 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
 		}
 	}
-	for _, forbidden := range []string{"open one draft pull request", "mark the pull request ready for human review"} {
+	for _, forbidden := range []string{"open one draft pull request", "mark the pull request ready for human review", "branch, complete diff"} {
 		if strings.Contains(foreman.Prompt, forbidden) {
 			t.Fatalf("foreman prompt still contains %q", forbidden)
 		}
