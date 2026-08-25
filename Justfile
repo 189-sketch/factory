@@ -1,0 +1,13 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+build:
+    go build -o bin/factory ./cmd/factory
+
+test:
+    go test -race ./...
+
+check:
+    gofmt -w cmd internal
+    go vet ./...
+    go test -race ./...
+    go build ./...

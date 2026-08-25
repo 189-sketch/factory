@@ -1,0 +1,4 @@
+[agents.plan]
+command = ["codex", "exec", "--sandbox", "workspace-write", "-"]
+prompt_file = "agents/plan.md"
+timeout = "20m"
