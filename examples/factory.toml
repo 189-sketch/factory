@@ -1,9 +1,17 @@
-[agents.refine]
+[agents.plan]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
-prompt_file = "agents/refine.md"
+prompt_file = "agents/plan.md"
 timeout = "20m"
 
 [agents.build]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 prompt_file = "agents/build.md"
 timeout = "60m"
+
+[agents.verify]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/verify.md"
+timeout = "30m"
+
+[pipelines.code]
+agents = ["plan", "build", "verify"]

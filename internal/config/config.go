@@ -33,13 +33,18 @@ type Worker struct {
 }
 
 type Definition struct {
-	Agents map[string]Agent `toml:"agents"`
+	Agents    map[string]Agent    `toml:"agents"`
+	Pipelines map[string]Pipeline `toml:"pipelines"`
 }
 
 type Agent struct {
 	Command    []string `toml:"command"`
 	PromptFile string   `toml:"prompt_file"`
 	Timeout    string   `toml:"timeout"`
+}
+
+type Pipeline struct {
+	Agents []string `toml:"agents"`
 }
 
 type ResolvedAgent struct {
@@ -112,20 +117,65 @@ func LoadAgent(definitionPath, name string) (ResolvedAgent, error) {
 	if strings.TrimSpace(name) == "" {
 		return ResolvedAgent{}, errors.New("agent name is required")
 	}
-	body, err := readBoundedFile(definitionPath, maxConfigBytes)
+	definition, err := loadDefinition(definitionPath)
 	if err != nil {
-		return ResolvedAgent{}, fmt.Errorf("read definition %q: %w", definitionPath, err)
-	}
-	var definition Definition
-	decoder := toml.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&definition); err != nil {
-		return ResolvedAgent{}, fmt.Errorf("parse definition %q: %w", definitionPath, err)
+		return ResolvedAgent{}, err
 	}
 	agent, ok := definition.Agents[name]
 	if !ok {
 		return ResolvedAgent{}, fmt.Errorf("agent %q is not defined in %s", name, definitionPath)
 	}
+	return resolveAgent(definitionPath, name, agent)
+}
+
+func LoadPipeline(definitionPath, name string) ([]ResolvedAgent, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("pipeline name is required")
+	}
+	definition, err := loadDefinition(definitionPath)
+	if err != nil {
+		return nil, err
+	}
+	pipeline, ok := definition.Pipelines[name]
+	if !ok {
+		return nil, fmt.Errorf("pipeline %q is not defined in %s", name, definitionPath)
+	}
+	if len(pipeline.Agents) == 0 {
+		return nil, fmt.Errorf("pipeline %q must define at least one agent", name)
+	}
+	agents := make([]ResolvedAgent, 0, len(pipeline.Agents))
+	for index, agentName := range pipeline.Agents {
+		if strings.TrimSpace(agentName) == "" {
+			return nil, fmt.Errorf("pipeline %q agent %d is empty", name, index+1)
+		}
+		agent, ok := definition.Agents[agentName]
+		if !ok {
+			return nil, fmt.Errorf("pipeline %q references undefined agent %q", name, agentName)
+		}
+		resolved, err := resolveAgent(definitionPath, agentName, agent)
+		if err != nil {
+			return nil, err
+		}
+		agents = append(agents, resolved)
+	}
+	return agents, nil
+}
+
+func loadDefinition(definitionPath string) (Definition, error) {
+	body, err := readBoundedFile(definitionPath, maxConfigBytes)
+	if err != nil {
+		return Definition{}, fmt.Errorf("read definition %q: %w", definitionPath, err)
+	}
+	var definition Definition
+	decoder := toml.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&definition); err != nil {
+		return Definition{}, fmt.Errorf("parse definition %q: %w", definitionPath, err)
+	}
+	return definition, nil
+}
+
+func resolveAgent(definitionPath, name string, agent Agent) (ResolvedAgent, error) {
 	if len(agent.Command) == 0 || strings.TrimSpace(agent.Command[0]) == "" {
 		return ResolvedAgent{}, fmt.Errorf("agent %q must define a non-empty command", name)
 	}

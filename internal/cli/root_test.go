@@ -34,6 +34,83 @@ func TestWorkerRunInjectsTaskIntoNamedPrompt(t *testing.T) {
 	}
 }
 
+func TestRunExecutesOneAgent(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"run",
+		"--agent=plan",
+		"--task=issue 42",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "success"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || stdout.String() != "configured plan prompt\n\nTask:\nissue 42\n" {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunPipelineExecutesIndependentAgentsInOrder(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"run",
+		"--pipeline=code",
+		"--task=issue 42",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "success"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	want := "configured plan prompt\n\nTask:\nissue 42\n" +
+		"configured build prompt\n\nTask:\nissue 42\n" +
+		"configured verify prompt\n\nTask:\nissue 42\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	for _, message := range []string{"agent 1/3 plan", "agent 2/3 build", "agent 3/3 verify"} {
+		if !strings.Contains(stderr.String(), message) {
+			t.Fatalf("stderr does not contain %q: %q", message, stderr.String())
+		}
+	}
+	if strings.Count(stderr.String(), "succeeded; events:") != 3 {
+		t.Fatalf("pipeline did not persist three independent runs: %q", stderr.String())
+	}
+}
+
+func TestRunPipelineStopsAfterFailedAgent(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"run",
+		"--pipeline=code",
+		"--task=issue 42",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "fail-build"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 9 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "configured plan prompt") || strings.Contains(stdout.String(), "configured verify prompt") {
+		t.Fatalf("pipeline output = %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "agent 3/3 verify") {
+		t.Fatalf("pipeline started verify after build failed: %q", stderr.String())
+	}
+}
+
+func TestRunRequiresExactlyOneSelection(t *testing.T) {
+	for _, args := range [][]string{
+		{"run", "--task=issue 42"},
+		{"run", "--agent=plan", "--pipeline=code", "--task=issue 42"},
+	} {
+		var stderr bytes.Buffer
+		if exitCode := Execute(t.Context(), args, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test"); exitCode != 2 {
+			t.Fatalf("args = %#v, exit code = %d, stderr = %q", args, exitCode, stderr.String())
+		}
+	}
+}
+
 func TestWorkerRunSelectsDifferentAgentPrompts(t *testing.T) {
 	repository := newCLIRepository(t)
 	workerConfig := writeCLIConfig(t, "success")
@@ -171,10 +248,20 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	if err := os.WriteFile(filepath.Join(directory, "review.md"), []byte("configured review prompt\n\nTask:\n{{factory.task}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(directory, "build.md"), []byte("configured build prompt\n\nTask:\n{{factory.task}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "verify.md"), []byte("configured verify prompt\n\nTask:\n{{factory.task}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	definition := filepath.Join(directory, "factory.toml")
 	script := "cat"
 	if mode == "fail" {
 		script = "exit 9"
+	}
+	buildScript := script
+	if mode == "fail-build" {
+		buildScript = "cat >/dev/null; exit 9"
 	}
 	definitionBody := "[agents.plan]\n" +
 		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
@@ -183,7 +270,17 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		"[agents.review]\n" +
 		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
 		"prompt_file = \"review.md\"\n" +
-		"timeout = \"5s\"\n"
+		"timeout = \"5s\"\n\n" +
+		"[agents.build]\n" +
+		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(buildScript) + "]\n" +
+		"prompt_file = \"build.md\"\n" +
+		"timeout = \"5s\"\n\n" +
+		"[agents.verify]\n" +
+		"command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n" +
+		"prompt_file = \"verify.md\"\n" +
+		"timeout = \"5s\"\n\n" +
+		"[pipelines.code]\n" +
+		"agents = [\"plan\", \"build\", \"verify\"]\n"
 	if err := os.WriteFile(definition, []byte(definitionBody), 0o600); err != nil {
 		t.Fatal(err)
 	}

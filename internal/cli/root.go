@@ -15,6 +15,7 @@ type commandOptions struct {
 	configPath     string
 	definitionPath string
 	agentName      string
+	pipelineName   string
 	task           string
 	repository     string
 	stdin          io.Reader
@@ -56,23 +57,10 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.PersistentFlags().StringVar(&options.configPath, "config", "", "worker configuration file (default ~/.factory/worker.toml)")
+	root.AddCommand(newRunCommand(options, true))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Factory Worker"}
-	run := &cobra.Command{
-		Use:   "run",
-		Short: "Run one configured agent in a Git repository",
-		Args:  cobra.NoArgs,
-		RunE: func(command *cobra.Command, _ []string) error {
-			return runAgent(command.Context(), options)
-		},
-	}
-	run.Flags().StringVar(&options.agentName, "agent", "", "agent name from the Factory definition (required)")
-	run.Flags().StringVar(&options.task, "task", "", "task text, ticket ID, or ticket URL (required)")
-	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
-	run.Flags().StringVar(&options.definitionPath, "definition", "", "Factory definition file")
-	_ = run.MarkFlagRequired("agent")
-	_ = run.MarkFlagRequired("task")
-	worker.AddCommand(run)
+	worker.AddCommand(newRunCommand(options, false))
 	root.AddCommand(worker)
 
 	root.AddCommand(&cobra.Command{
@@ -86,7 +74,35 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	return root
 }
 
-func runAgent(ctx context.Context, options *commandOptions) error {
+func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
+	short := "Run one configured agent in a Git repository"
+	if allowPipeline {
+		short = "Run a configured agent or pipeline in a Git repository"
+	}
+	run := &cobra.Command{
+		Use:   "run",
+		Short: short,
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runSelection(command.Context(), options)
+		},
+	}
+	run.Flags().StringVar(&options.agentName, "agent", "", "agent name from the Factory definition")
+	if allowPipeline {
+		run.Flags().StringVar(&options.pipelineName, "pipeline", "", "pipeline name from the Factory definition")
+		run.MarkFlagsMutuallyExclusive("agent", "pipeline")
+		run.MarkFlagsOneRequired("agent", "pipeline")
+	} else {
+		_ = run.MarkFlagRequired("agent")
+	}
+	run.Flags().StringVar(&options.task, "task", "", "task text, ticket ID, or ticket URL (required)")
+	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
+	run.Flags().StringVar(&options.definitionPath, "definition", "", "Factory definition file")
+	_ = run.MarkFlagRequired("task")
+	return run
+}
+
+func runSelection(ctx context.Context, options *commandOptions) error {
 	worker, err := config.LoadWorker(options.configPath)
 	if err != nil {
 		return err
@@ -95,10 +111,28 @@ func runAgent(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
-	agent, err := config.LoadAgent(definitionPath, options.agentName)
+	if options.pipelineName == "" {
+		agent, err := config.LoadAgent(definitionPath, options.agentName)
+		if err != nil {
+			return err
+		}
+		return runAgent(ctx, options, worker, agent)
+	}
+	agents, err := config.LoadPipeline(definitionPath, options.pipelineName)
 	if err != nil {
 		return err
 	}
+	for index, agent := range agents {
+		fmt.Fprintf(options.stderr, "factory: pipeline %s: agent %d/%d %s\n", options.pipelineName, index+1, len(agents), agent.Name)
+		if err := runAgent(ctx, options, worker, agent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runAgent(ctx context.Context, options *commandOptions, worker config.Worker, agent config.ResolvedAgent) error {
+	var err error
 	agent, err = config.RenderTask(agent, options.task)
 	if err != nil {
 		return err

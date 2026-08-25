@@ -140,9 +140,55 @@ prompt_file = "plan.md"
 	}
 }
 
+func TestLoadPipelineResolvesAgentsInOrder(t *testing.T) {
+	directory := t.TempDir()
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{factory.task}}.\n")
+	writeTestFile(t, filepath.Join(directory, "build.md"), "Build {{factory.task}}.\n")
+	definition := filepath.Join(directory, "factory.toml")
+	writeTestFile(t, definition, `[agents.plan]
+command = ["agent", "plan"]
+prompt_file = "plan.md"
+
+[agents.build]
+command = ["agent", "build"]
+prompt_file = "build.md"
+
+[pipelines.code]
+agents = ["plan", "build"]
+`)
+
+	agents, err := LoadPipeline(definition, "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 || agents[0].Name != "plan" || agents[1].Name != "build" {
+		t.Fatalf("pipeline agents = %#v", agents)
+	}
+}
+
+func TestLoadPipelineRejectsMissingEmptyAndUndefinedAgents(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing", body: "", want: `pipeline "code" is not defined`},
+		{name: "empty", body: "[pipelines.code]\nagents = []\n", want: "must define at least one agent"},
+		{name: "undefined agent", body: "[pipelines.code]\nagents = [\"missing\"]\n", want: `references undefined agent "missing"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			definition := filepath.Join(t.TempDir(), "factory.toml")
+			writeTestFile(t, definition, test.body)
+			if _, err := LoadPipeline(definition, "code"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	definition := filepath.Join("..", "..", "examples", "factory.toml")
-	for _, name := range []string{"refine", "build"} {
+	for _, name := range []string{"plan", "build", "verify"} {
 		t.Run(name, func(t *testing.T) {
 			agent, err := LoadAgent(definition, name)
 			if err != nil {
@@ -155,6 +201,13 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 				t.Fatalf("agent prompt does not contain %s", taskParameter)
 			}
 		})
+	}
+	agents, err := LoadPipeline(definition, "code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 3 {
+		t.Fatalf("example pipeline agents = %d, want 3", len(agents))
 	}
 }
 

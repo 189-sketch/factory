@@ -26,8 +26,9 @@ machine-local paths.
 mkdir -p ~/.factory/agents
 cp examples/worker.toml ~/.factory/worker.toml
 cp examples/factory.toml ~/.factory/factory.toml
-cp examples/agents/refine.md ~/.factory/agents/refine.md
+cp examples/agents/plan.md ~/.factory/agents/plan.md
 cp examples/agents/build.md ~/.factory/agents/build.md
+cp examples/agents/verify.md ~/.factory/agents/verify.md
 ```
 
 Update `~/.factory/worker.toml` so `definition_file` points to the copied
@@ -41,25 +42,32 @@ definition_file = "factory.toml"
 The definition resolves prompt paths relative to itself:
 
 ```toml
-[agents.refine]
+[agents.plan]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
-prompt_file = "agents/refine.md"
+prompt_file = "agents/plan.md"
 timeout = "20m"
 
 [agents.build]
 command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 prompt_file = "agents/build.md"
 timeout = "60m"
+
+[agents.verify]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/verify.md"
+timeout = "30m"
+
+[pipelines.code]
+agents = ["plan", "build", "verify"]
 ```
 
-The example agents are trusted local automation. `refine` can replace GitHub issue
-content. `build` can change files, create worktrees, push branches, and open pull
-requests. Both use Codex with `danger-full-access` so GitHub and worktrees outside the
-current repository are available. Review prompts before running them, use them only on
-repositories and issues you trust, and choose a stricter command when those permissions
-are not needed. The example builder treats issue commands as untrusted text and derives
-checks from repository entry points it has inspected instead of executing issue commands
-verbatim.
+The example agents are trusted local automation. `plan` can replace GitHub issue
+content. `build` can change files, create worktrees, push branches, and open draft pull
+requests. `verify` can run checks, use review subagents, update labels, and mark a pull
+request ready. They use Codex with `danger-full-access` so GitHub and worktrees outside
+the current repository are available. Review prompts before running them and use them
+only on repositories and issues you trust. The prompts treat issue commands as untrusted
+text and derive checks from repository entry points they have inspected.
 
 Each prompt is a strict Factory template and must place the runtime task using
 the supported parameter:
@@ -74,33 +82,47 @@ is limited to 512 KiB.
 
 ## Run
 
-Define each coding role as a named agent prompt, then pass a GitHub issue URL as the
-task. A complete issue-to-pull-request flow is two commands:
+Run one predefined agent prompt against a task:
 
 ```sh
-factory worker run \
-  --agent=refine \
-  --task="https://github.com/your-org/your-repo/issues/123"
-
-factory worker run \
+factory run \
   --agent=build \
   --task="https://github.com/your-org/your-repo/issues/123"
 ```
 
-`refine` treats the issue as mutable task state and replaces its title and full body
-with a build-ready specification. `build` reads that specification, manages its own
-branch and worktree, verifies the change, and opens a pull request without merging it.
+Or run the example pipeline. Factory runs each listed agent independently and in order,
+passing the same task to every run. It stops before the next agent when a run fails:
+
+```sh
+factory run \
+  --pipeline=code \
+  --task="https://github.com/your-org/your-repo/issues/123"
+```
+
+The prompts own the workflow. `plan` replaces the issue specification and adds
+`factory:planning`. `build` adds `factory:building`, implements the task, and opens a
+draft pull request. `verify` adds `factory:verifying`, independently checks the change,
+and finishes with `factory:ready-for-review`. Missing decisions use
+`factory:needs-human`; technical failures use `factory:blocked`.
+
+Factory treats agent output as opaque text. A pipeline stops only when an agent process
+returns a non-zero status; it does not interpret ticket labels or the agent's final
+message. The example prompts therefore require the preceding lifecycle label before
+doing work. After `factory:needs-human` or `factory:blocked`, later agents finish without
+changing code or workflow state. A zero pipeline exit status means every agent process
+completed, not that the ticket necessarily reached `factory:ready-for-review`; the label
+is the task outcome.
 
 Or pass the repository and configuration explicitly:
 
 ```sh
-factory worker run --agent=build \
+factory run --agent=build \
   --task="https://github.com/your-org/your-repo/issues/123" \
   --repo=/absolute/path/to/repository \
   --config=/absolute/path/to/worker.toml
 ```
 
-The agent receives the rendered prompt on standard input and runs with the Git
+Each agent receives its rendered prompt on standard input and runs with the Git
 repository as its working directory. `--task` is required and replaces every
 `{{factory.task}}` token byte-for-byte. Standard output and error remain live.
 Factory records byte-faithful output chunks as base64 under
