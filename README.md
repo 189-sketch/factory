@@ -26,7 +26,8 @@ machine-local paths.
 mkdir -p ~/.factory/agents
 cp examples/worker.toml ~/.factory/worker.toml
 cp examples/factory.toml ~/.factory/factory.toml
-cp examples/agents/plan.md ~/.factory/agents/plan.md
+cp examples/agents/refine.md ~/.factory/agents/refine.md
+cp examples/agents/build.md ~/.factory/agents/build.md
 ```
 
 Update `~/.factory/worker.toml` so `definition_file` points to the copied
@@ -40,21 +41,29 @@ definition_file = "factory.toml"
 The definition resolves prompt paths relative to itself:
 
 ```toml
-[agents.plan]
-command = ["codex", "exec", "--sandbox", "workspace-write", "-"]
-prompt_file = "agents/plan.md"
+[agents.refine]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/refine.md"
 timeout = "20m"
+
+[agents.build]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/build.md"
+timeout = "60m"
 ```
+
+The example agents are trusted local automation. `refine` can replace GitHub issue
+content. `build` can change files, create worktrees, push branches, and open pull
+requests. Both use Codex with `danger-full-access` so GitHub and worktrees outside the
+current repository are available. Review prompts before running them, use them only on
+repositories and issues you trust, and choose a stricter command when those permissions
+are not needed.
 
 Each prompt is a strict Factory template and must place the runtime task using
 the supported parameter:
 
 ```text
-Assess whether this task is ready to build:
-
-<task>
-{{factory.task}}
-</task>
+Build the task at {{factory.task}}.
 ```
 
 Factory substitutes the task as plain text. It does not evaluate the task as a
@@ -63,20 +72,28 @@ is limited to 512 KiB.
 
 ## Run
 
-Define each coding role as a named agent prompt, then pass the task when running
-it from a Git repository:
+Define each coding role as a named agent prompt, then pass a GitHub issue URL as the
+task. A complete issue-to-pull-request flow is two commands:
 
 ```sh
 factory worker run \
-  --agent=plan \
+  --agent=refine \
+  --task="https://github.com/your-org/your-repo/issues/123"
+
+factory worker run \
+  --agent=build \
   --task="https://github.com/your-org/your-repo/issues/123"
 ```
+
+`refine` treats the issue as mutable task state and replaces its title and full body
+with a build-ready specification. `build` reads that specification, manages its own
+branch and worktree, verifies the change, and opens a pull request without merging it.
 
 Or pass the repository and configuration explicitly:
 
 ```sh
-factory worker run --agent=plan \
-  --task="Fix the failing account creation flow" \
+factory worker run --agent=build \
+  --task="https://github.com/your-org/your-repo/issues/123" \
   --repo=/absolute/path/to/repository \
   --config=/absolute/path/to/worker.toml
 ```

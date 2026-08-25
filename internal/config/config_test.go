@@ -140,6 +140,24 @@ prompt_file = "plan.md"
 	}
 }
 
+func TestExampleAgentDefinitionsLoad(t *testing.T) {
+	definition := filepath.Join("..", "..", "examples", "factory.toml")
+	for _, name := range []string{"refine", "build"} {
+		t.Run(name, func(t *testing.T) {
+			agent, err := LoadAgent(definition, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if agent.Name != name {
+				t.Fatalf("agent name = %q, want %q", agent.Name, name)
+			}
+			if !strings.Contains(agent.Prompt, taskParameter) {
+				t.Fatalf("agent prompt does not contain %s", taskParameter)
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

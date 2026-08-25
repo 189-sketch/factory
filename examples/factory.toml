@@ -1,4 +1,9 @@
-[agents.plan]
-command = ["codex", "exec", "--sandbox", "workspace-write", "-"]
-prompt_file = "agents/plan.md"
+[agents.refine]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/refine.md"
 timeout = "20m"
+
+[agents.build]
+command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
+prompt_file = "agents/build.md"
+timeout = "60m"
