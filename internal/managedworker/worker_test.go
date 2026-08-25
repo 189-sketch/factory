@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -213,6 +214,107 @@ func TestManagedWorkerHeartbeatsDuringExecutionAndContinuesAfterFailure(t *testi
 	}
 	if !strings.Contains(stderr.String(), "factory: heartbeat run run-test") {
 		t.Fatalf("heartbeat failure was not logged: %q", stderr.String())
+	}
+}
+
+func TestManagedWorkerHeartbeatsUntilCompletionIsAcknowledged(t *testing.T) {
+	heartbeats := make(chan protocol.Heartbeat, 2)
+	completionStarted := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseCompletion) }) })
+	var completionRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/runs/run-test/heartbeat":
+			var heartbeat protocol.Heartbeat
+			if err := json.NewDecoder(request.Body).Decode(&heartbeat); err != nil {
+				t.Errorf("decode heartbeat: %v", err)
+			}
+			heartbeats <- heartbeat
+			response.WriteHeader(http.StatusNoContent)
+		case "/api/v1/runs/run-test/complete":
+			if completionRequests.Add(1) == 1 {
+				close(completionStarted)
+				<-releaseCompletion
+				http.Error(response, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request path %q", request.URL.Path)
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	ticks := make(chan time.Time, 1)
+	worker := &Worker{
+		config:         config.Worker{ControlPlane: config.ControlPlane{URL: server.URL}},
+		token:          "secret",
+		instanceID:     "worker-test",
+		client:         server.Client(),
+		stderr:         io.Discard,
+		heartbeatTicks: ticks,
+	}
+	spec := protocol.RunSpec{ID: "run-test", LeaseToken: "lease-test"}
+	done := make(chan error, 1)
+	go func() {
+		done <- worker.deliverWithHeartbeats(t.Context(), spec, protocol.Completion{InstanceID: "worker-test", LeaseToken: "lease-test", State: "succeeded"})
+	}()
+
+	immediate := <-heartbeats
+	if immediate.InstanceID != "worker-test" || immediate.LeaseToken != "lease-test" {
+		t.Fatalf("immediate heartbeat = %#v", immediate)
+	}
+	<-completionStarted
+	ticks <- time.Time{}
+	duringRetry := <-heartbeats
+	if duringRetry.InstanceID != "worker-test" || duringRetry.LeaseToken != "lease-test" {
+		t.Fatalf("completion heartbeat = %#v", duringRetry)
+	}
+	releaseOnce.Do(func() { close(releaseCompletion) })
+	if err := <-done; err != nil || completionRequests.Load() != 2 {
+		t.Fatalf("delivery error = %v, completion requests = %d", err, completionRequests.Load())
+	}
+}
+
+func TestManagedWorkerSeparatesRedispatchedLeaseArtifacts(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repository")
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	worker := &Worker{
+		config: config.Worker{
+			DataDirectory: directory,
+			Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "cat >/dev/null"}}},
+			Repositories:  map[string]config.Repository{"factory": {Path: repository}},
+		},
+		instanceID: "worker-test",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+	}
+	runID := "run_0123456789abcdef01234567"
+	for _, lease := range []string{"lease_first", "lease_second"} {
+		completion := worker.execute(t.Context(), protocol.RunSpec{
+			ID:             runID,
+			Agent:          "plan",
+			AgentHash:      "plan-hash",
+			Executor:       "test",
+			Repository:     "factory",
+			RenderedPrompt: "managed prompt",
+			TimeoutMillis:  5000,
+			LeaseToken:     lease,
+		})
+		if completion.State != "succeeded" || completion.Result == nil || completion.Events == "" {
+			t.Fatalf("completion for %s = %#v", lease, completion)
+		}
+		for _, name := range []string{"events.jsonl", "result.json"} {
+			if _, err := os.Stat(filepath.Join(directory, "runs", runID, lease, name)); err != nil {
+				t.Fatalf("artifact %s for %s: %v", name, lease, err)
+			}
+		}
 	}
 }
 

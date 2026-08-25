@@ -123,8 +123,10 @@ Polling is idempotent for a worker instance. If a lease commits but its HTTP res
 lost, the instance's next poll before expiry returns the same active run and lease token
 instead of claiming new work. A worker instance therefore has at most one active run.
 
-While its agent process runs, the worker renews the lease every 10 seconds. Each accepted
-heartbeat extends the expiry to 30 seconds after the server receives it. Polling first
+While its agent process runs or its completion is awaiting acknowledgement, the worker
+renews the lease every 10 seconds. It also renews once immediately before completion
+delivery begins. Each accepted heartbeat extends the expiry to 30 seconds after the
+server receives it. Polling first
 returns every expired running lease to queued in the same transaction used to select
 work. Reclaim clears the old worker, token, expiry, and attempt start time while leaving
 the job running. A compatible worker can then receive a new token and execute the run.
@@ -142,10 +144,12 @@ SQLite stores:
   open; a running row without an expiry is recoverable on the next poll.
 - `workers`: worker instance ID, display name, and last poll time.
 
-The worker continues writing its existing local `events.jsonl` and `result.json`. On
-completion it uploads the result and event file to the server. A preflight failure instead
-uploads a terminal state, exit code, and diagnostic with no files. The server stores the
-payload with the run so completed output survives restarts.
+The worker writes `events.jsonl` and `result.json` under a directory keyed by both the run
+ID and lease token. A redispatched lease therefore keeps its files separate from an
+abandoned attempt on the same machine. On completion the worker uploads the current
+attempt's result and event file to the server. A preflight failure instead uploads a
+terminal state, exit code, and diagnostic with no files. The server stores the payload
+with the run so completed output survives restarts.
 
 The runner caps the actual encoded event file at 32 MiB, including per-event metadata.
 The completion endpoint accepts a 96 MiB JSON envelope, which safely contains the event
@@ -228,6 +232,8 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
   compatible worker can receive the run with a new token while the job remains running.
 - AC-13: an expired token cannot upload output or advance a pipeline, even if the old
   worker continues executing locally.
+- AC-14: the worker renews its lease until completion delivery is acknowledged, and a
+  redispatched lease writes to a distinct local artifact directory.
 
 ## 10. Out of scope
 

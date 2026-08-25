@@ -161,7 +161,9 @@ repository as its working directory. `--prompt` is required and replaces every
 other work request. Standard output and error remain live.
 Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
-`result.json` in the same directory. Recording stops after 64 MiB of process output or
+`result.json` in the same directory. Managed redispatches place each lease attempt under
+`<data_directory>/runs/<run-id>/<lease-token>/` so an abandoned attempt remains intact.
+Recording stops after 64 MiB of process output or
 when the encoded event file reaches 32 MiB, and adds a truncation event while live output
 and the agent run continue.
 
