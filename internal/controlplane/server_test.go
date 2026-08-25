@@ -23,6 +23,15 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	if status.CSRFToken == "" || len(status.Agents) != 1 || status.Agents[0] != "plan" {
 		t.Fatalf("status = %#v", status)
 	}
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"}}, map[string]string{"Authorization": "Bearer secret"})
+	if workerPoll.StatusCode != http.StatusOK {
+		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
+	}
+	workerPoll.Body.Close()
+	status = getStatus(t, webServer.URL)
+	if len(status.Workers) != 1 || len(status.Workers[0].Repositories) != 1 || status.Workers[0].Repositories[0] != "factory" || len(status.Repositories) != 1 || status.Repositories[0] != "factory" {
+		t.Fatalf("status = %#v", status)
+	}
 
 	unauthorized := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{}, nil)
 	if unauthorized.StatusCode != http.StatusUnauthorized {
@@ -80,6 +89,26 @@ func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	}
 	if err := validateLoopbackListen("127.0.0.1:7331"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServerExposesReadOnlyDefinitions(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	response, err := http.Get(webServer.URL + "/api/v1/definitions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var definitions definitionsResponse
+	if err := json.NewDecoder(response.Body).Decode(&definitions); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || len(definitions.Agents) != 1 || definitions.Agents[0].Name != "plan" || definitions.Agents[0].Executor != "test" || definitions.Agents[0].Timeout != "1m0s" || !strings.Contains(definitions.Agents[0].Prompt, "{{factory.prompt}}") {
+		t.Fatalf("definitions = %#v", definitions)
+	}
+	if len(definitions.Pipelines) != 1 || definitions.Pipelines[0].Name != "default" || len(definitions.Pipelines[0].Agents) != 1 || definitions.Pipelines[0].Agents[0] != "plan" {
+		t.Fatalf("pipelines = %#v", definitions.Pipelines)
 	}
 }
 
@@ -164,7 +193,7 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 		t.Fatal(err)
 	}
 	definitionPath := filepath.Join(directory, "config.toml")
-	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n\n[pipelines.default]\nagents = [\"plan\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := openTestStore(t, filepath.Join(directory, "factory.db"))

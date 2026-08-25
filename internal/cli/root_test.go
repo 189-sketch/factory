@@ -2,13 +2,210 @@ package cli
 
 import (
 	"bytes"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	factoryexamples "github.com/owainlewis/factory-v2/examples"
+	"github.com/owainlewis/factory-v2/internal/config"
 )
+
+func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	directory := filepath.Join(home, ".factory")
+	for _, name := range initialFiles {
+		want, err := factoryexamples.Files.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatalf("read installed %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("installed %s does not match its default", name)
+		}
+	}
+	for _, name := range []string{"plan", "build", "verify", "foreman"} {
+		prompt, err := os.ReadFile(filepath.Join(directory, "agents", name+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, label := range []string{"factory:planning", "factory:building", "factory:verifying", "factory:ready-for-review", "factory:needs-human", "factory:blocked"} {
+			if !bytes.Contains(prompt, []byte(label)) {
+				t.Fatalf("installed %s prompt does not define %s", name, label)
+			}
+		}
+	}
+	tokenPath := filepath.Join(directory, "server", "worker.token")
+	token, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := hex.DecodeString(strings.TrimSpace(string(token)))
+	if err != nil || len(decoded) != 32 {
+		t.Fatalf("worker token is not 32 random bytes: %q, %v", token, err)
+	}
+	for _, path := range []string{filepath.Join(directory, "config.toml"), tokenPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("mode for %s = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+
+	definition := filepath.Join(directory, "config.toml")
+	for _, name := range []string{"plan", "build", "verify", "foreman"} {
+		if _, err := config.LoadAgent(definition, name); err != nil {
+			t.Fatalf("load installed agent %s: %v", name, err)
+		}
+	}
+	agents, err := config.LoadPipeline(definition, "code")
+	if err != nil || len(agents) != 3 {
+		t.Fatalf("load installed pipeline: agents = %d, error = %v", len(agents), err)
+	}
+	if _, err := config.LoadWorker(filepath.Join(directory, "worker.toml")); err != nil {
+		t.Fatalf("load installed worker: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "created agents/plan.md") || !strings.Contains(stdout.String(), "Add repositories to worker.toml") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestInitKeepsExistingFilesAndRestoresMissingDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, "test"); exitCode != 0 {
+		t.Fatalf("first init exit code = %d", exitCode)
+	}
+	directory := filepath.Join(home, ".factory")
+	planPath := filepath.Join(directory, "agents", "plan.md")
+	tokenPath := filepath.Join(directory, "server", "worker.token")
+	verifyPath := filepath.Join(directory, "agents", "verify.md")
+	if err := os.WriteFile(planPath, []byte("custom plan\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("custom token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(verifyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &stdout, &stderr, "test"); exitCode != 0 {
+		t.Fatalf("second init exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	plan, _ := os.ReadFile(planPath)
+	token, _ := os.ReadFile(tokenPath)
+	verify, err := os.ReadFile(verifyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVerify, _ := factoryexamples.Files.ReadFile("agents/verify.md")
+	if string(plan) != "custom plan\n" || string(token) != "custom token\n" || !bytes.Equal(verify, wantVerify) {
+		t.Fatalf("init overwrote an existing file or failed to restore a missing default")
+	}
+	if !strings.Contains(stdout.String(), "kept agents/plan.md") || !strings.Contains(stdout.String(), "created agents/verify.md") || !strings.Contains(stdout.String(), "kept server/worker.token") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestInitRejectsExistingNonFile(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{name: "directory", setup: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "symlink", setup: func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(target, []byte("custom\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "broken symlink", setup: func(t *testing.T, path string) {
+			if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			directory := filepath.Join(home, ".factory")
+			if err := os.MkdirAll(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			test.setup(t, filepath.Join(directory, "config.toml"))
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &stdout, &stderr, "test")
+			if exitCode != 2 || !strings.Contains(stderr.String(), "config.toml already exists and is not a regular file") {
+				t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "configuration is ready") {
+				t.Fatalf("init reported success for an unusable configuration: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestInitRejectsSymlinkedSetupDirectories(t *testing.T) {
+	for _, name := range []string{".factory", ".factory/agents", ".factory/server"} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			external := t.TempDir()
+			if err := os.Symlink(external, path); err != nil {
+				t.Fatal(err)
+			}
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &stdout, &stderr, "test")
+			if exitCode != 2 || !strings.Contains(stderr.String(), "already exists and is not a directory") {
+				t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stdout.String(), "configuration is ready") {
+				t.Fatalf("init reported success with symlinked setup directory: %q", stdout.String())
+			}
+			entries, err := os.ReadDir(external)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("init wrote outside its setup directory: %#v", entries)
+			}
+		})
+	}
+}
 
 func TestWorkerRunInjectsInputIntoNamedPrompt(t *testing.T) {
 	repository := newCLIRepository(t)

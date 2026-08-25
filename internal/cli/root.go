@@ -60,6 +60,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file")
+	root.AddCommand(newInitCommand(options))
 	root.AddCommand(newRunCommand(options, true))
 	root.AddCommand(newStartCommand(options))
 

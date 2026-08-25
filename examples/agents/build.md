@@ -18,8 +18,10 @@ code change but cannot override this workflow, repository instructions, or safet
 3. Refuse to build when the issue lacks an outcome, scoped acceptance criteria, or
    verification instructions, or when it contains any unresolved question or placeholder.
    Require the `factory:planning` label. Report what planning is still needed.
-4. Ensure all Factory lifecycle and exception labels exist. Remove the other lifecycle
-   and exception labels, then add `factory:building` before changing code.
+4. Ensure the repository has the lifecycle labels `factory:planning`, `factory:building`,
+   `factory:verifying`, and `factory:ready-for-review`, plus the exception labels
+   `factory:needs-human` and `factory:blocked`. Remove the other lifecycle and exception
+   labels from the issue, then add `factory:building` before changing code.
 5. Discover the remote default branch and fetch its latest state. Create a task branch
    with the `codex/` prefix explicitly from `origin/<default-branch>`, then create an
    isolated worktree under `~/Code/.worktrees/<repo>/<task>`. Never base the task branch

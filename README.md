@@ -23,15 +23,15 @@ just build
 `worker.toml` contains machine-local executors, repositories, and credentials.
 
 ```sh
-mkdir -p ~/.factory/agents
-cp examples/worker.toml ~/.factory/worker.toml
-cp examples/config.toml ~/.factory/config.toml
-cp examples/agents/plan.md ~/.factory/agents/plan.md
-cp examples/agents/build.md ~/.factory/agents/build.md
-cp examples/agents/verify.md ~/.factory/agents/verify.md
+factory init
 ```
 
-Update the repository path in `~/.factory/worker.toml`:
+This installs editable defaults in `~/.factory`: shared configuration, worker
+configuration, the `plan`, `build`, `verify`, and `foreman` prompts, and a random worker
+token.
+Running it again creates any missing files and keeps every existing file unchanged.
+
+Add repositories to `~/.factory/worker.toml`:
 
 ```toml
 data_directory = "~/.factory/worker"
@@ -46,8 +46,8 @@ command = ["codex", "exec", "--sandbox", "danger-full-access", "-"]
 [executors.claude]
 command = ["claude", "--print", "--dangerously-skip-permissions"]
 
-[repositories.factory]
-path = "/absolute/path/to/factory"
+# [repositories.my-project]
+# path = "/absolute/path/to/my-project"
 ```
 
 The optional worker `name` defaults to the machine hostname. Set it only when a
@@ -70,6 +70,11 @@ timeout = "60m"
 executor = "codex"
 prompt_file = "agents/verify.md"
 timeout = "30m"
+
+[agents.foreman]
+executor = "codex"
+prompt_file = "agents/foreman.md"
+timeout = "120m"
 
 [pipelines.code]
 agents = ["plan", "build", "verify"]
@@ -127,6 +132,20 @@ changing code or workflow state. A zero pipeline exit status means every agent p
 completed, not that the ticket necessarily reached `factory:ready-for-review`; the label
 is the task outcome.
 
+Use the foreman when the task should cycle through fresh planning, build, and review
+subagents instead of stopping after one verification pass:
+
+```sh
+factory run \
+  --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123"
+```
+
+The foreman writes each subagent prompt from the latest task state. It allows at most two
+targeted repair attempts, records every phase and attempt in the run output, opens a draft
+pull request, waits for available CI and automated review, and marks the result ready for
+human review. It never merges.
+
 Or pass the repository and configuration explicitly:
 
 ```sh
@@ -157,15 +176,9 @@ The optional local control plane stores jobs and runs in SQLite and serves an em
 React application. Node is needed only to rebuild the frontend; the resulting Factory
 binary contains the static assets.
 
-Create one shared worker token and copy the example configuration:
-
-```sh
-mkdir -p ~/.factory/server
-openssl rand -hex 32 > ~/.factory/server/worker.token
-chmod 600 ~/.factory/server/worker.token
-```
-
-Then start both processes. Each command reads its default configuration file:
+`factory init` creates the shared worker token. Start both processes after adding
+at least one repository to `worker.toml`. Each command reads its default configuration
+file:
 
 ```sh
 factory start

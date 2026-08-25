@@ -298,7 +298,7 @@ func TestLoadPipelineRejectsMissingEmptyAndUndefinedAgents(t *testing.T) {
 
 func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	definition := filepath.Join("..", "..", "examples", "config.toml")
-	for _, name := range []string{"plan", "build", "verify"} {
+	for _, name := range []string{"plan", "build", "verify", "foreman"} {
 		t.Run(name, func(t *testing.T) {
 			agent, err := LoadAgent(definition, name)
 			if err != nil {
@@ -318,6 +318,26 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	}
 	if len(agents) != 3 {
 		t.Fatalf("example pipeline agents = %d, want 3", len(agents))
+	}
+	foreman, err := LoadAgent(definition, "foreman")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{
+		"Never plan the solution, edit code",
+		"Use at most two repair attempts",
+		"Use attempt `0` for planning",
+		"attempts `1` and `2` for the first and second repairs",
+		"poll no more often than every 30 seconds",
+		"at most 20 minutes",
+		"set `factory:blocked`",
+		"resolve only threads whose feedback is fully",
+		"Treat only findings that still apply to the current",
+		"Never merge the pull request",
+	} {
+		if !strings.Contains(foreman.Prompt, rule) {
+			t.Fatalf("foreman prompt does not contain %q", rule)
+		}
 	}
 }
 
