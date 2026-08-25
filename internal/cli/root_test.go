@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestWorkerRunExecutesNamedPromptWithoutTaskArgument(t *testing.T) {
+func TestWorkerRunInjectsTaskIntoNamedPrompt(t *testing.T) {
 	repository := newCLIRepository(t)
 	workerConfig := writeCLIConfig(t, "success")
 	var stdout bytes.Buffer
@@ -19,13 +19,14 @@ func TestWorkerRunExecutesNamedPromptWithoutTaskArgument(t *testing.T) {
 	exitCode := Execute(t.Context(), []string{
 		"worker", "run",
 		"--agent=plan",
+		"--task=fix issue 123",
 		"--repo=" + repository,
 		"--config=" + workerConfig,
 	}, strings.NewReader("ignored"), &stdout, &stderr, "test")
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %s", exitCode, stderr.String())
 	}
-	if stdout.String() != "configured plan prompt\n" {
+	if stdout.String() != "configured plan prompt\n\nTask:\nfix issue 123\n" {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "succeeded; events:") {
@@ -49,10 +50,11 @@ func TestWorkerRunSelectsDifferentAgentPrompts(t *testing.T) {
 			exitCode := Execute(t.Context(), []string{
 				"worker", "run",
 				"--agent=" + test.agent,
+				"--task=check ticket",
 				"--repo=" + repository,
 				"--config=" + workerConfig,
 			}, strings.NewReader(""), &stdout, &stderr, "test")
-			if exitCode != 0 || stdout.String() != test.want {
+			if exitCode != 0 || stdout.String() != test.want+"\nTask:\ncheck ticket\n" {
 				t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
 			}
 		})
@@ -61,9 +63,55 @@ func TestWorkerRunSelectsDifferentAgentPrompts(t *testing.T) {
 
 func TestWorkerRunRejectsPositionalTask(t *testing.T) {
 	var stderr bytes.Buffer
-	exitCode := Execute(t.Context(), []string{"worker", "run", "old task", "--agent=plan"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
+	exitCode := Execute(t.Context(), []string{"worker", "run", "old task", "--agent=plan", "--task=new task"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
 	if exitCode != 2 || !strings.Contains(stderr.String(), "unknown command") && !strings.Contains(stderr.String(), "accepts 0 arg") {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
+func TestWorkerRunRequiresTask(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{"worker", "run", "--agent=plan"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
+	if exitCode != 2 || !strings.Contains(stderr.String(), "required flag(s) \"task\"") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
+func TestWorkerRunRejectsEmptyTask(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"worker", "run",
+		"--agent=plan",
+		"--task=   ",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "success"),
+	}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
+	if exitCode != 2 || !strings.Contains(stderr.String(), "task is required") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
+func TestWorkerRunDoesNotEvaluateTaskAsTemplateOrShell(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "not-run")
+	task := "fix $(touch " + marker + ") and preserve {{factory.task}}\nsecond line"
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"worker", "run",
+		"--agent=plan",
+		"--task=" + task,
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "success"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	want := "configured plan prompt\n\nTask:\n" + task + "\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("task text was evaluated as a shell command: %v", err)
 	}
 }
 
@@ -72,6 +120,7 @@ func TestWorkerRunReturnsAgentExitStatus(t *testing.T) {
 	exitCode := Execute(t.Context(), []string{
 		"worker", "run",
 		"--agent=plan",
+		"--task=fail this task",
 		"--repo=" + newCLIRepository(t),
 		"--config=" + writeCLIConfig(t, "fail"),
 	}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
@@ -96,6 +145,7 @@ func TestWorkerRunReturnsRuntimeFailureStatus(t *testing.T) {
 	exitCode := Execute(t.Context(), []string{
 		"worker", "run",
 		"--agent=plan",
+		"--task=exercise runtime failure",
 		"--repo=" + newCLIRepository(t),
 		"--config=" + workerConfig,
 	}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
@@ -115,10 +165,10 @@ func TestVersion(t *testing.T) {
 func writeCLIConfig(t *testing.T, mode string) string {
 	t.Helper()
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("configured plan prompt\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("configured plan prompt\n\nTask:\n{{factory.task}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "review.md"), []byte("configured review prompt\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "review.md"), []byte("configured review prompt\n\nTask:\n{{factory.task}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	definition := filepath.Join(directory, "factory.toml")

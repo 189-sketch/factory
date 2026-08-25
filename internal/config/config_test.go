@@ -41,7 +41,7 @@ func TestLoadWorkerRejectsUnknownFields(t *testing.T) {
 
 func TestLoadAgentResolvesPromptAndHashesDefinition(t *testing.T) {
 	directory := t.TempDir()
-	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository.\n")
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository for {{factory.task}}.\n")
 	definition := filepath.Join(directory, "factory.toml")
 	writeTestFile(t, definition, `[agents.plan]
 command = ["agent", "run"]
@@ -53,7 +53,7 @@ timeout = "45s"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Name != "plan" || agent.Prompt != "Inspect the repository.\n" {
+	if agent.Name != "plan" || agent.Prompt != "Inspect the repository for {{factory.task}}.\n" {
 		t.Fatalf("unexpected agent: %#v", agent)
 	}
 	if agent.Timeout != 45*time.Second {
@@ -64,6 +64,60 @@ timeout = "45s"
 	}
 	if len(agent.Hash) != 64 {
 		t.Fatalf("hash = %q", agent.Hash)
+	}
+}
+
+func TestRenderTaskReplacesEveryTaskParameterWithoutReevaluation(t *testing.T) {
+	agent := ResolvedAgent{Prompt: "Before {{factory.task}} between {{factory.task}} after"}
+	task := "fix {{factory.task}} and $(touch never)"
+	rendered, err := RenderTask(agent, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Before " + task + " between " + task + " after"
+	if rendered.Prompt != want {
+		t.Fatalf("prompt = %q, want %q", rendered.Prompt, want)
+	}
+}
+
+func TestRenderTaskRejectsEmptyAndOversizedTasks(t *testing.T) {
+	agent := ResolvedAgent{Prompt: taskParameter}
+	if _, err := RenderTask(agent, " \n\t"); err == nil || !strings.Contains(err.Error(), "task is required") {
+		t.Fatalf("expected empty-task error, got %v", err)
+	}
+	if _, err := RenderTask(agent, strings.Repeat("x", maxTaskBytes+1)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected task-size error, got %v", err)
+	}
+}
+
+func TestRenderTaskRejectsOversizedRenderedPromptBeforeReplacement(t *testing.T) {
+	agent := ResolvedAgent{
+		Name:   "plan",
+		Prompt: strings.Repeat(taskParameter, maxPromptBytes/len(taskParameter)),
+	}
+	if _, err := RenderTask(agent, strings.Repeat("x", maxTaskBytes)); err == nil || !strings.Contains(err.Error(), "rendered agent prompt exceeds") {
+		t.Fatalf("expected rendered-size error, got %v", err)
+	}
+}
+
+func TestLoadAgentRequiresTaskParameterAndRejectsUnsupportedFactoryParameter(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		prompt string
+		want   string
+	}{
+		{name: "missing task", prompt: "Plan this ticket.\n", want: "must include {{factory.task}}"},
+		{name: "unsupported parameter", prompt: "Plan {{factory.task}} in {{factory.repository}}.\n", want: "unsupported Factory parameter"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeTestFile(t, filepath.Join(directory, "plan.md"), test.prompt)
+			definition := filepath.Join(directory, "factory.toml")
+			writeTestFile(t, definition, "[agents.plan]\ncommand = [\"agent\"]\nprompt_file = \"plan.md\"\n")
+			if _, err := LoadAgent(definition, "plan"); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected %q error, got %v", test.want, err)
+			}
+		})
 	}
 }
 

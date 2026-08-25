@@ -15,6 +15,7 @@ type commandOptions struct {
 	configPath     string
 	definitionPath string
 	agentName      string
+	task           string
 	repository     string
 	stdin          io.Reader
 	stdout         io.Writer
@@ -66,9 +67,11 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		},
 	}
 	run.Flags().StringVar(&options.agentName, "agent", "", "agent name from the Factory definition (required)")
+	run.Flags().StringVar(&options.task, "task", "", "task text, ticket ID, or ticket URL (required)")
 	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
 	run.Flags().StringVar(&options.definitionPath, "definition", "", "Factory definition file")
 	_ = run.MarkFlagRequired("agent")
+	_ = run.MarkFlagRequired("task")
 	worker.AddCommand(run)
 	root.AddCommand(worker)
 
@@ -93,6 +96,10 @@ func runAgent(ctx context.Context, options *commandOptions) error {
 		return err
 	}
 	agent, err := config.LoadAgent(definitionPath, options.agentName)
+	if err != nil {
+		return err
+	}
+	agent, err = config.RenderTask(agent, options.task)
 	if err != nil {
 		return err
 	}
