@@ -34,6 +34,7 @@ const (
 
 type Options struct {
 	RunID         string
+	ArtifactKey   string
 	Agent         config.ResolvedAgent
 	Repository    string
 	DataDirectory string
@@ -100,6 +101,12 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		return Result{}, fmt.Errorf("invalid run ID %q", runID)
 	}
 	runDirectory := filepath.Join(options.DataDirectory, "runs", runID)
+	if options.ArtifactKey != "" {
+		if !validArtifactKey(options.ArtifactKey) {
+			return Result{}, fmt.Errorf("invalid artifact key %q", options.ArtifactKey)
+		}
+		runDirectory = filepath.Join(runDirectory, options.ArtifactKey)
+	}
 	if err := createDurableDirectory(runDirectory); err != nil {
 		return Result{}, &RuntimeError{Cause: fmt.Errorf("create run directory: %w", err)}
 	}
@@ -209,6 +216,19 @@ func validRunID(value string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, "run_"))
 	return err == nil
+}
+
+func validArtifactKey(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {

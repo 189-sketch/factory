@@ -125,8 +125,23 @@ func TestExecuteUsesManagedRunIDAndRejectsUnsafeIDs(t *testing.T) {
 	if err != nil || result.ID != runID {
 		t.Fatalf("result = %#v, %v", result, err)
 	}
+	attempt, err := Execute(t.Context(), Options{
+		RunID:         runID,
+		ArtifactKey:   "lease_abcdef0123456789",
+		Agent:         helperAgent("echo", time.Second),
+		Repository:    repository,
+		DataDirectory: dataDirectory,
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+	})
+	if err != nil || attempt.ID != runID || filepath.Base(filepath.Dir(attempt.EventsPath)) != "lease_abcdef0123456789" {
+		t.Fatalf("attempt result = %#v, %v", attempt, err)
+	}
 	if _, err := Execute(t.Context(), Options{RunID: "../escape", Agent: helperAgent("echo", time.Second), Repository: repository, DataDirectory: dataDirectory, Stdout: io.Discard, Stderr: io.Discard}); err == nil || !strings.Contains(err.Error(), "invalid run ID") {
 		t.Fatalf("unsafe run ID error = %v", err)
+	}
+	if _, err := Execute(t.Context(), Options{RunID: runID, ArtifactKey: "../escape", Agent: helperAgent("echo", time.Second), Repository: repository, DataDirectory: dataDirectory, Stdout: io.Discard, Stderr: io.Discard}); err == nil || !strings.Contains(err.Error(), "invalid artifact key") {
+		t.Fatalf("unsafe artifact key error = %v", err)
 	}
 }
 

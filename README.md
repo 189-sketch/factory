@@ -161,7 +161,9 @@ repository as its working directory. `--prompt` is required and replaces every
 other work request. Standard output and error remain live.
 Factory records byte-faithful output chunks as base64 under
 `<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
-`result.json` in the same directory. Recording stops after 64 MiB of process output or
+`result.json` in the same directory. Managed redispatches place each lease attempt under
+`<data_directory>/runs/<run-id>/<lease-token>/` so an abandoned attempt remains intact.
+Recording stops after 64 MiB of process output or
 when the encoded event file reaches 32 MiB, and adds a truncation event while live output
 and the agent run continue.
 
@@ -189,7 +191,11 @@ Factory listens on [http://127.0.0.1:7331](http://127.0.0.1:7331). Port 8080 is 
 used. This first control-plane phase deliberately rejects non-loopback listeners. The
 server owns prompts and pipelines; the worker owns executor commands, repository paths,
 and credentials. Workers receive only a rendered prompt, executor name, repository key,
-timeout, and opaque lease.
+timeout, and opaque lease. Managed leases expire after 30 seconds and are renewed every
+10 seconds while an agent runs. Polling requeues abandoned runs whose lease is no longer
+renewed, allowing a compatible worker to receive a new token and execute them. A stale
+worker may finish locally after losing connectivity, but it cannot update control-plane
+state after redispatch.
 
 The control plane treats output as opaque. It records whether each agent process is
 queued, running, or terminal, but it does not interpret ticket labels or decide whether

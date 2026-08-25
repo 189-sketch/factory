@@ -2,6 +2,7 @@ package managedworker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -146,4 +148,198 @@ func TestCompletionDoesNotRetryPermanentClientError(t *testing.T) {
 	if err == nil || requests.Load() != 1 {
 		t.Fatalf("error = %v, requests = %d", err, requests.Load())
 	}
+}
+
+func TestManagedWorkerHeartbeatsDuringExecutionAndContinuesAfterFailure(t *testing.T) {
+	if heartbeatInterval != 10*time.Second {
+		t.Fatalf("heartbeat interval = %v", heartbeatInterval)
+	}
+	var requests atomic.Int32
+	heartbeats := make(chan protocol.Heartbeat, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/runs/run-test/heartbeat" || request.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("request = %s authorization %q", request.URL.Path, request.Header.Get("Authorization"))
+		}
+		var heartbeat protocol.Heartbeat
+		if err := json.NewDecoder(request.Body).Decode(&heartbeat); err != nil {
+			t.Errorf("decode heartbeat: %v", err)
+		}
+		heartbeats <- heartbeat
+		if requests.Add(1) == 1 {
+			http.Error(response, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ticks := make(chan time.Time, 2)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var stderr strings.Builder
+	worker := &Worker{
+		config:         config.Worker{ControlPlane: config.ControlPlane{URL: server.URL}},
+		token:          "secret",
+		instanceID:     "worker-test",
+		client:         server.Client(),
+		stderr:         &stderr,
+		heartbeatTicks: ticks,
+		executeRun: func(context.Context, protocol.RunSpec) protocol.Completion {
+			close(started)
+			<-release
+			return protocol.Completion{State: "succeeded"}
+		},
+	}
+	spec := protocol.RunSpec{ID: "run-test", LeaseToken: "lease-test"}
+	done := make(chan protocol.Completion, 1)
+	go func() { done <- worker.executeWithHeartbeats(t.Context(), spec) }()
+	<-started
+
+	for index := 0; index < 2; index++ {
+		ticks <- time.Time{}
+		heartbeat := <-heartbeats
+		if heartbeat.InstanceID != "worker-test" || heartbeat.LeaseToken != "lease-test" {
+			t.Fatalf("heartbeat = %#v", heartbeat)
+		}
+	}
+	select {
+	case completion := <-done:
+		t.Fatalf("agent stopped after heartbeat failure: %#v", completion)
+	default:
+	}
+	close(release)
+	completion := <-done
+	if completion.State != "succeeded" || requests.Load() != 2 {
+		t.Fatalf("completion = %#v, requests = %d", completion, requests.Load())
+	}
+	if !strings.Contains(stderr.String(), "factory: heartbeat run run-test") {
+		t.Fatalf("heartbeat failure was not logged: %q", stderr.String())
+	}
+}
+
+func TestManagedWorkerHeartbeatsUntilCompletionIsAcknowledged(t *testing.T) {
+	heartbeats := make(chan protocol.Heartbeat, 2)
+	completionStarted := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseCompletion) }) })
+	var completionRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/runs/run-test/heartbeat":
+			var heartbeat protocol.Heartbeat
+			if err := json.NewDecoder(request.Body).Decode(&heartbeat); err != nil {
+				t.Errorf("decode heartbeat: %v", err)
+			}
+			heartbeats <- heartbeat
+			response.WriteHeader(http.StatusNoContent)
+		case "/api/v1/runs/run-test/complete":
+			if completionRequests.Add(1) == 1 {
+				close(completionStarted)
+				<-releaseCompletion
+				http.Error(response, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			response.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request path %q", request.URL.Path)
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	ticks := make(chan time.Time, 1)
+	worker := &Worker{
+		config:         config.Worker{ControlPlane: config.ControlPlane{URL: server.URL}},
+		token:          "secret",
+		instanceID:     "worker-test",
+		client:         server.Client(),
+		stderr:         io.Discard,
+		heartbeatTicks: ticks,
+	}
+	spec := protocol.RunSpec{ID: "run-test", LeaseToken: "lease-test"}
+	done := make(chan error, 1)
+	go func() {
+		done <- worker.deliverWithHeartbeats(t.Context(), spec, protocol.Completion{InstanceID: "worker-test", LeaseToken: "lease-test", State: "succeeded"})
+	}()
+
+	immediate := <-heartbeats
+	if immediate.InstanceID != "worker-test" || immediate.LeaseToken != "lease-test" {
+		t.Fatalf("immediate heartbeat = %#v", immediate)
+	}
+	<-completionStarted
+	ticks <- time.Time{}
+	duringRetry := <-heartbeats
+	if duringRetry.InstanceID != "worker-test" || duringRetry.LeaseToken != "lease-test" {
+		t.Fatalf("completion heartbeat = %#v", duringRetry)
+	}
+	releaseOnce.Do(func() { close(releaseCompletion) })
+	if err := <-done; err != nil || completionRequests.Load() != 2 {
+		t.Fatalf("delivery error = %v, completion requests = %d", err, completionRequests.Load())
+	}
+}
+
+func TestManagedWorkerSeparatesRedispatchedLeaseArtifacts(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repository")
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	worker := &Worker{
+		config: config.Worker{
+			DataDirectory: directory,
+			Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "cat >/dev/null"}}},
+			Repositories:  map[string]config.Repository{"factory": {Path: repository}},
+		},
+		instanceID: "worker-test",
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+	}
+	runID := "run_0123456789abcdef01234567"
+	for _, lease := range []string{"lease_first", "lease_second"} {
+		completion := worker.execute(t.Context(), protocol.RunSpec{
+			ID:             runID,
+			Agent:          "plan",
+			AgentHash:      "plan-hash",
+			Executor:       "test",
+			Repository:     "factory",
+			RenderedPrompt: "managed prompt",
+			TimeoutMillis:  5000,
+			LeaseToken:     lease,
+		})
+		if completion.State != "succeeded" || completion.Result == nil || completion.Events == "" {
+			t.Fatalf("completion for %s = %#v", lease, completion)
+		}
+		for _, name := range []string{"events.jsonl", "result.json"} {
+			if _, err := os.Stat(filepath.Join(directory, "runs", runID, lease, name)); err != nil {
+				t.Fatalf("artifact %s for %s: %v", name, lease, err)
+			}
+		}
+	}
+}
+
+func TestManagedWorkerStopsHeartbeatLoopWhenTerminated(t *testing.T) {
+	ticks := make(chan time.Time, 1)
+	started := make(chan struct{})
+	exited := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := &Worker{
+		heartbeatTicks: ticks,
+		executeRun: func(ctx context.Context, _ protocol.RunSpec) protocol.Completion {
+			close(started)
+			<-ctx.Done()
+			close(exited)
+			return protocol.Completion{State: "cancelled", ExitCode: 130}
+		},
+	}
+	done := make(chan protocol.Completion, 1)
+	go func() { done <- worker.executeWithHeartbeats(ctx, protocol.RunSpec{}) }()
+	<-started
+	cancel()
+	<-exited
+	completion := <-done
+	if completion.State != "cancelled" || completion.ExitCode != 130 {
+		t.Fatalf("completion = %#v", completion)
+	}
+	ticks <- time.Time{}
 }

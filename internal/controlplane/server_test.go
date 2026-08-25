@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/owainlewis/factory-v2/internal/config"
+	"github.com/owainlewis/factory-v2/internal/protocol"
 	"github.com/owainlewis/factory-v2/internal/runner"
 )
 
@@ -117,6 +119,70 @@ func TestCompletionLimitFitsMaximumRecordedOutput(t *testing.T) {
 	if maxCompletionBytes < worstCaseEncodedEvents+envelopeAllowance {
 		t.Fatalf("completion limit %d cannot hold encoded events and envelope %d", maxCompletionBytes, worstCaseEncodedEvents+envelopeAllowance)
 	}
+}
+
+func TestHeartbeatEndpointAuthenticatesAndRejectsInvalidLeases(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	auth := map[string]string{"Authorization": "Bearer secret"}
+
+	unauthorized := postJSON(t, webServer.URL+"/api/v1/runs/missing/heartbeat", protocol.Heartbeat{}, nil)
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized heartbeat status = %d", unauthorized.StatusCode)
+	}
+	unauthorized.Body.Close()
+	unknown := postJSON(t, webServer.URL+"/api/v1/runs/missing/heartbeat", protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: "lease"}, auth)
+	if unknown.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown heartbeat status = %d", unknown.StatusCode)
+	}
+	unknown.Body.Close()
+
+	if _, err := server.store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+		t.Fatal(err)
+	}
+	pollResponse := postJSON(t, webServer.URL+"/api/v1/workers/poll", pollRequest("worker-a", []string{"codex"}, []string{"factory"}), auth)
+	if pollResponse.StatusCode != http.StatusOK {
+		t.Fatalf("poll status = %d", pollResponse.StatusCode)
+	}
+	var polled protocol.PollResponse
+	if err := json.NewDecoder(pollResponse.Body).Decode(&polled); err != nil {
+		t.Fatal(err)
+	}
+	pollResponse.Body.Close()
+	if polled.Run == nil {
+		t.Fatal("poll returned no run")
+	}
+
+	for name, heartbeat := range map[string]protocol.Heartbeat{
+		"other worker": {InstanceID: "worker-b", LeaseToken: polled.Run.LeaseToken},
+		"stale token":  {InstanceID: "worker-a", LeaseToken: "stale"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/heartbeat", heartbeat, auth)
+			if response.StatusCode != http.StatusConflict {
+				t.Fatalf("status = %d", response.StatusCode)
+			}
+			response.Body.Close()
+		})
+	}
+	validHeartbeat := protocol.Heartbeat{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken}
+	renewed := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/heartbeat", validHeartbeat, auth)
+	if renewed.StatusCode != http.StatusNoContent {
+		t.Fatalf("valid heartbeat status = %d", renewed.StatusCode)
+	}
+	renewed.Body.Close()
+
+	completion := protocol.Completion{InstanceID: "worker-a", LeaseToken: polled.Run.LeaseToken, State: "succeeded", ExitCode: 0}
+	completed := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/complete", completion, auth)
+	if completed.StatusCode != http.StatusNoContent {
+		t.Fatalf("completion status = %d", completed.StatusCode)
+	}
+	completed.Body.Close()
+	nonRunning := postJSON(t, webServer.URL+"/api/v1/runs/"+polled.Run.ID+"/heartbeat", validHeartbeat, auth)
+	if nonRunning.StatusCode != http.StatusConflict {
+		t.Fatalf("non-running heartbeat status = %d", nonRunning.StatusCode)
+	}
+	nonRunning.Body.Close()
 }
 
 func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {

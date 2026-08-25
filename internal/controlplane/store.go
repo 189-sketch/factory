@@ -22,8 +22,11 @@ var (
 	ErrRunState      = errors.New("run is not active")
 )
 
+const leaseDuration = 30 * time.Second
+
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
 }
 
 type Job struct {
@@ -77,7 +80,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, now: time.Now}
 	if err := store.initialize(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -115,6 +118,7 @@ CREATE TABLE IF NOT EXISTS runs (
   state TEXT NOT NULL,
   worker_instance TEXT,
   lease_token TEXT,
+  lease_expires_at INTEGER,
   exit_code INTEGER,
   error TEXT,
   result TEXT,
@@ -137,6 +141,43 @@ CREATE TABLE IF NOT EXISTS worker_repositories (
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
 	}
+	if err := s.addColumnIfMissing(ctx, "runs", "lease_expires_at", "INTEGER"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) addColumnIfMissing(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("inspect %s schema: %w", table, err)
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition); err != nil {
+		return fmt.Errorf("migrate %s schema: %w", table, err)
+	}
 	return nil
 }
 
@@ -148,7 +189,7 @@ func (s *Store) CreateJob(ctx context.Context, prompt, repository, kind, name st
 	if err != nil {
 		return "", err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := s.now().UTC().Format(time.RFC3339Nano)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -182,9 +223,13 @@ func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protoc
 		return nil, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := s.now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
 		return nil, fmt.Errorf("update worker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='queued',worker_instance=NULL,lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE state='running' AND (lease_expires_at IS NULL OR lease_expires_at<=?)`, nowTime.UnixNano()); err != nil {
+		return nil, fmt.Errorf("reclaim expired leases: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM worker_repositories WHERE worker_instance=?`, request.InstanceID); err != nil {
 		return nil, fmt.Errorf("clear worker repositories: %w", err)
@@ -236,7 +281,8 @@ func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protoc
 	if err != nil {
 		return nil, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,lease_token=?,started_at=? WHERE id=? AND state='queued'`, request.InstanceID, selected.LeaseToken, now, selected.ID)
+	expiresAt := nowTime.Add(leaseDuration).UnixNano()
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,lease_token=?,lease_expires_at=?,started_at=? WHERE id=? AND state='queued'`, request.InstanceID, selected.LeaseToken, expiresAt, now, selected.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +306,9 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	}
 	defer tx.Rollback()
 	var jobID, state, instanceID, leaseToken string
+	var leaseExpiresAt sql.NullInt64
 	var step int
-	if err := tx.QueryRowContext(ctx, `SELECT job_id,step,state,COALESCE(worker_instance,''),COALESCE(lease_token,'') FROM runs WHERE id=?`, runID).Scan(&jobID, &step, &state, &instanceID, &leaseToken); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT job_id,step,state,COALESCE(worker_instance,''),COALESCE(lease_token,''),lease_expires_at FROM runs WHERE id=?`, runID).Scan(&jobID, &step, &state, &instanceID, &leaseToken, &leaseExpiresAt); err != nil {
 		return err
 	}
 	if subtle.ConstantTimeCompare([]byte(instanceID), []byte(completion.InstanceID)) != 1 || subtle.ConstantTimeCompare([]byte(leaseToken), []byte(completion.LeaseToken)) != 1 {
@@ -273,14 +320,17 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if state != "running" {
 		return ErrRunState
 	}
+	if !leaseExpiresAt.Valid || leaseExpiresAt.Int64 <= s.now().UTC().UnixNano() {
+		return ErrLeaseConflict
+	}
 	if !terminalRunState(completion.State) || completion.State == "skipped" {
 		return fmt.Errorf("invalid terminal run state %q", completion.State)
 	}
 	if err := validateOutcome(completion.State, completion.ExitCode); err != nil {
 		return err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,completed_at=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, runID); err != nil {
+	now := s.now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, runID); err != nil {
 		return err
 	}
 	if completion.State == "succeeded" {
@@ -304,6 +354,41 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='failed',updated_at=? WHERE id=?`, now, jobID); err != nil {
 			return err
 		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Heartbeat(ctx context.Context, runID string, heartbeat protocol.Heartbeat) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state, instanceID, leaseToken string
+	var leaseExpiresAt sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(worker_instance,''),COALESCE(lease_token,''),lease_expires_at FROM runs WHERE id=?`, runID).Scan(&state, &instanceID, &leaseToken, &leaseExpiresAt); err != nil {
+		return err
+	}
+	if state != "running" {
+		return ErrRunState
+	}
+	if subtle.ConstantTimeCompare([]byte(instanceID), []byte(heartbeat.InstanceID)) != 1 || subtle.ConstantTimeCompare([]byte(leaseToken), []byte(heartbeat.LeaseToken)) != 1 {
+		return ErrLeaseConflict
+	}
+	now := s.now().UTC()
+	if !leaseExpiresAt.Valid || leaseExpiresAt.Int64 <= now.UnixNano() {
+		return ErrLeaseConflict
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET lease_expires_at=? WHERE id=? AND state='running' AND worker_instance=? AND lease_token=?`, now.Add(leaseDuration).UnixNano(), runID, heartbeat.InstanceID, heartbeat.LeaseToken)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrLeaseConflict
 	}
 	return tx.Commit()
 }
