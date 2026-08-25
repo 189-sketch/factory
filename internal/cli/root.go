@@ -185,6 +185,16 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
+	if err := config.ValidateModelSelection(agents, options.model); err != nil {
+		return err
+	}
+	if options.model != "" {
+		for _, agent := range agents {
+			if _, err := worker.ResolveAgentModel(agent, options.model); err != nil {
+				return err
+			}
+		}
+	}
 	for index, agent := range agents {
 		fmt.Fprintf(options.stderr, "factory: pipeline %s: agent %d/%d %s\n", options.pipelineName, index+1, len(agents), agent.Name)
 		if err := runAgent(ctx, options, worker, agent); err != nil {

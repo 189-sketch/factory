@@ -245,6 +245,27 @@ func TestWorkerModelCapabilitiesAndConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateModelSelectionRejectsMixedExecutorPipeline(t *testing.T) {
+	agents := []ResolvedAgent{{Name: "plan", Executor: "codex"}, {Name: "build", Executor: "claude"}}
+	if err := ValidateModelSelection(agents, "fast"); err == nil {
+		t.Fatal("expected mixed-executor model selection error")
+	}
+	if err := ValidateModelSelection(agents, ""); err != nil {
+		t.Fatalf("model-less pipeline: %v", err)
+	}
+}
+
+func TestLoadWorkerRejectsCompoundModelPlaceholderArgument(t *testing.T) {
+	_, err := applyWorkerDefaultsWithHostname(Worker{
+		Name:          "test",
+		DataDirectory: t.TempDir(),
+		Executors:     map[string]Executor{"invalid": {Command: []string{"agent", "prefix-" + modelParameter}}},
+	}, func() (string, error) { return "unused", nil })
+	if err == nil || !strings.Contains(err.Error(), "complete optional") {
+		t.Fatalf("compound placeholder error = %v", err)
+	}
+}
+
 func TestRenderPromptReplacesEveryPromptParameterWithoutReevaluation(t *testing.T) {
 	agent := ResolvedAgent{Prompt: "Before {{factory.prompt}} between {{factory.prompt}} after"}
 	prompt := "fix {{factory.prompt}} and $(touch never)"

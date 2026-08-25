@@ -390,6 +390,19 @@ func RenderPrompt(agent ResolvedAgent, prompt string) (ResolvedAgent, error) {
 	return agent, nil
 }
 
+func ValidateModelSelection(agents []ResolvedAgent, model string) error {
+	if strings.TrimSpace(model) == "" || len(agents) < 2 {
+		return nil
+	}
+	executor := agents[0].Executor
+	for _, agent := range agents[1:] {
+		if agent.Executor != executor {
+			return errors.New("model selection requires every pipeline agent to use the same executor")
+		}
+	}
+	return nil
+}
+
 func validatePromptParameters(agentName, prompt string) error {
 	hasPrompt := false
 	remaining := prompt
@@ -522,6 +535,9 @@ func validateCommand(name string, command []string) error {
 		}
 		if index == 0 && strings.Contains(argument, modelParameter) {
 			return fmt.Errorf("executor %q command executable cannot contain %s", name, modelParameter)
+		}
+		if strings.Contains(argument, modelParameter) && (!strings.HasPrefix(argument, "--") || !strings.HasSuffix(argument, "="+modelParameter) || strings.Count(argument, modelParameter) != 1) {
+			return fmt.Errorf("executor %q must use %s as a complete optional --flag=%s argument", name, modelParameter, modelParameter)
 		}
 	}
 	return nil

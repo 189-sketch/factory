@@ -95,9 +95,10 @@ opaque lease token
 ```
 
 The server never sends an executable command, local path, environment variable, or
-credential. Each poll advertises the worker's executor and repository names. The server
-leases only compatible work. The worker still rejects an unknown name before starting a
-process and reports that preflight failure without a local event file.
+credential. Each poll advertises the worker's executor and repository names plus each
+executor's model aliases. An empty alias list means that executor accepts raw model
+names. The server leases only compatible work. The worker still rejects an unknown name
+before starting a process and reports that preflight failure without a local event file.
 
 ## 5. Job and run state
 
@@ -175,9 +176,9 @@ terminate the local agent process, including when heartbeat delivery temporarily
   server-generated CSRF token plus matching loopback Host and Origin headers.
 - `POST /api/v1/workers/poll`: authenticate a worker, update last-seen state, and lease
   one compatible run when available. The request includes the worker name and its
-  process instance ID, executor names, and repository names. Repeated polls return that
-  instance's existing unexpired active lease. Polling also reclaims expired leases before
-  selecting work.
+  process instance ID, executor names, repository names, and per-executor model aliases
+  or raw-model support. Repeated polls return that instance's existing unexpired active
+  lease. Polling also reclaims expired leases before selecting work.
 - `POST /api/v1/runs/{id}/heartbeat`: authenticate the owning worker and renew its active
   lease. Unknown runs return 404. Non-running, expired, differently owned, and stale-token
   leases return 409 without changing state.
@@ -202,7 +203,7 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
 - INV-3: the runner receives a final rendered prompt and knows nothing about templates,
   tickets, labels, or control-plane semantics.
 - INV-4: one worker process instance has at most one active run, and it receives only work
-  matching its advertised executor and repository names.
+  matching its advertised executor, repository, and requested model capability.
 - INV-5: one unexpired run lease belongs to one worker instance and opaque token. Expired
   leases are transactionally reclaimed during polling and redispatched with a new token.
 - INV-6: the control plane advances pipelines only from process terminal state.
@@ -216,9 +217,10 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
 - AC-3: a three-agent pipeline leases agents in order, uses the same input prompt for
   every template, and marks later steps skipped after the first non-zero result.
 - AC-4: invalid worker tokens receive HTTP 401 and cannot lease or complete runs.
-- AC-5: concurrent compatible polls lease a queued run once, while incompatible workers
-  receive no work. Unknown names that still reach a worker fail locally without starting
-  an agent and report a diagnostic without event files.
+- AC-5: concurrent compatible polls lease a queued run once, while workers with the wrong
+  executor, repository, or model capability receive no work. Unknown names that still
+  reach a worker fail locally without starting an agent and report a diagnostic without
+  event files.
 - AC-6: restarting the server against the same database preserves jobs, runs, results,
   completed output, and worker last-seen state.
 - AC-7: the default server binds only to `127.0.0.1:7331`; port 8080 is never used.

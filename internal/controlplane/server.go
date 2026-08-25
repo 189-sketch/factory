@@ -237,6 +237,10 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
+	if err := config.ValidateModelSelection(agents, input.Model); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
 	for index := range agents {
 		agents[index], err = config.RenderPrompt(agents[index], input.Prompt)
 		if err != nil {

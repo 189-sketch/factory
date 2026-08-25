@@ -429,6 +429,24 @@ func TestWorkerRunSelectsConfiguredModelAlias(t *testing.T) {
 	}
 }
 
+func TestPipelineModelSelectionRejectsMixedExecutorsBeforeRunning(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"run",
+		"--pipeline=code",
+		"--model=luna",
+		"--prompt=test model selection",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + writeCLIConfig(t, "model"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 2 || !strings.Contains(stderr.String(), "same executor") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("pipeline started before validation: %q", stdout.String())
+	}
+}
+
 func TestWorkerRunReturnsRuntimeFailureStatus(t *testing.T) {
 	workerConfig := writeCLIConfig(t, "success")
 	blockedDataDirectory := filepath.Join(filepath.Dir(workerConfig), "blocked-data")
@@ -485,7 +503,7 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		script = "exit 9"
 	}
 	if mode == "model" {
-		script = `printf '%s\n' "$0"; cat >/dev/null`
+		script = `printf '%s\n' "${0#--model=}"; cat >/dev/null`
 	}
 	buildScript := script
 	if mode == "fail-build" {
@@ -515,7 +533,7 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	worker := filepath.Join(directory, "worker.toml")
 	defaultCommand := "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n"
 	if mode == "model" {
-		defaultCommand = "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + ", \"{{factory.model}}\"]\n" +
+		defaultCommand = "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + ", \"--model={{factory.model}}\"]\n" +
 			"models = { luna = \"gpt-test-luna\" }\n"
 	}
 	workerBody := "data_directory = \"" + filepath.ToSlash(filepath.Join(directory, "data")) + "\"\n" +

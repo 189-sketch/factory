@@ -58,7 +58,8 @@ different display name is useful.
 Choose a model for one task with `--model=luna`. Factory resolves the alias through
 the selected executor and substitutes `{{factory.model}}` in that executor's command.
 Omit `--model` to use the coding agent's normal default. The control-plane New run
-form accepts the same optional alias.
+form accepts the same optional alias. Put the placeholder in a complete optional
+`--flag={{factory.model}}` argument. Model-selected pipelines must use one executor.
 
 The shared configuration resolves prompt paths relative to itself:
 
