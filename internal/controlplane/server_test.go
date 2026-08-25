@@ -21,6 +21,15 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	if status.CSRFToken == "" || len(status.Agents) != 1 || status.Agents[0] != "plan" {
 		t.Fatalf("status = %#v", status)
 	}
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"}}, map[string]string{"Authorization": "Bearer secret"})
+	if workerPoll.StatusCode != http.StatusOK {
+		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
+	}
+	workerPoll.Body.Close()
+	status = getStatus(t, webServer.URL)
+	if len(status.Workers) != 1 || len(status.Workers[0].Repositories) != 1 || status.Workers[0].Repositories[0] != "factory" || len(status.Repositories) != 1 || status.Repositories[0] != "factory" {
+		t.Fatalf("status = %#v", status)
+	}
 
 	unauthorized := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{}, nil)
 	if unauthorized.StatusCode != http.StatusUnauthorized {

@@ -147,6 +147,71 @@ func TestConcurrentPollsLeaseRunOnce(t *testing.T) {
 	}
 }
 
+func TestStorePersistsCurrentWorkerRepositories(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"other", "factory", "factory"})); err != nil || run != nil {
+		t.Fatalf("first poll = %#v, %v", run, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers) != 1 || len(snapshot.Workers[0].Repositories) != 2 || snapshot.Workers[0].Repositories[0] != "factory" || snapshot.Workers[0].Repositories[1] != "other" {
+		t.Fatalf("workers = %#v", snapshot.Workers)
+	}
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"})); err != nil || run != nil {
+		t.Fatalf("second poll = %#v, %v", run, err)
+	}
+	snapshot, err = store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Workers[0].Repositories) != 1 || snapshot.Workers[0].Repositories[0] != "factory" {
+		t.Fatalf("workers = %#v", snapshot.Workers)
+	}
+}
+
+func TestAvailableRepositoriesExcludesStaleWorkerInstances(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	if _, err := store.Poll(t.Context(), pollRequest("worker-old", []string{"codex"}, []string{"removed"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id='worker-old'`, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"})); err != nil {
+		t.Fatal(err)
+	}
+	repositories, err := store.AvailableRepositories(t.Context(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 || repositories[0] != "factory" {
+		t.Fatalf("repositories = %#v", repositories)
+	}
+}
+
+func TestAvailableRepositoriesIncludesWorkerWithRunningExecution(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-busy", []string{"codex"}, []string{"factory"}))
+	if err != nil || run == nil {
+		t.Fatalf("poll = %#v, %v", run, err)
+	}
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id='worker-busy'`, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	repositories, err := store.AvailableRepositories(t.Context(), time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 || repositories[0] != "factory" {
+		t.Fatalf("repositories = %#v", repositories)
+	}
+}
+
 func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
 	store, err := OpenStore(path)

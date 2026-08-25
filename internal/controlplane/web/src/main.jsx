@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, Bot, ChevronDown, GitBranch, Moon, Play, Plus, Server, Sun, Workflow, X } from "lucide-react";
+import { Activity, BarChart3, Bot, ChevronDown, GitBranch, Moon, Play, Plus, Server, Sun, Workflow, X } from "lucide-react";
+import { Analytics } from "@/analytics";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -11,9 +12,9 @@ const activeStates = new Set(["queued", "running"]);
 const zeroTime = "0001-01-01T00:00:00Z";
 
 function App() {
-  const [status, setStatus] = useState({ jobs: [], workers: [], agents: [], pipelines: [], csrf_token: "" });
+  const [status, setStatus] = useState({ jobs: [], workers: [], agents: [], pipelines: [], repositories: [], csrf_token: "" });
   const [selection, setSelection] = useState("");
-  const [repository, setRepository] = useState("factory");
+  const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
   const [statusError, setStatusError] = useState("");
   const [submitError, setSubmitError] = useState("");
@@ -22,6 +23,7 @@ function App() {
   const [filter, setFilter] = useState("all");
   const [expanded, setExpanded] = useState(new Set());
   const [dark, setDark] = useState(() => localStorage.getItem("factory-theme") !== "light");
+  const [view, setView] = useState(() => window.location.hash === "#/analytics" ? "analytics" : "runs");
 
   async function refresh() {
     const response = await fetch("/api/v1/status", { headers: { Accept: "application/json" } });
@@ -33,12 +35,20 @@ function App() {
       ...next.agents.map((name) => `agent:${name}`),
     ]);
     setSelection((current) => available.has(current) ? current : firstSelection(next));
+    const availableRepositories = next.repositories || [];
+    setRepository((current) => availableRepositories.includes(current) ? current : availableRepositories[0] || "");
   }
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("factory-theme", dark ? "dark" : "light");
   }, [dark]);
+
+  useEffect(() => {
+    const updateView = () => setView(window.location.hash === "#/analytics" ? "analytics" : "runs");
+    window.addEventListener("hashchange", updateView);
+    return () => window.removeEventListener("hashchange", updateView);
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -63,6 +73,8 @@ function App() {
     ...status.pipelines.map((name) => ({ value: `pipeline:${name}`, label: `Pipeline · ${name}` })),
     ...status.agents.map((name) => ({ value: `agent:${name}`, label: `Agent · ${name}` })),
   ], [status.agents, status.pipelines]);
+
+  const repositories = status.repositories;
 
   const counts = useMemo(() => status.jobs.reduce((result, job) => {
     result.all += 1;
@@ -120,13 +132,14 @@ function App() {
         <div className="flex h-10 items-center gap-2.5 px-2 text-sm font-semibold tracking-tight">
           <span className="grid size-7 place-items-center rounded-md border border-border bg-surface text-primary shadow-xs"><Workflow className="size-4" /></span>
           <span>Factory</span>
-          <span className="ml-auto hidden font-mono text-[10px] font-normal text-muted-foreground md:inline">v0.1</span>
+          <span className="ml-auto hidden font-mono text-xs font-normal text-muted-foreground md:inline">v0.1</span>
         </div>
         <nav className="ml-4 flex flex-1 md:ml-0 md:mt-6 md:block" aria-label="Primary">
-          <div className="nav-item nav-item-active"><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></div>
+          <a href="#/runs" aria-current={view === "runs" ? "page" : undefined} className={cn("nav-item", view === "runs" && "nav-item-active")}><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
+          <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
-          <div className="nav-item h-auto py-2"><Server className="size-4" /><span><span className="block">{status.workers.length} registered</span><span className="mt-0.5 block text-[10px]">{latestWorkerSeen ? `Last poll ${relativeTime(latestWorkerSeen)}` : "No workers"}</span></span></div>
+          <div className="nav-item h-auto py-2"><Server className="size-4" /><span><span className="block">{status.workers.length} registered</span><span className="mt-0.5 block text-xs">{latestWorkerSeen ? `Last poll ${relativeTime(latestWorkerSeen)}` : "No workers"}</span></span></div>
           <button onClick={() => setDark((value) => !value)} className="nav-item w-full" aria-label={`Switch to ${dark ? "light" : "dark"} theme`}>
             {dark ? <Moon className="size-4" /> : <Sun className="size-4" />}<span>{dark ? "Dark" : "Light"} theme</span>
           </button>
@@ -134,16 +147,16 @@ function App() {
       </aside>
 
       <main className="min-w-0 flex-1">
-        <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "analytics" ? <Analytics jobs={status.jobs} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <header className="flex items-start justify-between gap-6">
-            <div><h1 className="text-xl font-semibold tracking-tight">Runs</h1><p className="mt-1 text-sm text-muted-foreground">Monitor work dispatched to your workers.</p></div>
+            <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setDark((value) => !value)} aria-label="Toggle theme">{dark ? <Moon className="size-4" /> : <Sun className="size-4" />}</Button>
               <Button onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
             </div>
           </header>
 
-          {composerOpen && <RunComposer choices={choices} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
@@ -157,32 +170,32 @@ function App() {
             </div>
 
             <Card className="overflow-hidden">
-              <div className="hidden grid-cols-[7.5rem_minmax(16rem,1fr)_10rem_10rem_9rem_7rem] gap-4 border-b border-border bg-muted/35 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground lg:grid">
+              <div className="hidden grid-cols-[7.5rem_minmax(16rem,1fr)_10rem_10rem_9rem_7rem] gap-4 border-b border-border bg-muted/35 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground lg:grid">
                 <span>State</span><span>Prompt</span><span>Run with</span><span>Worker</span><span>Submitted</span><span />
               </div>
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} open={expanded.has(job.id)} toggle={() => toggleJob(job.id)} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>
           </section>
 
-        </div>
+        </div>}
       </main>
     </div>
   );
 }
 
-function RunComposer({ choices, selection, setSelection, repository, setRepository, prompt, setPrompt, submitting, submit, close }) {
+function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, submitting, submit, close }) {
   return <Card className="overflow-hidden border-primary/25">
     <div className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-5">
-      <div><h2 className="text-sm font-semibold">New run</h2><p className="mt-0.5 text-xs text-muted-foreground">Send one prompt through an agent or pipeline.</p></div>
+      <h2 className="text-sm font-semibold">New run</h2>
       <Button variant="ghost" size="icon" onClick={close} aria-label="Close new run form"><X className="size-4" /></Button>
     </div>
     <form onSubmit={submit} className="space-y-4 p-4 sm:p-5">
       <div className="grid gap-4 sm:grid-cols-2">
         <label><span className="field-label">Run with</span><select className="field-control" value={selection} onChange={(event) => setSelection(event.target.value)} required>{choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
-        <label><span className="field-label">Repository key</span><input className="field-control font-mono" value={repository} onChange={(event) => setRepository(event.target.value)} required /></label>
+        <label><span className="field-label">Repository</span><select className="field-control font-mono" value={repository} onChange={(event) => setRepository(event.target.value)} disabled={!repositories.length} required>{repositories.length ? repositories.map((name) => <option key={name} value={name}>{name}</option>) : <option value="">No registered repositories</option>}</select></label>
       </div>
       <label><span className="field-label">Prompt</span><textarea className="field-control min-h-28 resize-y" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Work on ticket https://github.com/acme/repo/issues/123" required /></label>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection || !repository}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
     </form>
   </Card>;
 }
@@ -193,7 +206,7 @@ function RunRow({ job, open, toggle }) {
   return <article className="border-b border-border last:border-b-0">
     <button onClick={toggle} aria-expanded={open} aria-controls={detailsId} className="grid w-full gap-3 px-4 py-3.5 text-left transition hover:bg-muted/35 lg:grid-cols-[7.5rem_minmax(16rem,1fr)_10rem_10rem_9rem_7rem] lg:items-center lg:gap-4">
       <div className="flex items-center justify-between lg:block"><State value={job.state} /><span className="text-xs text-muted-foreground lg:hidden">{relativeTime(job.created_at)}</span></div>
-      <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium leading-5 lg:truncate">{job.prompt}</p><p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{shortId(job.id)} · {job.repository}</p></div>
+      <div className="min-w-0"><p className="line-clamp-2 text-sm font-medium leading-5 lg:truncate">{job.prompt}</p><p className="mt-1 truncate font-mono text-xs text-muted-foreground">{shortId(job.id)} · {job.repository}</p></div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground"><SelectionIcon kind={job.selection_kind} /><span className="truncate text-foreground">{job.selection_name}</span><span className="capitalize">{job.selection_kind}</span></div>
       <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"><Server className="size-3.5 shrink-0" /><span className="truncate">{current?.worker_name || "Unassigned"}</span></div>
       <time className="hidden text-xs text-muted-foreground lg:block" dateTime={job.created_at}>{relativeTime(job.created_at)}</time>
@@ -205,8 +218,8 @@ function RunRow({ job, open, toggle }) {
 
 function RunSteps({ id, job }) {
   return <div id={id} className="border-t border-border bg-muted/20 px-4 py-4 lg:pl-[9rem]"><div className="grid gap-2 xl:grid-cols-3">{job.runs.map((run, index) => <div key={run.id} className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-surface p-3">
-    <span className="grid size-6 shrink-0 place-items-center rounded-full border border-border font-mono text-[10px] text-muted-foreground">{index + 1}</span>
-    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-[11px] text-muted-foreground">{run.worker_name || run.executor}{duration(run) ? ` · ${duration(run)}` : ""}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
+    <span className="grid size-6 shrink-0 place-items-center rounded-full border border-border font-mono text-xs text-muted-foreground">{index + 1}</span>
+    <div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium capitalize">{run.agent}</p><State value={run.state} /></div><p className="mt-1 truncate text-xs text-muted-foreground">{run.worker_name || run.executor}{duration(run) ? ` · ${duration(run)}` : ""}</p>{run.error && <p className="mt-2 text-xs text-danger">{run.error}</p>}</div>
   </div>)}</div></div>;
 }
 

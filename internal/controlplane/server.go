@@ -25,6 +25,8 @@ import (
 // below this limit, including per-event and string-escaping overhead.
 const maxCompletionBytes = 96 << 20
 
+const workerAvailabilityWindow = 10 * time.Second
+
 //go:embed web/dist/* web/dist/assets/*
 var webAssets embed.FS
 
@@ -38,9 +40,10 @@ type Server struct {
 
 type statusResponse struct {
 	Snapshot
-	Agents    []string `json:"agents"`
-	Pipelines []string `json:"pipelines"`
-	CSRFToken string   `json:"csrf_token"`
+	Agents       []string `json:"agents"`
+	Pipelines    []string `json:"pipelines"`
+	Repositories []string `json:"repositories"`
+	CSRFToken    string   `json:"csrf_token"`
 }
 
 type submitRequest struct {
@@ -124,11 +127,17 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	repositories, err := s.store.AvailableRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, statusResponse{
-		Snapshot:  snapshot,
-		Agents:    mapKeys(definition.Agents),
-		Pipelines: mapKeys(definition.Pipelines),
-		CSRFToken: s.csrfToken,
+		Snapshot:     snapshot,
+		Agents:       mapKeys(definition.Agents),
+		Pipelines:    mapKeys(definition.Pipelines),
+		Repositories: repositories,
+		CSRFToken:    s.csrfToken,
 	})
 }
 

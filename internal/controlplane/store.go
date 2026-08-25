@@ -52,9 +52,10 @@ type Run struct {
 }
 
 type Worker struct {
-	InstanceID string    `json:"instance_id"`
-	Name       string    `json:"name"`
-	LastSeenAt time.Time `json:"last_seen_at"`
+	InstanceID   string    `json:"instance_id"`
+	Name         string    `json:"name"`
+	LastSeenAt   time.Time `json:"last_seen_at"`
+	Repositories []string  `json:"repositories"`
 }
 
 type Snapshot struct {
@@ -127,6 +128,11 @@ CREATE TABLE IF NOT EXISTS workers (
   instance_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_repositories (
+  worker_instance TEXT NOT NULL REFERENCES workers(instance_id) ON DELETE CASCADE,
+  repository TEXT NOT NULL,
+  PRIMARY KEY(worker_instance, repository)
 );`
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("initialize database: %w", err)
@@ -179,6 +185,14 @@ func (s *Store) Poll(ctx context.Context, request protocol.PollRequest) (*protoc
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
 		return nil, fmt.Errorf("update worker: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM worker_repositories WHERE worker_instance=?`, request.InstanceID); err != nil {
+		return nil, fmt.Errorf("clear worker repositories: %w", err)
+	}
+	for repository := range stringSet(request.Repositories) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_repositories(worker_instance,repository) VALUES(?,?)`, request.InstanceID, repository); err != nil {
+			return nil, fmt.Errorf("store worker repository: %w", err)
+		}
 	}
 	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,agent,agent_hash,executor,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
 	if err == nil {
@@ -306,6 +320,28 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 	return Snapshot{Jobs: jobs, Workers: workers}, nil
 }
 
+func (s *Store) AvailableRepositories(ctx context.Context, seenAfter time.Time) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT wr.repository
+FROM worker_repositories wr
+JOIN workers w ON w.instance_id=wr.worker_instance
+WHERE julianday(w.last_seen_at) >= julianday(?)
+   OR EXISTS (SELECT 1 FROM runs r WHERE r.worker_instance=w.instance_id AND r.state='running')
+ORDER BY wr.repository`, seenAfter.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	repositories := []string{}
+	for rows.Next() {
+		var repository string
+		if err := rows.Scan(&repository); err != nil {
+			return nil, err
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, rows.Err()
+}
+
 func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) {
 	var output RunOutput
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(result,''),COALESCE(events,'') FROM runs WHERE id=?`, runID).Scan(&output.Result, &output.Events)
@@ -368,7 +404,6 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	workers := []Worker{}
 	for rows.Next() {
 		var worker Worker
@@ -379,7 +414,36 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 		worker.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeen)
 		workers = append(workers, worker)
 	}
-	return workers, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range workers {
+		workers[index].Repositories, err = s.listWorkerRepositories(ctx, workers[index].InstanceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return workers, nil
+}
+
+func (s *Store) listWorkerRepositories(ctx context.Context, instanceID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repository FROM worker_repositories WHERE worker_instance=? ORDER BY repository`, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	repositories := []string{}
+	for rows.Next() {
+		var repository string
+		if err := rows.Scan(&repository); err != nil {
+			return nil, err
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, rows.Err()
 }
 
 func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
