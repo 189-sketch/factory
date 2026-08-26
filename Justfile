@@ -35,17 +35,18 @@ local: build
     ./bin/machinist worker start &
     worker_pid=$!
 
-    while kill -0 "$control_plane_pid" 2>/dev/null && kill -0 "$worker_pid" 2>/dev/null; do
+    status=0
+    while true; do
+        if ! kill -0 "$control_plane_pid" 2>/dev/null; then
+            wait "$control_plane_pid" || status=$?
+            break
+        fi
+        if ! kill -0 "$worker_pid" 2>/dev/null; then
+            wait "$worker_pid" || status=$?
+            break
+        fi
         sleep 1
     done
-
-    status=0
-    if ! kill -0 "$control_plane_pid" 2>/dev/null; then
-        wait "$control_plane_pid" || status=$?
-    fi
-    if ! kill -0 "$worker_pid" 2>/dev/null; then
-        wait "$worker_pid" || status=$?
-    fi
     exit "$status"
 
 test:
