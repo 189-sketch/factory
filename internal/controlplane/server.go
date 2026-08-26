@@ -129,7 +129,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", s.status)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
-	mux.HandleFunc("POST /api/v1/jobs", s.submit)
+	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
@@ -180,9 +180,9 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	repositories, err := s.store.AvailableRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
-	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
+	repositories, repositoryErr := s.store.AvailableRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
+	if repositoryErr != nil {
+		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
 	}
 	writeJSON(response, http.StatusOK, statusResponse{
@@ -195,10 +195,6 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
-	if !s.validBrowserRequest(request) {
-		writeError(response, http.StatusForbidden, errors.New("invalid submission origin or CSRF token"))
-		return
-	}
 	request.Body = http.MaxBytesReader(response, request.Body, 1<<20)
 	var input submitRequest
 	if err := decodeJSON(request, &input); err != nil {
@@ -207,6 +203,15 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 	}
 	if strings.TrimSpace(input.Repository) == "" {
 		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
+		return
+	}
+	repositories, repositoryErr := s.store.AvailableRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
+	if repositoryErr != nil {
+		writeError(response, http.StatusInternalServerError, repositoryErr)
+		return
+	}
+	if !containsString(repositories, input.Repository) {
+		writeError(response, http.StatusBadRequest, fmt.Errorf("repository %q is not available from a managed worker", input.Repository))
 		return
 	}
 	input.Model = strings.TrimSpace(input.Model)
@@ -332,14 +337,37 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 
 func (s *Server) authorizeWorker(next http.HandlerFunc) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
-		provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
-		if provided == request.Header.Get("Authorization") || subtle.ConstantTimeCompare([]byte(provided), []byte(s.workerToken)) != 1 {
-			response.Header().Set("WWW-Authenticate", "Bearer")
-			writeError(response, http.StatusUnauthorized, errors.New("invalid worker token"))
+		if !s.validBearerRequest(request) {
+			writeUnauthorized(response)
 			return
 		}
 		next(response, request)
 	}
+}
+
+func (s *Server) authorizeSubmission(next http.HandlerFunc) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" {
+			if !s.validBearerRequest(request) {
+				writeUnauthorized(response)
+				return
+			}
+		} else if !s.validBrowserRequest(request) {
+			writeError(response, http.StatusForbidden, errors.New("invalid submission origin or CSRF token"))
+			return
+		}
+		next(response, request)
+	}
+}
+
+func (s *Server) validBearerRequest(request *http.Request) bool {
+	provided := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+	return provided != request.Header.Get("Authorization") && subtle.ConstantTimeCompare([]byte(provided), []byte(s.workerToken)) == 1
+}
+
+func writeUnauthorized(response http.ResponseWriter) {
+	response.Header().Set("WWW-Authenticate", "Bearer")
+	writeError(response, http.StatusUnauthorized, errors.New("invalid worker token"))
 }
 
 func (s *Server) validBrowserRequest(request *http.Request) bool {
@@ -352,6 +380,15 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 	}
 	hostname := origin.Hostname()
 	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func validateLoopbackListen(listen string) error {

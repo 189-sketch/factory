@@ -70,6 +70,64 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	}
 }
 
+func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+	}, map[string]string{"Authorization": "Bearer secret"})
+	if workerPoll.StatusCode != http.StatusOK {
+		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
+	}
+	workerPoll.Body.Close()
+
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "queue from terminal", "repository": "factory", "agent": "plan",
+	}, map[string]string{"Authorization": "Bearer secret"})
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("bearer submission status = %d", created.StatusCode)
+	}
+	created.Body.Close()
+
+	invalid := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "must not queue", "repository": "factory", "agent": "plan",
+	}, map[string]string{"Authorization": "Bearer invalid"})
+	if invalid.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer status = %d", invalid.StatusCode)
+	}
+	invalid.Body.Close()
+
+	status := getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "queue from terminal" {
+		t.Fatalf("jobs after bearer submissions = %#v", status.Jobs)
+	}
+}
+
+func TestServerRejectsUnavailableRepositoryBeforePersistence(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	status := getStatus(t, webServer.URL)
+	headers := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
+	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "unknown repository", "repository": "missing", "agent": "plan",
+	}, headers)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown repository status = %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || !strings.Contains(string(body), "not available") {
+		t.Fatalf("unknown repository body = %q, error = %v", body, err)
+	}
+
+	status = getStatus(t, webServer.URL)
+	if len(status.Jobs) != 0 {
+		t.Fatalf("unknown repository was persisted: %#v", status.Jobs)
+	}
+}
+
 func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	_, webServer := newTestHTTPServer(t)
 	defer webServer.Close()

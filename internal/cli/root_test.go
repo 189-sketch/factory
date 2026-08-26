@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -350,6 +353,124 @@ func TestRunPipelineStopsAfterFailedAgent(t *testing.T) {
 	}
 }
 
+func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
+	var gotAuthorization string
+	var gotRequest submitJobRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/status":
+			writeTestJSON(response, map[string]any{
+				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"factory"},
+			})
+		case "/api/v1/jobs":
+			gotAuthorization = request.Header.Get("Authorization")
+			if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeTestJSON(response, map[string]string{"id": "job_admitted"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit",
+		"--agent=plan",
+		"--prompt=fix issue 13",
+		"--repo=factory",
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || stdout.String() != "job_admitted\n" {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if gotAuthorization != "Bearer secret" {
+		t.Fatalf("authorization = %q", gotAuthorization)
+	}
+	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "factory", Agent: "plan"}) {
+		t.Fatalf("submission = %#v", gotRequest)
+	}
+}
+
+func TestSubmitQueuesPipeline(t *testing.T) {
+	var gotRequest submitJobRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/status":
+			writeTestJSON(response, map[string]any{
+				"agents": []string{}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
+			})
+		case "/api/v1/jobs":
+			if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeTestJSON(response, map[string]string{"id": "job_pipeline"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit",
+		"--pipeline=quality",
+		"--prompt=check the repository",
+		"--repo=factory",
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || stdout.String() != "job_pipeline\n" {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+	if gotRequest != (submitJobRequest{Prompt: "check the repository", Repository: "factory", Pipeline: "quality"}) {
+		t.Fatalf("submission = %#v", gotRequest)
+	}
+}
+
+func TestSubmitRejectsUnknownValuesBeforeCreatingJob(t *testing.T) {
+	postCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/v1/status" {
+			writeTestJSON(response, map[string]any{
+				"agents": []string{"plan"}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
+			})
+			return
+		}
+		if request.URL.Path == "/api/v1/jobs" {
+			postCount++
+		}
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "agent", args: []string{"--agent=missing", "--prompt=work", "--repo=factory"}, want: `agent "missing" is not defined`},
+		{name: "pipeline", args: []string{"--pipeline=missing", "--prompt=work", "--repo=factory"}, want: `pipeline "missing" is not defined`},
+		{name: "repository", args: []string{"--agent=plan", "--prompt=work", "--repo=missing"}, want: `repository "missing" is not available`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			args := append(test.args, "--config="+workerConfig)
+			if exitCode := Execute(t.Context(), append([]string{"submit"}, args...), strings.NewReader(""), &bytes.Buffer{}, &stderr, "test"); exitCode == 0 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+			}
+		})
+	}
+	if postCount != 0 {
+		t.Fatalf("invalid submissions sent %d POST requests", postCount)
+	}
+}
+
 func TestRunRequiresExactlyOneSelection(t *testing.T) {
 	for _, args := range [][]string{
 		{"run", "--prompt=issue 42"},
@@ -600,6 +721,25 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		t.Fatal(err)
 	}
 	return worker
+}
+
+func writeSubmitWorkerConfig(t *testing.T, endpoint, token string) string {
+	t.Helper()
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "worker.toml")
+	body := "[control_plane]\nurl = " + strconv.Quote(endpoint) + "\ntoken_file = \"token\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeTestJSON(response http.ResponseWriter, value any) {
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(value)
 }
 
 func newCLIRepository(t *testing.T) string {
