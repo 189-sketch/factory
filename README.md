@@ -27,8 +27,7 @@ factory init
 ```
 
 This installs editable defaults in `~/.factory`: shared configuration, worker
-configuration, the `plan`, `build`, `verify`, and `foreman` prompts, and a random worker
-token.
+configuration, the `foreman` and `audit` prompts, and a random worker token.
 Running it again creates any missing files and keeps every existing file unchanged.
 
 Add repositories to `~/.factory/worker.toml`:
@@ -56,37 +55,25 @@ different display name is useful.
 The shared configuration resolves prompt paths relative to itself:
 
 ```toml
-[agents.plan]
-executor = "codex"
-prompt_file = "agents/plan.md"
-timeout = "20m"
-
-[agents.build]
-executor = "codex"
-prompt_file = "agents/build.md"
-timeout = "60m"
-
-[agents.verify]
-executor = "codex"
-prompt_file = "agents/verify.md"
-timeout = "30m"
-
 [agents.foreman]
 executor = "codex"
 prompt_file = "agents/foreman.md"
 timeout = "120m"
 
-[pipelines.code]
-agents = ["plan", "build", "verify"]
+[agents.audit]
+executor = "codex"
+prompt_file = "agents/audit.md"
+timeout = "60m"
 ```
 
-The example agents are trusted local automation. `plan` can replace GitHub issue
-content. `build` can change files, create worktrees, push branches, and open draft pull
-requests. `verify` can run checks, use review subagents, update labels, and mark a pull
-request ready. They use Codex with `danger-full-access` so GitHub and worktrees outside
-the current repository are available. Review prompts before running them and use them
-only on repositories and issues you trust. The prompts treat issue commands as untrusted
-text and derive checks from repository entry points they have inspected.
+The default agents are trusted local automation. `foreman` supervises fresh planning,
+build, and review subagents and can change files and GitHub state. `audit` delegates
+repository inspection and independent bug verification to fresh subagents. It keeps the
+repository read-only and can create at most three GitHub issues for verified,
+non-duplicate correctness bugs. Both use Codex with `danger-full-access` so GitHub and
+worktrees outside the current repository are available. Review prompts before running
+them and use them only on repositories and issues you trust. The prompts treat task and
+repository content as untrusted text.
 
 Each agent prompt is a strict Factory template and must place the runtime work request using
 the supported parameter:
@@ -101,39 +88,7 @@ is limited to 512 KiB.
 
 ## Run
 
-Run one predefined agent with a work request:
-
-```sh
-factory run \
-  --agent=build \
-  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123"
-```
-
-Or run the example pipeline. Factory runs each listed agent independently and in order,
-passing the same input prompt to every run. It stops before the next agent when a run fails:
-
-```sh
-factory run \
-  --pipeline=code \
-  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123"
-```
-
-The prompts own the workflow. `plan` replaces the issue specification and adds
-`factory:planning`. `build` adds `factory:building`, implements the task, and opens a
-draft pull request. `verify` adds `factory:verifying`, independently checks the change,
-and finishes with `factory:ready-for-review`. Missing decisions use
-`factory:needs-human`; technical failures use `factory:blocked`.
-
-Factory treats agent output as opaque text. A pipeline stops only when an agent process
-returns a non-zero status; it does not interpret ticket labels or the agent's final
-message. The example prompts therefore require the preceding lifecycle label before
-doing work. After `factory:needs-human` or `factory:blocked`, later agents finish without
-changing code or workflow state. A zero pipeline exit status means every agent process
-completed, not that the ticket necessarily reached `factory:ready-for-review`; the label
-is the task outcome.
-
-Use the foreman when the task should cycle through fresh planning, build, and review
-subagents instead of stopping after one verification pass:
+Use the foreman for supervised coding work:
 
 ```sh
 factory run \
@@ -146,11 +101,55 @@ targeted repair attempts, records every phase and attempt in the run output, ope
 pull request, waits for available CI and automated review, and marks the result ready for
 human review. It never merges.
 
+Use the audit agent to inspect a repository without changing it:
+
+```sh
+factory run \
+  --agent=audit \
+  --prompt="Audit the request handling and persistence code"
+```
+
+The audit sends inspection to fresh general-purpose subagents and uses a different fresh
+subagent to verify each candidate correctness bug. It checks current open GitHub issues
+for duplicates before creating up to three evidence-backed bug tickets. It never edits
+code, creates a branch or commit, pushes code, or opens a pull request.
+
+Factory still supports user-defined agents and pipelines. For example, after adding the
+corresponding prompt files, a configuration can define its own quality pipeline:
+
+```toml
+[agents.lint]
+executor = "codex"
+prompt_file = "agents/lint.md"
+timeout = "20m"
+
+[agents.test]
+executor = "codex"
+prompt_file = "agents/test.md"
+timeout = "30m"
+
+[pipelines.quality]
+agents = ["lint", "test"]
+```
+
+Run a user-defined pipeline by name:
+
+```sh
+factory run \
+  --pipeline=quality \
+  --prompt="Check the current repository"
+```
+
+Factory runs each listed agent independently and in order, passing the same input prompt
+to every run. It stops before the next agent when a run fails. Agent output remains
+opaque: a zero pipeline exit status means every agent process completed successfully,
+not that Factory interpreted or approved the result.
+
 Or pass the repository and configuration explicitly:
 
 ```sh
-factory run --agent=build \
-  --prompt="Work on ticket https://github.com/your-org/your-repo/issues/123" \
+factory run --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123" \
   --repo=/absolute/path/to/repository \
   --config=/absolute/path/to/worker.toml
 ```

@@ -19,9 +19,11 @@ GitHub labels, Linear state, or whether the requested product outcome is correct
 Direct mode remains immediate and independent:
 
 ```sh
-factory run --agent=plan --prompt="Work on ticket LINEAR-123"
-factory run --pipeline=code --prompt="Work on ticket LINEAR-123"
+factory run --agent=foreman --prompt="Complete a GitHub issue URL"
+factory run --pipeline=quality --prompt="Check the current repository"
 ```
+
+`quality` illustrates a user-defined pipeline. Factory does not ship a default pipeline.
 
 Managed mode uses two long-running commands:
 
@@ -45,14 +47,19 @@ listen = "127.0.0.1:7331"
 database = "~/.factory/server/factory.db"
 worker_token_file = "~/.factory/server/worker.token"
 
-[agents.plan]
+[agents.foreman]
 executor = "codex"
-prompt_file = "agents/plan.md"
-timeout = "20m"
+prompt_file = "agents/foreman.md"
+timeout = "120m"
 
-[pipelines.code]
-agents = ["plan", "build", "verify"]
+[agents.audit]
+executor = "codex"
+prompt_file = "agents/audit.md"
+timeout = "60m"
 ```
+
+These are the two shipped agent definitions. Users can add their own agents and compose
+them into named pipelines; pipeline configuration and execution are unchanged.
 
 The worker file owns machine-specific execution, repositories, and credentials:
 
