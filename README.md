@@ -41,7 +41,7 @@ ones it can prove.
 
 ## Quick start
 
-You need macOS or Linux, Go 1.26+, Git, an authenticated
+You need macOS or Linux, Go 1.26.6 or newer, Git, an authenticated
 [GitHub CLI](https://cli.github.com/), and an authenticated
 [Codex CLI](https://developers.openai.com/codex/cli/). The default foreman uses
 Codex and its native subagents.
@@ -136,8 +136,14 @@ worker-namespaced direct path for a single agent.
 - [Local control plane](docs/control-plane.md): server, workers, security, and
   failure recovery
 - [Development](docs/development.md): build, test, and project layout
+- [Architecture](ARCHITECTURE.md): source of truth, dependency direction,
+  execution flows, trust boundaries, and persistence
 - [Control-plane design](docs/control-plane/design.md): the detailed V1 design
   and invariants
+- [Warp Factories product review](docs/product-direction/warp-factories-review.md):
+  lessons, readiness gates, and recommended product order
+- [Runner-managed skills](docs/worker-skills/design.md): why coding-agent skills
+  stay native to the configured runner
 
 ## Project status
 

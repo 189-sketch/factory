@@ -7,7 +7,7 @@ run.
 
 Factory runs on macOS and Linux. You need:
 
-- Go 1.26 or newer
+- Go 1.26.6 or newer
 - Git
 - the executable used by your agent definition
 - an authenticated GitHub CLI for the shipped `foreman` and `audit` agents
