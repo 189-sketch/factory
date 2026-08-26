@@ -179,6 +179,22 @@ Recording stops after 64 MiB of process output or
 when the encoded event file reaches 32 MiB, and adds a truncation event while live output
 and the agent run continue.
 
+`factory run` is the local execution path. It starts the configured executor in the
+repository named by `--repo` as a local path, writes local events, and does not contact a
+control plane. To queue work for a managed worker instead, use `factory submit` with the
+repository's configured control-plane name:
+
+```sh
+factory submit \
+  --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123" \
+  --repo=my-project
+```
+
+Submit validates the repository and selected agent or pipeline with the control plane,
+queues the job through its API, and prints the admitted job ID. `factory worker run` remains
+the independent local worker execution path.
+
 Ctrl-C cancels the complete agent process group. A configured timeout does the
 same. Factory returns the agent's exit status, `1` for a Worker runtime failure,
 `124` for timeout, `130` for cancellation, and `2` for invalid commands or

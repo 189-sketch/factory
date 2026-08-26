@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/owainlewis/factory-v2/internal/config"
 	"github.com/owainlewis/factory-v2/internal/protocol"
@@ -67,6 +68,146 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid selection status = %d", response.Code)
+	}
+}
+
+func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+	}, map[string]string{"Authorization": "Bearer secret"})
+	if workerPoll.StatusCode != http.StatusOK {
+		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
+	}
+	workerPoll.Body.Close()
+
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "queue from terminal", "repository": "factory", "agent": "plan",
+	}, map[string]string{"Authorization": "Bearer secret"})
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("bearer submission status = %d", created.StatusCode)
+	}
+	created.Body.Close()
+
+	invalid := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "must not queue", "repository": "factory", "agent": "plan",
+	}, map[string]string{"Authorization": "Bearer invalid"})
+	if invalid.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer status = %d", invalid.StatusCode)
+	}
+	invalid.Body.Close()
+
+	status := getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "queue from terminal" {
+		t.Fatalf("jobs after bearer submissions = %#v", status.Jobs)
+	}
+}
+
+func TestServerRejectsUnavailableRepositoryBeforePersistence(t *testing.T) {
+	_, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	status := getStatus(t, webServer.URL)
+	headers := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
+	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "unknown repository", "repository": "missing", "agent": "plan",
+	}, headers)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown repository status = %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || !strings.Contains(string(body), "not defined in the control plane") {
+		t.Fatalf("unknown repository body = %q, error = %v", body, err)
+	}
+
+	status = getStatus(t, webServer.URL)
+	if len(status.Jobs) != 0 {
+		t.Fatalf("unknown repository was persisted: %#v", status.Jobs)
+	}
+}
+
+func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	auth := map[string]string{"Authorization": "Bearer secret"}
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+	}, auth)
+	if workerPoll.StatusCode != http.StatusOK {
+		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
+	}
+	workerPoll.Body.Close()
+	if _, err := server.store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id=?`, time.Now().Add(-workerAvailabilityWindow-time.Second).UTC().Format(time.RFC3339Nano), "worker-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "queue while worker is away", "repository": "factory", "agent": "plan",
+	}, auth)
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("submission status = %d, body = %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+
+	catalogHTTPResponse, err := http.Get(webServer.URL + "/api/v1/catalog")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalogHTTPResponse.Body.Close()
+	var catalog catalogResponse
+	if err := json.NewDecoder(catalogHTTPResponse.Body).Decode(&catalog); err != nil {
+		t.Fatal(err)
+	}
+	if catalogHTTPResponse.StatusCode != http.StatusOK || len(catalog.Repositories) != 1 || catalog.Repositories[0] != "factory" {
+		t.Fatalf("catalog = %#v, status = %d", catalog, catalogHTTPResponse.StatusCode)
+	}
+}
+
+func TestServerQueuesKnownRepositoryWithUnrelatedLiveWorker(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	auth := map[string]string{"Authorization": "Bearer secret"}
+	for _, instance := range []string{"worker-old-a", "worker-old-b"} {
+		workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+			"instance_id": instance, "name": instance, "executors": []string{"test"}, "repositories": []string{"removed"},
+		}, auth)
+		if workerPoll.StatusCode != http.StatusOK {
+			t.Fatalf("historical worker poll status = %d", workerPoll.StatusCode)
+		}
+		workerPoll.Body.Close()
+		if _, err := server.store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id=?`, time.Now().Add(-workerAvailabilityWindow-time.Second).UTC().Format(time.RFC3339Nano), instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	currentPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+		"instance_id": "worker-current", "name": "current-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+	}, auth)
+	if currentPoll.StatusCode != http.StatusOK {
+		t.Fatalf("current worker poll status = %d", currentPoll.StatusCode)
+	}
+	currentPoll.Body.Close()
+
+	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "queue while advertising workers are away", "repository": "removed", "agent": "plan",
+	}, auth)
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("submission status = %d, body = %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+
+	status := getStatus(t, webServer.URL)
+	if len(status.Jobs) != 1 || status.Jobs[0].Repository != "removed" {
+		t.Fatalf("jobs = %#v", status.Jobs)
 	}
 }
 

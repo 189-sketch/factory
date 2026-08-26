@@ -1,10 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
 
 	"github.com/owainlewis/factory-v2/internal/config"
 	"github.com/owainlewis/factory-v2/internal/controlplane"
@@ -63,6 +70,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file")
 	root.AddCommand(newInitCommand(options))
 	root.AddCommand(newRunCommand(options, true))
+	root.AddCommand(newSubmitCommand(options))
 	root.AddCommand(newStartCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Factory Worker"}
@@ -79,6 +87,171 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 		},
 	})
 	return root
+}
+
+type submitCatalog struct {
+	Agents       []string `json:"agents"`
+	Pipelines    []string `json:"pipelines"`
+	Repositories []string `json:"repositories"`
+}
+
+type submitJobRequest struct {
+	Prompt     string `json:"prompt"`
+	Repository string `json:"repository"`
+	Agent      string `json:"agent,omitempty"`
+	Pipeline   string `json:"pipeline,omitempty"`
+	Model      string `json:"model,omitempty"`
+}
+
+type submitJobResponse struct {
+	ID string `json:"id"`
+}
+
+type submitHTTPError struct {
+	status int
+	body   string
+}
+
+func (err *submitHTTPError) Error() string {
+	if err.body == "" {
+		return fmt.Sprintf("control plane returned %s", http.StatusText(err.status))
+	}
+	return fmt.Sprintf("control plane returned %s: %s", http.StatusText(err.status), err.body)
+}
+
+func newSubmitCommand(options *commandOptions) *cobra.Command {
+	var agentName, pipelineName, prompt, model, repository string
+	submit := &cobra.Command{
+		Use:   "submit",
+		Short: "Queue work for a managed Factory Worker",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return submitSelection(command.Context(), options, agentName, pipelineName, prompt, model, repository)
+		},
+	}
+	submit.Flags().StringVar(&agentName, "agent", "", "agent name from the control plane")
+	submit.Flags().StringVar(&pipelineName, "pipeline", "", "pipeline name from the control plane")
+	submit.Flags().StringVar(&prompt, "prompt", "", "work request supplied to the agent prompt (required)")
+	submit.Flags().StringVar(&model, "model", "", "executor model or configured alias for this task")
+	submit.Flags().StringVar(&repository, "repo", "", "configured repository name (required)")
+	submit.MarkFlagsMutuallyExclusive("agent", "pipeline")
+	submit.MarkFlagsOneRequired("agent", "pipeline")
+	_ = submit.MarkFlagRequired("prompt")
+	_ = submit.MarkFlagRequired("repo")
+	return submit
+}
+
+func submitSelection(ctx context.Context, options *commandOptions, agentName, pipelineName, prompt, model, repository string) error {
+	worker, err := config.LoadWorker(options.configPath)
+	if err != nil {
+		return err
+	}
+	token, err := worker.WorkerToken()
+	if err != nil {
+		return err
+	}
+	endpoint, err := controlPlaneEndpoint(worker.ControlPlane.URL)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	catalog, err := getSubmitCatalog(ctx, client, endpoint, token)
+	if err != nil {
+		return err
+	}
+	if !contains(catalog.Repositories, repository) {
+		return fmt.Errorf("repository %q is not defined in the control plane; check the configured repository name and worker registration", repository)
+	}
+	if agentName != "" && !contains(catalog.Agents, agentName) {
+		return fmt.Errorf("agent %q is not defined in the control plane", agentName)
+	}
+	if pipelineName != "" && !contains(catalog.Pipelines, pipelineName) {
+		return fmt.Errorf("pipeline %q is not defined in the control plane", pipelineName)
+	}
+
+	body, err := json.Marshal(submitJobRequest{
+		Prompt:     prompt,
+		Repository: repository,
+		Agent:      agentName,
+		Pipeline:   pipelineName,
+		Model:      model,
+	})
+	if err != nil {
+		return fmt.Errorf("encode submission: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/api/v1/jobs", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create submission request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("submit job: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return &submitHTTPError{status: response.StatusCode, body: strings.TrimSpace(string(message))}
+	}
+	var result submitJobResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return fmt.Errorf("decode submission response: %w", err)
+	}
+	if strings.TrimSpace(result.ID) == "" {
+		return errors.New("control plane submission response did not include a job ID")
+	}
+	fmt.Fprintln(options.stdout, result.ID)
+	return nil
+}
+
+func getSubmitCatalog(ctx context.Context, client *http.Client, endpoint, token string) (submitCatalog, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/api/v1/catalog", nil)
+	if err != nil {
+		return submitCatalog{}, fmt.Errorf("create control plane catalog request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		return submitCatalog{}, fmt.Errorf("read control plane catalog: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
+		return submitCatalog{}, &submitHTTPError{status: response.StatusCode, body: strings.TrimSpace(string(message))}
+	}
+	var catalog submitCatalog
+	if err := json.NewDecoder(response.Body).Decode(&catalog); err != nil {
+		return submitCatalog{}, fmt.Errorf("decode control plane catalog: %w", err)
+	}
+	return catalog, nil
+}
+
+func controlPlaneEndpoint(raw string) (string, error) {
+	endpoint, err := url.Parse(raw)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+		return "", fmt.Errorf("invalid control_plane.url %q", raw)
+	}
+	if endpoint.Scheme != "http" && endpoint.Scheme != "https" {
+		return "", errors.New("control_plane.url must use http or https")
+	}
+	if endpoint.Scheme == "http" && !loopbackHost(endpoint.Hostname()) {
+		return "", errors.New("control_plane.url must use https for a non-loopback host")
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+func loopbackHost(host string) bool {
+	return strings.EqualFold(host, "localhost") || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func newStartCommand(options *commandOptions) *cobra.Command {
