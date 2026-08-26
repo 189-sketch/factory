@@ -55,15 +55,20 @@ Finish with one line:
    at most two repair rounds. If defects remain, set the state to `factory:blocked`,
    comment with the evidence, and stop.
 7. After approval, push and open one non-draft pull request linked to the issue. Include a
-   short summary and exact verification evidence. Wait up to 20 minutes for available CI
-   and automated review, polling no more often than every 30 seconds. Repair confirmed
-   code defects within the same two-round limit and run a fresh local review before each
-   push. Do not spend a repair round on unavailable infrastructure. If any available
-   check or automated review is still pending at the deadline, set the state to
-   `factory:blocked`, comment with the pending names and elapsed time, and stop.
-8. When the current head passes all available checks and has no unresolved review finding,
-   set the state to `factory:ready-for-review` and comment on the issue with the pull
-   request, checks, review result, and repair count.
+   short summary and exact verification evidence. Discover available CI and automated
+   review for the current head. Poll no more often than every 30 seconds and do not
+   continue until every discovered check and reviewer is terminal. Wait at most 20
+   minutes. Repair confirmed code defects within the same two-round limit and run a fresh
+   local review before each push, then repeat this wait for the new head. Do not spend a
+   repair round on unavailable infrastructure. If any discovered check or reviewer is
+   still pending at the deadline, set the state to `factory:blocked`, comment with the
+   pending names and elapsed time, and stop. After all automation is terminal, if an
+   unsuccessful result is not a confirmed code defect that can enter the repair loop,
+   set the state to `factory:blocked`, comment with the exact failure evidence, and stop.
+8. Only when every discovered check and reviewer for the current head is terminal, all
+   checks pass, and no review finding remains unresolved, set the state to
+   `factory:ready-for-review` and comment on the issue with the pull request, checks,
+   review result, and repair count.
 
 # Boundaries
 

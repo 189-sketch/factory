@@ -20,5 +20,12 @@ under `~/.factory/agents/`, and register the target checkout in
 path = "/absolute/path/to/my-project"
 ```
 
-Restart `factory start` and `factory worker start`, then submit with
-`factory submit --repo=my-project`.
+Restart `factory start` and `factory worker start`, then submit a configured workflow. For
+example:
+
+```sh
+factory submit \
+  --agent=issue-to-pr \
+  --repo=my-project \
+  --prompt="Complete https://github.com/owner/repository/issues/123"
+```
