@@ -56,11 +56,15 @@ Finish with one line:
    commit, push, or change GitHub state.
 6. If review finds a valid defect, give its exact finding to a repair subagent in the same
    worktree, require a focused commit and affected checks, then use a new reviewer. Allow
-   at most two repair rounds. If defects remain, set the state to `factory:blocked`,
-   comment with the evidence, and stop.
-7. After approval, push and open one non-draft pull request linked to the issue. Include a
-   short summary and exact verification evidence. From the trusted default branch,
-   inventory expected CI from workflow files and branch protection, plus configured
+   at most two repair rounds. Repair subagents must not push. If defects remain, set the
+   state to `factory:blocked`, comment with the evidence, and stop.
+7. Only the foreman may push. Before every push, verify that
+   `refs/heads/<branch>` equals the exact SHA approved by the latest local reviewer. If it
+   differs, do not push; obtain a fresh local review of the new HEAD first. Push the
+   immutable `<approved-sha>:refs/heads/<branch>` refspec, never the mutable branch name.
+   Then open one non-draft pull request linked to the issue. Include a short summary and
+   exact verification evidence. From the trusted default branch, inventory expected CI
+   from workflow files and branch protection, plus configured
    automated reviewers visible in repository or pull request settings. After opening the
    pull request or pushing a repair, wait for automation to register. Treat discovery as
    stable only after the same set appears in two polls at least 30 seconds apart. Do not
