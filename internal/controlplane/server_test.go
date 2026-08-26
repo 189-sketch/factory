@@ -169,7 +169,7 @@ func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
 	}
 }
 
-func TestServerRejectsRepositoryRemovedFromCurrentWorkers(t *testing.T) {
+func TestServerQueuesKnownRepositoryWithUnrelatedLiveWorker(t *testing.T) {
 	server, webServer := newTestHTTPServer(t)
 	defer webServer.Close()
 
@@ -196,22 +196,18 @@ func TestServerRejectsRepositoryRemovedFromCurrentWorkers(t *testing.T) {
 	currentPoll.Body.Close()
 
 	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
-		"prompt": "must not queue", "repository": "removed", "agent": "plan",
+		"prompt": "queue while advertising workers are away", "repository": "removed", "agent": "plan",
 	}, auth)
-	if response.StatusCode != http.StatusBadRequest {
+	if response.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		t.Fatalf("removed repository status = %d, body = %s", response.StatusCode, body)
+		t.Fatalf("submission status = %d, body = %s", response.StatusCode, body)
 	}
-	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
-	if err != nil || !strings.Contains(string(body), "not defined in the control plane") {
-		t.Fatalf("removed repository body = %q, error = %v", body, err)
-	}
 
 	status := getStatus(t, webServer.URL)
-	if len(status.Jobs) != 0 {
-		t.Fatalf("removed repository was persisted: %#v", status.Jobs)
+	if len(status.Jobs) != 1 || status.Jobs[0].Repository != "removed" {
+		t.Fatalf("jobs = %#v", status.Jobs)
 	}
 }
 

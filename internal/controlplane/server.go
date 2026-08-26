@@ -231,7 +231,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
 		return
 	}
-	repositories, repositoryErr := s.store.SubmissionRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
+	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
 	if repositoryErr != nil {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
