@@ -1,0 +1,25 @@
+{
+  "name": "machinist-control-plane",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "test": "node --test src/*.test.js"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "1.2.4",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.544.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwind-merge": "3.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "6.1.0",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.2"
+  }
+}

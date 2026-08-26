@@ -1,0 +1,248 @@
+:root {
+  color-scheme: dark;
+  --ink: #f4efe6;
+  --muted: #b4aaa0;
+  --line: #37302a;
+  --surface: #12100e;
+  --surface-raised: #1b1714;
+  --accent: #f2a23a;
+  --accent-deep: #b95b16;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 78% 7%, rgba(185, 91, 22, 0.22), transparent 28rem),
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    var(--surface);
+  background-size: auto, 44px 44px, 44px 44px, auto;
+}
+
+a {
+  color: inherit;
+}
+
+.nav,
+main,
+footer {
+  width: min(1120px, calc(100% - 40px));
+  margin-inline: auto;
+}
+
+.nav {
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+
+.wordmark,
+.nav-link {
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.wordmark span,
+.number,
+.eyebrow,
+.install span {
+  color: var(--accent);
+}
+
+.nav-link {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.nav-link:hover {
+  color: var(--ink);
+}
+
+.hero {
+  padding: 116px 0 100px;
+  max-width: 900px;
+}
+
+.eyebrow {
+  margin: 0 0 24px;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  font: 700 0.75rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+h1 {
+  margin: 0;
+  max-width: 900px;
+  font-size: clamp(3.4rem, 9vw, 7.5rem);
+  line-height: 0.92;
+  letter-spacing: -0.065em;
+}
+
+.lede {
+  margin: 36px 0 0;
+  max-width: 690px;
+  color: var(--muted);
+  font-size: clamp(1.05rem, 2vw, 1.35rem);
+  line-height: 1.65;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 38px;
+}
+
+.button {
+  padding: 13px 19px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #211408;
+}
+
+.button.primary:hover {
+  background: #ffc066;
+}
+
+.button.secondary:hover {
+  background: var(--surface-raised);
+}
+
+.install {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  margin-top: 22px;
+  padding: 12px 15px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(18, 16, 14, 0.75);
+  color: var(--muted);
+  overflow-x: auto;
+  font-size: 0.85rem;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.features article {
+  padding: 38px 32px 46px 0;
+}
+
+.features article + article {
+  padding-left: 32px;
+  border-left: 1px solid var(--line);
+}
+
+.number {
+  font: 700 0.72rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+h2 {
+  margin: 30px 0 12px;
+  font-size: 1.15rem;
+}
+
+.features p,
+.principle > p:last-child {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.principle {
+  padding: 112px 0 120px;
+  max-width: 900px;
+}
+
+blockquote {
+  margin: 0 0 30px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(2rem, 5vw, 4.25rem);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+}
+
+.principle > p:last-child {
+  max-width: 630px;
+  font-size: 1.05rem;
+}
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 30px 0 44px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 760px) {
+  .nav,
+  main,
+  footer {
+    width: min(100% - 28px, 1120px);
+  }
+
+  .hero {
+    padding: 82px 0 72px;
+  }
+
+  .actions {
+    flex-wrap: wrap;
+  }
+
+  .features {
+    grid-template-columns: 1fr;
+  }
+
+  .features article,
+  .features article + article {
+    padding: 30px 0 34px;
+    border-left: 0;
+  }
+
+  .features article + article {
+    border-top: 1px solid var(--line);
+  }
+
+  .principle {
+    padding: 80px 0 90px;
+  }
+
+  footer {
+    gap: 20px;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .button,
+  .nav-link {
+    transition: color 140ms ease, background-color 140ms ease;
+  }
+}

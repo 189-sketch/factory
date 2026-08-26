@@ -1,12 +1,9 @@
-# Legacy local build artifacts.
-/target/
-# Legacy preview state. Current defaults use ~/.factory.
-.factory-v2/
-*.db
-*.db-shm
-*.db-wal
-.DS_Store
-
-# factory-server embeds the reviewed production UI from this directory.
-!/web/dist/
-!/web/dist/**
+/bin/
+/.factory/
+/.machinist/
+*.tmp
+__pycache__/
+*.py[cod]
+internal/controlplane/web/node_modules/
+!internal/controlplane/web/dist/
+!internal/controlplane/web/dist/**

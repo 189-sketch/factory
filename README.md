@@ -1,144 +1,162 @@
-# Factory
+# Machinist
 
-**Run repeatable software work through AI coding agents across repositories and machines.**
+Run a local team of coding agents that turns GitHub issues into reviewed pull
+requests.
 
-[![CI](https://github.com/owainlewis/factory/actions/workflows/ci.yml/badge.svg)](https://github.com/owainlewis/factory/actions/workflows/ci.yml)
-[![MIT license](https://img.shields.io/badge/license-MIT-white.svg)](LICENSE)
-[![Developer preview](https://img.shields.io/badge/status-developer%20preview-5b7cfa.svg)](#project-status)
-
-[Website](https://owainlewis.github.io/factory/) ·
-[Quick start](#quick-start) ·
-[Documentation](docs/README.md) ·
-[Architecture](ARCHITECTURE.md) ·
-[Contributing](CONTRIBUTING.md)
-
-Factory is an open-source, local-first control plane for coding agents. Define
-software work once, run it across one or many Git repositories, and see every
-agent, worktree, result, failure, and retry in one place.
-
-It is designed for builders who have outgrown a collection of terminal windows
-but still want agents to run on infrastructure and credentials they control.
+Machinist is an open-source runtime and control plane for supervised coding work.
+Give its foreman an issue. It plans the work, dispatches fresh agents to build
+and review the change, waits for the repository's checks, and hands you a pull
+request to merge.
 
 ```text
-Define work  ->  Dispatch repositories  ->  Run agents  ->  Inspect outcomes
-                       |                       |
-                       +-- Git worktrees       +-- Pi, Codex, Claude Code
-                       +-- local or VM Workers +-- bounded concurrency
+GitHub issue -> plan -> build -> independent review -> CI -> pull request
+                                                            ^
+                                                      you decide to merge
 ```
 
-## What Factory gives you
+Machinist runs on your machine, in your repositories, with the coding tools you
+already use. Agent prompts and workflows are files you can read, change, and
+version. The control plane records what ran without trying to guess whether an
+agent's prose means the job is done.
 
-- **Repeatable software work.** Save a prompt, repository scope, runtime,
-  schedule, and execution settings as one Task.
-- **One operational view.** Follow active Runs, repository Sessions, Attempts,
-  agent events, results, failures, and retained worktrees from the browser.
-- **A worker fleet you control.** Run Pi, Codex, or Claude Code on a laptop,
-  workstation, or remote VM without exposing the operator API publicly.
-- **Git-native isolation.** Every Attempt runs in its own worktree. Clean work
-  is reclaimed while unpublished or failed work remains inspectable.
-- **Durable coordination.** SQLite state, leases, heartbeats, retries,
-  cancellation, schedules, and bounded APIs survive process restarts.
+## Why Machinist?
+
+- **One request, a complete workflow.** The foreman coordinates planning,
+  implementation, review, repair, and CI instead of stopping after one coding
+  session.
+- **Review before handoff.** A fresh agent reviews the exact change. Failed
+  checks and valid findings go back through a bounded repair loop.
+- **Your tools and models.** Machinist launches configured executors such as Codex
+  or Claude. Model aliases let you choose per task without hard-coding provider
+  details into prompts.
+- **Local by default.** Repository paths, credentials, and executor commands
+  stay on the worker. Managed results and event logs are copied only to the
+  loopback control plane's local SQLite database.
+- **A human owns the merge.** The shipped foreman can prepare and verify a pull
+  request. It never merges one.
+
+Machinist also ships a read-only `audit` agent that inspects a repository,
+independently verifies possible bugs, and opens evidence-backed issues for the
+ones it can prove.
 
 ## Quick start
 
-Requirements:
+You need macOS or Linux, Go 1.26.6 or newer, Git, an authenticated
+[GitHub CLI](https://cli.github.com/), and an authenticated
+[Codex CLI](https://developers.openai.com/codex/cli/). The default foreman uses
+Codex and its native subagents.
 
-- Go 1.25.13 or newer on the 1.25 release line, or Go 1.26.6 or newer
-- Git, `curl`, and `just`
-- An authenticated Pi, Codex, or Claude Code CLI on the Worker host
-- GitHub CLI when using managed GitHub repositories
+### 1. Build and initialize
+
+From a Machinist source checkout:
 
 ```sh
-git clone https://github.com/owainlewis/factory.git
-cd factory
-just build
-mkdir -p ~/.factory
-cp examples/worker.toml ~/.factory/worker.toml
-just run
+mkdir -p ./bin
+go build -o ./bin/machinist ./cmd/machinist
+./bin/machinist init
 ```
 
-Open [http://127.0.0.1:7337](http://127.0.0.1:7337). Edit
-`~/.factory/worker.toml` to enable the agent runtimes installed on your machine.
-Use `~/.factory/bin/factory status` to read current Runs or
-`~/.factory/bin/factory workers` to check the Worker pool from the terminal.
-Use `~/.factory/bin/factory build ISSUE...` to admit up to 100 GitHub issues or
-repository-scoped opaque references as independent Work in one Run.
-The [local guide](docs/local.md) covers authentication, repository setup, and
-the complete first Run.
+`machinist init` creates editable configuration and agent prompts in
+`~/.machinist`. It keeps existing files unchanged when you run it again.
 
-Node.js is only required when changing the browser UI. Normal builds use the
-committed embedded assets.
+### 2. Give the foreman an issue
 
-## How it works
-
-The Go control plane owns Tasks, Runs, schedules, durable state, and admission.
-Workers poll for eligible Sessions, prepare isolated Git worktrees, supervise
-the selected coding-agent runtime, and report bounded events and results.
-
-```text
-Browser
-   |
-   | loopback HTTP + JSON
-   v
-Factory control plane
-  SQLite, scheduler, Run admission, embedded UI
-   ^
-   | authenticated polling, leases, events, completion
-   |
-Factory Workers
-  repository cache, isolated worktrees, agent slots
-   |
-   +-- Pi
-   +-- Codex
-   `-- Claude Code
+```sh
+./bin/machinist run \
+  --agent=foreman \
+  --repo=/absolute/path/to/your-repository \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123"
 ```
 
-The operator surface stays on loopback. Remote Workers use a separate,
-TLS-authenticated endpoint. The control plane stores coordination metadata,
-while Workers retain Git contents, runtime credentials, and worktrees. Read the
-[architecture](ARCHITECTURE.md) and [security policy](SECURITY.md) before
-running untrusted code.
+Use a small, well-defined issue for the first run. Machinist streams the agent's
+output and saves an ordered event log and terminal result under
+`~/.machinist/worker/runs/`.
+
+### 3. Review the pull request
+
+The foreman leaves the issue and pull request ready for a person to review. It
+does not merge.
+
+To inspect a repository without changing it:
+
+```sh
+./bin/machinist run \
+  --agent=audit \
+  --repo=/absolute/path/to/your-repository \
+  --prompt="Audit the request handling and persistence code"
+```
+
+## Run the local control plane
+
+Direct mode is the fastest way to try Machinist. When you want a queue, durable
+run history, and a browser UI, add a repository to
+`~/.machinist/worker.toml`:
+
+```toml
+[repositories.my-project]
+path = "/absolute/path/to/my-project"
+```
+
+Then start the server and worker in separate terminals:
+
+```sh
+./bin/machinist start
+```
+
+```sh
+./bin/machinist worker start
+```
+
+Open [http://127.0.0.1:7331](http://127.0.0.1:7331), choose a repository and
+agent, and submit a work request.
+
+You can also queue managed work from the CLI. Use the repository name from
+`worker.toml`, not its local path:
+
+```sh
+./bin/machinist submit \
+  --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123" \
+  --repo=my-project
+```
+
+`machinist run` executes immediately and never contacts the control plane.
+`machinist submit` validates the selection with the control plane, queues it, and
+prints the admitted job ID. `machinist worker run` remains available as the
+worker-namespaced direct path for a single agent.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md): requirements, installation, and
+  first runs
+- [How Machinist works](docs/how-it-works.md): direct runs, managed runs,
+  supervision, and artifacts
+- [Configuration](docs/configuration.md): agents, executors, models, prompts,
+  and pipelines
+- [Local control plane](docs/control-plane.md): server, workers, security, and
+  failure recovery
+- [Development](docs/development.md): build, test, and project layout
+- [Migration guide](docs/migration-from-factory.md): clean installation,
+  renamed interfaces, and rollback
+- [Architecture](ARCHITECTURE.md): source of truth, dependency direction,
+  execution flows, trust boundaries, and persistence
+- [Control-plane design](docs/control-plane/design.md): the detailed V1 design
+  and invariants
+- [Warp Factories product review](docs/product-direction/warp-factories-review.md):
+  lessons, readiness gates, and recommended product order
+- [Runner-managed skills](docs/worker-skills/design.md): why coding-agent skills
+  stay native to the configured runner
 
 ## Project status
 
-Factory is in **developer preview**. Compatibility-breaking changes are
-expected while the product model settles.
+Machinist is early software. It currently targets trusted local automation on
+macOS and Linux. The control plane intentionally accepts only loopback listeners;
+remote deployment needs a separate authentication and TLS boundary.
 
-Implemented today:
-
-- Go control-plane API and embedded React UI
-- durable Tasks, Runs, Sessions, Attempts, leases, events, and cancellation
-- transactional multi-item `factory build` admission with durable replay keys
-- manual and scheduled work across one or many repositories
-- Pi, Codex, and Claude Code Worker capabilities
-- managed repository catalog, Worker caches, and isolated Git worktrees
-- table, list, and Kanban Run views with repository-level detail
-- local Workers and authenticated remote VM Workers
-
-Active product work is moving Factory toward an agent-directed queue for work
-items and repository fleets. Existing coding agents own engineering judgment;
-Factory owns repeatable procedures, Worker capacity, durable state, and one
-view of the work. See the
-[target design](docs/software-factory/design.md) and
-[product vision](docs/software-factory/vision.md).
-
-## Development
-
-```sh
-just test
-just vet
-just ui-check
-```
-
-Browser-facing changes are proven against a real Go server with:
-
-```sh
-just test-browser
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full check set and project
-workflow. Proposed and historical designs are indexed in [docs](docs/README.md).
+The opt-in Python eval under [`evals/`](evals/) runs the complete default workflow against
+a dedicated scratch repository and verifies its issue-label lifecycle. It is separate
+from `just check` because it creates real GitHub issues and pull requests.
 
 ## License
 
-Factory is available under the [MIT License](LICENSE).
+[MIT](LICENSE)

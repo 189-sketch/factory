@@ -8,7 +8,7 @@
 
 ## Verification
 
-<!-- List exact commands and manual checks, including relevant failure paths. -->
+<!-- List the exact commands and manual checks you ran. -->
 
 ## Risks
 
