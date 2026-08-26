@@ -1,49 +1,152 @@
+<div align="center">
+
+<img src=".github/assets/machinist-mark.png" alt="Machinist project mark: a precision operator inside a machine dial" width="180">
+
 # Machinist
 
-Run a local team of coding agents that turns GitHub issues into reviewed pull
-requests.
+**The open-source software factory for supervised coding agents.**
 
-Machinist is an open-source runtime and control plane for supervised coding work.
-Give its foreman an issue. It plans the work, dispatches fresh agents to build
-and review the change, waits for the repository's checks, and hands you a pull
-request to merge.
+Turn a GitHub issue into a planned, implemented, independently reviewed, and
+checked pull request, on your machine and under your control.
 
-```text
-GitHub issue -> plan -> build -> independent review -> CI -> pull request
-                                                            ^
-                                                      you decide to merge
+[![CI](https://github.com/owainlewis/machinist/actions/workflows/ci.yml/badge.svg)](https://github.com/owainlewis/machinist/actions/workflows/ci.yml)
+[![Go 1.26.6](https://img.shields.io/badge/Go-1.26.6-00ADD8?logo=go&logoColor=white)](go.mod)
+[![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-18181b)](#project-status)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-7c3aed)](LICENSE)
+
+[Website](https://machinist.sh) · [Getting started](docs/getting-started.md) ·
+[How it works](docs/how-it-works.md) · [Architecture](ARCHITECTURE.md)
+
+</div>
+
+---
+
+Machinist is a local runtime and control plane for running software development
+as a repeatable production system. Give its `foreman` a GitHub issue. It plans
+the work, dispatches fresh coding agents, requires an independent review, waits
+for repository checks, and hands a verified pull request to you.
+
+> **A software factory is more than an agent with shell access.** It combines a
+> defined workflow, specialized workers, quality gates, durable evidence, and a
+> clear human decision point. Machinist packages those parts into a system you
+> can inspect, change, and version.
+
+## The development flow
+
+One request enters the factory. Planning, implementation, review, repair, and
+CI form a supervised production line. The shipped foreman never merges the
+result.
+
+```mermaid
+flowchart TB
+    ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
+    PLAN --> BUILD[Build in an isolated worktree]
+    BUILD --> REVIEW[Independent agent review]
+    REVIEW -->|findings| REPAIR[Bounded repair]
+    REPAIR --> REVIEW
+    REVIEW -->|approved| PR[Open or update pull request]
+    PR --> CHECKS[Repository CI and automated review]
+    CHECKS -->|failure or finding| REPAIR
+    CHECKS -->|green| HANDOFF([Ready for human review])
+    HANDOFF --> DECIDE{You decide whether to merge}
 ```
 
-Machinist runs on your machine, in your repositories, with the coding tools you
-already use. Agent prompts and workflows are files you can read, change, and
-version. The control plane records what ran without trying to guess whether an
-agent's prose means the job is done.
+The loop is deliberately bounded. If the work cannot be made safe after the
+allowed repair attempts, Machinist marks the issue as blocked and returns the
+evidence instead of quietly continuing forever.
+
+## What makes it a software factory?
+
+| Factory capability | How Machinist provides it |
+| --- | --- |
+| **A defined process** | Agent prompts and pipelines are ordinary files that can be reviewed and versioned. |
+| **Specialized workers** | A foreman coordinates fresh planning, building, reviewing, and repair agents. |
+| **Quality gates** | Independent review and repository checks must pass before handoff. |
+| **Repeatable execution** | The same runner supervises direct work and managed jobs. |
+| **Traceability** | Ordered event logs, terminal results, job state, and run history record what happened. |
+| **Human authority** | Machinist prepares the change. A person owns the final merge decision. |
+
+The default `foreman` runs the issue-to-pull-request production line. Machinist
+also ships a read-only `audit` agent that inspects a repository, independently
+verifies possible bugs, and opens evidence-backed issues for the ones it can
+prove.
+
+## Inside the factory
+
+Machinist separates portable workflow intent from machine-local authority. The
+control plane can queue work and track it, but only a worker can resolve an
+executor command, repository path, process environment, and credentials.
+
+```mermaid
+flowchart LR
+    OP([Operator or script]) --> CLI
+    OP --> UI
+
+    subgraph ENTRY[Entrypoints]
+        direction TB
+        CLI[Machinist CLI]
+        UI[Local browser UI]
+    end
+
+    subgraph CONTROL[Managed coordination]
+        direction TB
+        CP[Local control plane] <--> DB[(SQLite queue and history)]
+        CP <-->|leases and results| WORKER[Managed worker]
+    end
+
+    subgraph EXECUTION[Machine-local execution]
+        direction TB
+        RUNNER[Supervised runner] --> EXEC[Configured coding-agent executor]
+        RUNNER --> ART[(Local run artifacts)]
+    end
+
+    UI --> CP
+    CLI -->|managed| CP
+    CLI -->|direct| RUNNER
+    WORKER --> RUNNER
+    EXEC --> REPO[(Existing Git worktree)]
+```
+
+The shared `config.toml` supplies portable agents, prompts, and pipelines to the
+CLI and control plane. Machine-local `worker.toml` settings supply executors,
+repositories, and model mappings to direct runs and managed workers. This split
+keeps commands, paths, credentials, and artifacts with the machine that performs
+the work.
 
 ## Why Machinist?
 
 - **One request, a complete workflow.** The foreman coordinates planning,
   implementation, review, repair, and CI instead of stopping after one coding
   session.
-- **Review before handoff.** A fresh agent reviews the exact change. Failed
-  checks and valid findings go back through a bounded repair loop.
-- **Your tools and models.** Machinist launches configured executors such as Codex
-  or Claude. Model aliases let you choose per task without hard-coding provider
-  details into prompts.
-- **Local by default.** Repository paths, credentials, and executor commands
-  stay on the worker. Managed results and event logs are copied only to the
-  loopback control plane's local SQLite database.
-- **A human owns the merge.** The shipped foreman can prepare and verify a pull
-  request. It never merges one.
+- **Review before handoff.** A different agent reviews the exact change. Valid
+  findings and failed checks return through a bounded repair loop.
+- **Your tools and models.** Machinist launches configured executors such as
+  Codex or Claude. Model aliases let each task select a model without embedding
+  provider details in prompts.
+- **Local by default.** Repositories, credentials, and executor commands remain
+  on the worker. The control plane listens only on loopback.
+- **Evidence, not guesswork.** Machinist records process outcomes, events,
+  artifacts, duration, and reported token usage. It does not interpret an
+  agent's prose as proof that the software is correct.
 
-Machinist also ships a read-only `audit` agent that inspects a repository,
-independently verifies possible bugs, and opens evidence-backed issues for the
-ones it can prove.
+## Two ways to run the factory
+
+| | Direct mode | Managed mode |
+| --- | --- | --- |
+| **Start with** | `machinist run` | Browser UI or `machinist submit` |
+| **Best for** | One task, local experiments, existing scripts | Queued work, durable history, multiple workers |
+| **Execution** | Starts immediately in the selected repository | A compatible worker leases and runs the job |
+| **State** | Local run artifacts | SQLite job history plus local worker artifacts |
+| **Server required** | No | Yes, on loopback by default |
+
+Both modes use the same configuration, prompt rendering, process supervision,
+exit behavior, and artifact format.
 
 ## Quick start
 
 You need macOS or Linux, Go 1.26.6 or newer, Git, an authenticated
 [GitHub CLI](https://cli.github.com/), and an authenticated
-[Codex CLI](https://developers.openai.com/codex/cli/). The default foreman uses
+[Codex CLI](https://developers.openai.com/codex/cli/). The shipped foreman uses
 Codex and its native subagents.
 
 ### 1. Build and initialize
@@ -56,10 +159,10 @@ go build -o ./bin/machinist ./cmd/machinist
 ./bin/machinist init
 ```
 
-`machinist init` creates editable configuration and agent prompts in
-`~/.machinist`. It keeps existing files unchanged when you run it again.
+`machinist init` creates editable factory definitions and machine-local worker
+settings under `~/.machinist`. Existing files are never overwritten.
 
-### 2. Give the foreman an issue
+### 2. Send an issue through the factory
 
 ```sh
 ./bin/machinist run \
@@ -68,11 +171,11 @@ go build -o ./bin/machinist ./cmd/machinist
   --prompt="Complete https://github.com/your-org/your-repo/issues/123"
 ```
 
-Use a small, well-defined issue for the first run. Machinist streams the agent's
-output and saves an ordered event log and terminal result under
+Use a small, well-defined issue for the first run. Machinist streams the
+agent's output and writes an ordered event log and terminal result under
 `~/.machinist/worker/runs/`.
 
-### 3. Review the pull request
+### 3. Review the finished pull request
 
 The foreman leaves the issue and pull request ready for a person to review. It
 does not merge.
@@ -88,16 +191,15 @@ To inspect a repository without changing it:
 
 ## Run the local control plane
 
-Direct mode is the fastest way to try Machinist. When you want a queue, durable
-run history, and a browser UI, add a repository to
-`~/.machinist/worker.toml`:
+When you want a queue, durable run history, and a browser UI, register a
+repository in `~/.machinist/worker.toml`:
 
 ```toml
 [repositories.my-project]
 path = "/absolute/path/to/my-project"
 ```
 
-Then start the server and worker in separate terminals:
+Start the server and worker in separate terminals:
 
 ```sh
 ./bin/machinist start
@@ -110,7 +212,7 @@ Then start the server and worker in separate terminals:
 Open [http://127.0.0.1:7331](http://127.0.0.1:7331), choose a repository and
 agent, and submit a work request.
 
-You can also queue managed work from the CLI. Use the repository name from
+You can submit the same managed work from the CLI. Use the repository name from
 `worker.toml`, not its local path:
 
 ```sh
@@ -120,10 +222,20 @@ You can also queue managed work from the CLI. Use the repository name from
   --repo=my-project
 ```
 
-`machinist run` executes immediately and never contacts the control plane.
-`machinist submit` validates the selection with the control plane, queues it, and
-prints the admitted job ID. `machinist worker run` remains available as the
-worker-namespaced direct path for a single agent.
+## Design principles
+
+1. **Intent is portable; authority stays local.** The control plane sends
+   logical names and rendered prompts. Workers resolve commands, paths, and
+   credentials.
+2. **Execution facts are not product truth.** A successful process is recorded
+   as a successful run, not interpreted as proof that a requested outcome is
+   correct.
+3. **Review is structurally independent.** The builder does not review its own
+   work.
+4. **Failure is visible and bounded.** Timeouts, cancellations, findings,
+   failed checks, and exhausted repairs produce explicit outcomes.
+5. **The human remains accountable.** Automation can prepare and verify a pull
+   request. It cannot make the merge decision.
 
 ## Documentation
 
@@ -135,27 +247,22 @@ worker-namespaced direct path for a single agent.
   and pipelines
 - [Local control plane](docs/control-plane.md): server, workers, security, and
   failure recovery
+- [Architecture](ARCHITECTURE.md): components, dependency direction, execution
+  flows, trust boundaries, and persistence
 - [Development](docs/development.md): build, test, and project layout
-- [Migration guide](docs/migration-from-factory.md): clean installation,
-  renamed interfaces, and rollback
-- [Architecture](ARCHITECTURE.md): source of truth, dependency direction,
-  execution flows, trust boundaries, and persistence
-- [Control-plane design](docs/control-plane/design.md): the detailed V1 design
-  and invariants
-- [Warp Factories product review](docs/product-direction/warp-factories-review.md):
-  lessons, readiness gates, and recommended product order
-- [Runner-managed skills](docs/worker-skills/design.md): why coding-agent skills
-  stay native to the configured runner
+- [Migration from Factory](docs/migration-from-factory.md): renamed interfaces,
+  clean installation, and rollback
 
 ## Project status
 
-Machinist is early software. It currently targets trusted local automation on
-macOS and Linux. The control plane intentionally accepts only loopback listeners;
-remote deployment needs a separate authentication and TLS boundary.
+Machinist is early software for trusted local automation on macOS and Linux.
+The control plane intentionally accepts only loopback listeners. Remote
+deployment needs a separate authenticated web surface and TLS boundary.
 
-The opt-in Python eval under [`evals/`](evals/) runs the complete default workflow against
-a dedicated scratch repository and verifies its issue-label lifecycle. It is separate
-from `just check` because it creates real GitHub issues and pull requests.
+The opt-in Python evaluation suite under [`evals/`](evals/) exercises the
+complete default workflow against a dedicated scratch repository. It is
+separate from `just check` because it creates real GitHub issues and pull
+requests.
 
 ## License
 
