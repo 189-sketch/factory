@@ -358,7 +358,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	var gotRequest submitJobRequest
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
-		case "/api/v1/status":
+		case "/api/v1/catalog":
 			writeTestJSON(response, map[string]any{
 				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"factory"},
 			})
@@ -380,6 +380,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	exitCode := Execute(t.Context(), []string{
 		"submit",
 		"--agent=plan",
+		"--model=luna",
 		"--prompt=fix issue 13",
 		"--repo=factory",
 		"--config=" + workerConfig,
@@ -390,7 +391,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	if gotAuthorization != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuthorization)
 	}
-	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "factory", Agent: "plan"}) {
+	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "factory", Agent: "plan", Model: "luna"}) {
 		t.Fatalf("submission = %#v", gotRequest)
 	}
 }
@@ -399,7 +400,7 @@ func TestSubmitQueuesPipeline(t *testing.T) {
 	var gotRequest submitJobRequest
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
-		case "/api/v1/status":
+		case "/api/v1/catalog":
 			writeTestJSON(response, map[string]any{
 				"agents": []string{}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
 			})
@@ -432,10 +433,45 @@ func TestSubmitQueuesPipeline(t *testing.T) {
 	}
 }
 
+func TestSubmitUsesCatalogWhenStatusHistoryIsLarge(t *testing.T) {
+	var catalogRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/status":
+			writeTestJSON(response, map[string]any{
+				"jobs": []any{map[string]string{"prompt": strings.Repeat("history ", 1<<18)}},
+			})
+		case "/api/v1/catalog":
+			catalogRequested = true
+			writeTestJSON(response, map[string]any{
+				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"factory"},
+			})
+		case "/api/v1/jobs":
+			writeTestJSON(response, map[string]string{"id": "job_large_history"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	workerConfig := writeSubmitWorkerConfig(t, server.URL, "secret")
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit",
+		"--agent=plan",
+		"--prompt=work despite history",
+		"--repo=factory",
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || stdout.String() != "job_large_history\n" || !catalogRequested {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q, catalog requested = %t", exitCode, stdout.String(), stderr.String(), catalogRequested)
+	}
+}
+
 func TestSubmitRejectsUnknownValuesBeforeCreatingJob(t *testing.T) {
 	postCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/api/v1/status" {
+		if request.URL.Path == "/api/v1/catalog" {
 			writeTestJSON(response, map[string]any{
 				"agents": []string{"plan"}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
 			})
@@ -456,7 +492,7 @@ func TestSubmitRejectsUnknownValuesBeforeCreatingJob(t *testing.T) {
 	}{
 		{name: "agent", args: []string{"--agent=missing", "--prompt=work", "--repo=factory"}, want: `agent "missing" is not defined`},
 		{name: "pipeline", args: []string{"--pipeline=missing", "--prompt=work", "--repo=factory"}, want: `pipeline "missing" is not defined`},
-		{name: "repository", args: []string{"--agent=plan", "--prompt=work", "--repo=missing"}, want: `repository "missing" is not available`},
+		{name: "repository", args: []string{"--agent=plan", "--prompt=work", "--repo=missing"}, want: `repository "missing" is not defined in the control plane`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stderr bytes.Buffer

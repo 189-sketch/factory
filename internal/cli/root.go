@@ -89,7 +89,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	return root
 }
 
-type submitStatus struct {
+type submitCatalog struct {
 	Agents       []string `json:"agents"`
 	Pipelines    []string `json:"pipelines"`
 	Repositories []string `json:"repositories"`
@@ -100,6 +100,7 @@ type submitJobRequest struct {
 	Repository string `json:"repository"`
 	Agent      string `json:"agent,omitempty"`
 	Pipeline   string `json:"pipeline,omitempty"`
+	Model      string `json:"model,omitempty"`
 }
 
 type submitJobResponse struct {
@@ -119,18 +120,19 @@ func (err *submitHTTPError) Error() string {
 }
 
 func newSubmitCommand(options *commandOptions) *cobra.Command {
-	var agentName, pipelineName, prompt, repository string
+	var agentName, pipelineName, prompt, model, repository string
 	submit := &cobra.Command{
 		Use:   "submit",
 		Short: "Queue work for a managed Factory Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return submitSelection(command.Context(), options, agentName, pipelineName, prompt, repository)
+			return submitSelection(command.Context(), options, agentName, pipelineName, prompt, model, repository)
 		},
 	}
 	submit.Flags().StringVar(&agentName, "agent", "", "agent name from the control plane")
 	submit.Flags().StringVar(&pipelineName, "pipeline", "", "pipeline name from the control plane")
 	submit.Flags().StringVar(&prompt, "prompt", "", "work request supplied to the agent prompt (required)")
+	submit.Flags().StringVar(&model, "model", "", "executor model or configured alias for this task")
 	submit.Flags().StringVar(&repository, "repo", "", "configured repository name (required)")
 	submit.MarkFlagsMutuallyExclusive("agent", "pipeline")
 	submit.MarkFlagsOneRequired("agent", "pipeline")
@@ -139,7 +141,7 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 	return submit
 }
 
-func submitSelection(ctx context.Context, options *commandOptions, agentName, pipelineName, prompt, repository string) error {
+func submitSelection(ctx context.Context, options *commandOptions, agentName, pipelineName, prompt, model, repository string) error {
 	worker, err := config.LoadWorker(options.configPath)
 	if err != nil {
 		return err
@@ -153,17 +155,17 @@ func submitSelection(ctx context.Context, options *commandOptions, agentName, pi
 		return err
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
-	status, err := getSubmitStatus(ctx, client, endpoint, token)
+	catalog, err := getSubmitCatalog(ctx, client, endpoint, token)
 	if err != nil {
 		return err
 	}
-	if !contains(status.Repositories, repository) {
-		return fmt.Errorf("repository %q is not available from a managed worker; check the configured repository name and worker registration", repository)
+	if !contains(catalog.Repositories, repository) {
+		return fmt.Errorf("repository %q is not defined in the control plane; check the configured repository name and worker registration", repository)
 	}
-	if agentName != "" && !contains(status.Agents, agentName) {
+	if agentName != "" && !contains(catalog.Agents, agentName) {
 		return fmt.Errorf("agent %q is not defined in the control plane", agentName)
 	}
-	if pipelineName != "" && !contains(status.Pipelines, pipelineName) {
+	if pipelineName != "" && !contains(catalog.Pipelines, pipelineName) {
 		return fmt.Errorf("pipeline %q is not defined in the control plane", pipelineName)
 	}
 
@@ -172,6 +174,7 @@ func submitSelection(ctx context.Context, options *commandOptions, agentName, pi
 		Repository: repository,
 		Agent:      agentName,
 		Pipeline:   pipelineName,
+		Model:      model,
 	})
 	if err != nil {
 		return fmt.Errorf("encode submission: %w", err)
@@ -202,26 +205,26 @@ func submitSelection(ctx context.Context, options *commandOptions, agentName, pi
 	return nil
 }
 
-func getSubmitStatus(ctx context.Context, client *http.Client, endpoint, token string) (submitStatus, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/api/v1/status", nil)
+func getSubmitCatalog(ctx context.Context, client *http.Client, endpoint, token string) (submitCatalog, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/api/v1/catalog", nil)
 	if err != nil {
-		return submitStatus{}, fmt.Errorf("create control plane status request: %w", err)
+		return submitCatalog{}, fmt.Errorf("create control plane catalog request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := client.Do(request)
 	if err != nil {
-		return submitStatus{}, fmt.Errorf("read control plane status: %w", err)
+		return submitCatalog{}, fmt.Errorf("read control plane catalog: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 8<<10))
-		return submitStatus{}, &submitHTTPError{status: response.StatusCode, body: strings.TrimSpace(string(message))}
+		return submitCatalog{}, &submitHTTPError{status: response.StatusCode, body: strings.TrimSpace(string(message))}
 	}
-	var status submitStatus
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status); err != nil {
-		return submitStatus{}, fmt.Errorf("decode control plane status: %w", err)
+	var catalog submitCatalog
+	if err := json.NewDecoder(response.Body).Decode(&catalog); err != nil {
+		return submitCatalog{}, fmt.Errorf("decode control plane catalog: %w", err)
 	}
-	return status, nil
+	return catalog, nil
 }
 
 func controlPlaneEndpoint(raw string) (string, error) {

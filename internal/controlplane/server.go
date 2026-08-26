@@ -72,6 +72,12 @@ type definitionsResponse struct {
 	Pipelines []pipelineDefinitionResponse `json:"pipelines"`
 }
 
+type catalogResponse struct {
+	Agents       []string `json:"agents"`
+	Pipelines    []string `json:"pipelines"`
+	Repositories []string `json:"repositories"`
+}
+
 func NewServer(store *Store, definitionPath, workerToken string) (*Server, error) {
 	csrfToken, err := randomID("csrf", 24)
 	if err != nil {
@@ -128,6 +134,7 @@ func (s *Server) routes() (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", s.status)
+	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
@@ -194,6 +201,25 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 	})
 }
 
+func (s *Server) catalog(response http.ResponseWriter, request *http.Request) {
+	definition, err := config.LoadDefinitions(s.definitionPath)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
+	if repositoryErr != nil {
+		writeError(response, http.StatusInternalServerError, repositoryErr)
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	writeJSON(response, http.StatusOK, catalogResponse{
+		Agents:       mapKeys(definition.Agents),
+		Pipelines:    mapKeys(definition.Pipelines),
+		Repositories: repositories,
+	})
+}
+
 func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(response, request.Body, 1<<20)
 	var input submitRequest
@@ -205,13 +231,13 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("repository is required"))
 		return
 	}
-	repositories, repositoryErr := s.store.AvailableRepositories(request.Context(), time.Now().Add(-workerAvailabilityWindow))
+	repositories, repositoryErr := s.store.KnownRepositories(request.Context())
 	if repositoryErr != nil {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
 	}
 	if !containsString(repositories, input.Repository) {
-		writeError(response, http.StatusBadRequest, fmt.Errorf("repository %q is not available from a managed worker", input.Repository))
+		writeError(response, http.StatusBadRequest, fmt.Errorf("repository %q is not defined in the control plane", input.Repository))
 		return
 	}
 	input.Model = strings.TrimSpace(input.Model)
@@ -223,11 +249,11 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("exactly one agent or pipeline is required"))
 		return
 	}
+	var err error
 	var (
 		agents []config.ResolvedAgent
 		kind   string
 		name   string
-		err    error
 	)
 	if input.Agent != "" {
 		kind, name = "agent", input.Agent
