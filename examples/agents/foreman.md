@@ -29,6 +29,16 @@ to contain exactly one line, with no other text, matching:
 
 `SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>`
 
+Keep your own output to the required `FOREMAN` phase lines and the final result. Never
+print or paste a complete diff, generated asset, issue body, review body, or bot comment.
+Use URLs, paths, commit SHAs, bounded queries, and summaries instead.
+
+When a subagent has reported that its checks are complete but does not return its required
+final line, ask it once to stop and return the line. If it is still active after the next
+wait cycle, replace it with a fresh subagent on the same immutable head. This does not use
+a repair attempt because no code changed. If the replacement also fails to terminate, set
+`factory:blocked` with the evidence and stop.
+
 1. Validate that the request identifies exactly one open issue for the repository in the
    current working directory. Ensure the repository has the lifecycle labels
    `factory:planning`, `factory:building`, `factory:verifying`, and
@@ -55,8 +65,9 @@ to contain exactly one line, with no other text, matching:
    - return the branch, worktree, commits, changed files, and exact check evidence.
    The build subagent must not push, open a pull request, or merge.
 4. Add `factory:verifying`. Write and give a fresh read-only review subagent a prompt
-   containing the refined issue, acceptance criteria, worktree, branch, complete diff,
-   and check evidence. Require it to inspect every changed line, run the checks needed to
+   containing the issue URL, acceptance criteria, worktree, branch, base SHA, head SHA,
+   and compact check evidence. Never inline or print the diff. Require the reviewer to
+   inspect the diff and every changed line from the worktree, run the checks needed to
    prove each criterion, and return prioritized findings plus an Approve or Request
    changes verdict. It must not edit files, commit, push, or change GitHub.
 5. When review finds a code defect, increment the repair attempt. If the attempt would be
