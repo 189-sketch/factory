@@ -479,6 +479,54 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	}
 }
 
+func TestWorkflowExampleDefinitionsLoad(t *testing.T) {
+	tests := []struct {
+		name     string
+		agents   []string
+		pipeline string
+		steps    []string
+	}{
+		{name: "issue-to-pr", agents: []string{"issue-to-pr"}},
+		{name: "multi-review", agents: []string{"review-codex", "review-claude"}, pipeline: "multi-review", steps: []string{"review-codex", "review-claude"}},
+		{name: "code-audit", agents: []string{"code-audit"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			definition := filepath.Join("..", "..", "examples", "workflows", test.name, "config.toml")
+			for _, name := range test.agents {
+				agent, err := LoadAgent(definition, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(agent.Prompt, promptParameter) {
+					t.Fatalf("agent %q prompt does not contain %s", name, promptParameter)
+				}
+				for _, section := range []string{"# Role", "# Input", "# Required result", "# Procedure", "# Boundaries"} {
+					if !strings.Contains(agent.Prompt, section) {
+						t.Fatalf("agent %q prompt does not contain %q", name, section)
+					}
+				}
+			}
+			if test.pipeline == "" {
+				return
+			}
+			agents, err := LoadPipeline(definition, test.pipeline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(agents) != len(test.steps) {
+				t.Fatalf("pipeline has %d agents, want %d", len(agents), len(test.steps))
+			}
+			for index, agent := range agents {
+				if agent.Name != test.steps[index] {
+					t.Fatalf("pipeline agent %d = %q, want %q", index+1, agent.Name, test.steps[index])
+				}
+			}
+		})
+	}
+}
+
 func writeTestFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
