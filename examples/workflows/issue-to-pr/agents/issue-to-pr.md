@@ -36,9 +36,13 @@ Finish with one line:
 3. Triage before building. If the issue is already clear, small, and testable, continue.
    If it is unclear, ask a planning subagent to replace its title and body with a short,
    plain-language specification using: Problem, Outcome, Scope, Non-goals, Acceptance
-   criteria, Implementation context, and Verification. Preserve real constraints. If a
-   material choice cannot be inferred, set the state to `factory:needs-human`, ask one
-   precise issue question, and stop.
+   criteria, Implementation context, and Verification. Preserve real constraints. The
+   planner must snapshot the title, body, and update time, then re-read them immediately
+   before replacing the issue. If they changed, discard the draft and re-plan once from
+   the new content. If they change again, set the state to `factory:needs-human`, comment
+   that concurrent edits prevented a safe update, and stop. If a material choice cannot
+   be inferred, set the state to `factory:needs-human`, ask one precise issue question,
+   and stop.
 4. Set the state to `factory:building`. Give a build subagent the refined issue,
    repository rules, and this delivery contract: start from the latest remote default
    branch, create a `codex/` branch in an isolated worktree under
@@ -55,18 +59,24 @@ Finish with one line:
    at most two repair rounds. If defects remain, set the state to `factory:blocked`,
    comment with the evidence, and stop.
 7. After approval, push and open one non-draft pull request linked to the issue. Include a
-   short summary and exact verification evidence. Discover available CI and automated
-   review for the current head. Poll no more often than every 30 seconds and do not
-   continue until every discovered check and reviewer is terminal. Wait at most 20
-   minutes. Repair confirmed code defects within the same two-round limit and run a fresh
-   local review before each push, then repeat this wait for the new head. Do not spend a
-   repair round on unavailable infrastructure. If a confirmed code defect remains after
-   both repair rounds, set the state to `factory:blocked`, comment with the unresolved
-   evidence, and stop. If any discovered check or reviewer is still pending at the
-   deadline, set the state to `factory:blocked`, comment with the pending names and
-   elapsed time, and stop. After all automation is terminal, if an unsuccessful result is
-   not a confirmed code defect that can enter the repair loop, set the state to
-   `factory:blocked`, comment with the exact failure evidence, and stop.
+   short summary and exact verification evidence. From the trusted default branch,
+   inventory expected CI from workflow files and branch protection, plus configured
+   automated reviewers visible in repository or pull request settings. After opening the
+   pull request or pushing a repair, wait for automation to register. Treat discovery as
+   stable only after the same set appears in two polls at least 30 seconds apart. Do not
+   treat an empty set as stable while expected automation is missing. Then wait until
+   every discovered check and reviewer for the current head is terminal. Poll no more
+   often than every 30 seconds and wait at most 20 minutes for registration and completion
+   together. Repair confirmed code defects within the same two-round limit and run a
+   fresh local review before each push, then repeat registration and completion checks for
+   the new head. Do not spend a repair round on unavailable infrastructure. If a confirmed
+   code defect remains after both repair rounds, set the state to `factory:blocked`,
+   comment with the unresolved evidence, and stop. If expected automation is missing or
+   any discovered check or reviewer is still pending at the deadline, set the state to
+   `factory:blocked`, comment with the missing or pending names and elapsed time, and stop.
+   After all automation is terminal, if an unsuccessful result is not a confirmed code
+   defect that can enter the repair loop, set the state to `factory:blocked`, comment with
+   the exact failure evidence, and stop.
 8. Only when every discovered check and reviewer for the current head is terminal, all
    checks pass, and no review finding remains unresolved, set the state to
    `factory:ready-for-review` and comment on the issue with the pull request, checks,
