@@ -38,17 +38,22 @@ CI form a supervised production line. The shipped foreman never merges the
 result.
 
 ```mermaid
-flowchart TB
+flowchart LR
     ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
-    PLAN --> BUILD[Build in an isolated worktree]
-    BUILD --> REVIEW[Independent agent review]
-    REVIEW -->|findings| REPAIR[Bounded repair]
-    REPAIR --> REVIEW
-    REVIEW -->|approved| PR[Open or update pull request]
-    PR --> CHECKS[Repository CI and automated review]
-    CHECKS -->|failure or finding| REPAIR
-    CHECKS -->|green| HANDOFF([Ready for human review])
-    HANDOFF --> DECIDE{You decide whether to merge}
+    PLAN --> BUILD[Build in an<br/>isolated worktree]
+    BUILD --> REVIEW[Independent<br/>agent review]
+    REVIEW -->|approved| CHECKS[Pull request<br/>CI and automated review]
+    CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
+    REVIEW -->|findings: repair| BUILD
+    CHECKS -->|failure or finding: repair| BUILD
+
+    classDef input fill:#f2a23a,stroke:#b95b16,color:#211408,stroke-width:2px
+    classDef station fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef decision fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:2px
+    class ISSUE input
+    class PLAN,BUILD,REVIEW,CHECKS station
+    class HUMAN decision
+    linkStyle default stroke:#b95b16,stroke-width:2px
 ```
 
 The loop is deliberately bounded. If the work cannot be made safe after the
@@ -78,33 +83,24 @@ control plane can queue work and track it, but only a worker can resolve an
 executor command, repository path, process environment, and credentials.
 
 ```mermaid
-flowchart LR
-    OP([Operator or script]) --> CLI
-    OP --> UI
-
-    subgraph ENTRY[Entrypoints]
-        direction TB
-        CLI[Machinist CLI]
-        UI[Local browser UI]
-    end
-
-    subgraph CONTROL[Managed coordination]
-        direction TB
-        CP[Local control plane] <--> DB[(SQLite queue and history)]
-        CP <-->|leases and results| WORKER[Managed worker]
-    end
-
-    subgraph EXECUTION[Machine-local execution]
-        direction TB
-        RUNNER[Supervised runner] --> EXEC[Configured coding-agent executor]
-        RUNNER --> ART[(Local run artifacts)]
-    end
-
-    UI --> CP
-    CLI -->|managed| CP
+flowchart TB
+    UI[Local browser UI] --> CP
+    CLI[Machinist CLI] -->|managed| CP[Control plane<br/>SQLite queue and history]
+    CP <-->|leases and results| WORKER[Managed worker]
     CLI -->|direct| RUNNER
     WORKER --> RUNNER
-    EXEC --> REPO[(Existing Git worktree)]
+    RUNNER[Supervised runner<br/>Configured coding-agent executor] --> REPO[(Existing Git worktree)]
+    RUNNER --> ART[(Local run artifacts)]
+
+    classDef entry fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef managed fill:#ffedd5,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef execution fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef data fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    class CLI,UI entry
+    class CP,WORKER managed
+    class RUNNER execution
+    class ART,REPO data
+    linkStyle default stroke:#b95b16,stroke-width:2px
 ```
 
 The shared `config.toml` supplies portable agents, prompts, and pipelines to the
