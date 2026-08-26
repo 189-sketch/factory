@@ -45,13 +45,21 @@ Ensure these labels exist:
 Keep exactly one of those labels on the issue. Before setting a state, remove all six and
 then add only the target label.
 
-Keep one issue comment containing `<!-- machinist:foreman-state -->`. Create it when none
-exists and update it after each stage transition or repair. Record the stage, branch,
-absolute worktree, base SHA, current head SHA, latest locally approved SHA, pull request
-URL, completed checks, and repair-attempt count. This is resumable state, not authority;
-verify every recorded fact against Git and GitHub before relying on it. Never reset the
-repair count when resuming. If state records disagree and the current state cannot be
-proved safely, set `machinist:needs-human`, ask one precise question, and stop.
+Keep exactly one issue comment containing `<!-- machinist:foreman-state -->`. Create it
+when none exists and update it after each stage transition or repair. If several comments
+contain the marker, sort them by immutable comment ID and verify their records. They form
+one usable history only when their nonempty branch and pull request values never conflict,
+their repair counts never decrease, and Git proves each recorded head is an ancestor of
+the next. In that case use the highest-ID comment and remove the marker from the older
+comments. If they conflict or do not form a provable linear history, do not select one: set
+`machinist:needs-human`, ask one precise question, and stop.
+
+Record the stage, branch, absolute worktree, base SHA, current head SHA, latest locally
+approved SHA, pull request URL, completed checks, and repair-attempt count. This is
+resumable state, not authority; verify every recorded fact against Git and GitHub before
+relying on it. Never reset the repair count when resuming. If state records disagree and
+the current state cannot be proved safely, set `machinist:needs-human`, ask one precise
+question, and stop.
 
 At every phase boundary, print one concise line:
 
@@ -123,11 +131,16 @@ Repair handoff:
 - Changed files: <paths>
 ```
 
-If a subagent says its checks are complete but omits a required handoff, ask it once to
-stop and return the handoff. If it is still active after the next wait, replace it with a
-fresh subagent on the same immutable head. This does not consume a repair attempt because
-no code changed. If the replacement also fails to terminate, set `machinist:blocked`,
-record that evidence, and stop.
+Before delegating a build or repair, snapshot its branch head and worktree status. If a
+subagent says its checks are complete but omits a required handoff, ask it once to stop and
+return the handoff. If it is still active after the next wait, inspect the branch, HEAD,
+worktree, and commits before replacing it. When state changed, stop the original, persist
+the changed head and worktree status, and never replace it on the old immutable head. Give
+a fresh subagent the current state: require it to verify and hand off clean committed work,
+or finish and commit dirty work, before Local review. When state did not change, replace
+the subagent on the original immutable head. Neither case consumes a repair attempt unless
+a reviewed code defect caused the work. If the replacement also fails to terminate, set
+`machinist:blocked`, record that evidence, and stop.
 
 # Ordered state entry
 
@@ -139,27 +152,45 @@ Perform this discovery at the start of every run, before choosing a phase:
    SHAs. Inspect state only; do not change code.
 2. Find any branch, worktree, or pull request already associated with the issue. Verify the
    association from branch names, commit or pull request links, and the state comment.
-   Existing work must reuse its branch, absolute worktree, and pull request. If the
-   recorded worktree is missing, recreate only that worktree for the same branch. Never
-   create a second pull request for the issue. If only a closed unmerged pull request
-   exists and cannot be reopened safely, set `machinist:needs-human`, ask whether to reopen
-   it, and stop.
+   Existing work must reuse its branch, absolute worktree, and pull request. If an open
+   pull request has no usable worktree, fetch its current head, recover its recorded local
+   branch at that exact SHA when no unpublished local state would be overwritten, and
+   recreate the recorded isolated worktree for that branch. Never create a replacement
+   branch. Never create a second pull request for the issue. If only a closed unmerged
+   pull request exists and cannot be reopened safely, set `machinist:needs-human`, ask
+   whether to reopen it, and stop.
 3. Reconstruct the number of repair attempts already consumed from the verified state
    comment, repair commits, and issue or pull request history. Use the greatest proved
    count. A resumed run still has at most two total repair attempts.
-4. Classify the run into exactly one entry point, using this priority order:
+4. Before classifying, compare the verified local branch and recorded head with the open
+   pull request's remote head. Dirty local work enters Existing implementation. A clean
+   local head that descends from but differs from the remote head is unpublished work: if
+   its complete checks and approval are verified for that exact SHA, enter Create or reuse
+   the pull request and push that immutable SHA; otherwise enter Local review or Existing
+   implementation as its evidence requires. Never let stale remote CI or review state
+   take priority over unpublished local work. A divergent local and remote history that
+   cannot be reconciled without rewriting history needs one human decision.
+5. Treat a verified `machinist:ready-for-review` label or a state record whose stage is
+   `ready` or `completed` as terminal before open-pull-request routing. Revalidate its
+   remote head, immutable local approval, checks, and unresolved-finding evidence, then
+   report the final result without replaying a phase. If the terminal records conflict,
+   set `machinist:needs-human` and ask one precise question.
+6. Classify the run into exactly one entry point, using this priority order:
    - **CI failure:** the current pull request head has a terminal failing check.
    - **Review feedback:** a local review, pull request review, current review thread, or
      bot comment contains an unresolved finding that still applies to the current head.
    - **Open pull request:** the issue has one open pull request but no current defect.
-   - **Existing implementation:** an associated branch or worktree exists without an open
-     pull request.
+   - **Existing implementation:** an associated branch or worktree has unpublished or
+     unfinished local work, whether or not an open pull request exists.
+   - **Completed planning:** the state and refined issue prove planning finished, but no
+     implementation exists.
    - **New issue:** no associated implementation or pull request exists.
-5. Update the state comment with the verified entry point and evidence. Then route once:
+7. Update the state comment with the verified entry point and evidence. Then route once:
    CI failure or Review feedback enters the Shared repair loop; Open pull request enters
    Local review if its current head lacks a verified local approval and otherwise enters
-   the automation gate; Existing implementation enters its resume stage; and New issue
-   enters planning. Do not replay earlier completed stages.
+   the automation gate; Existing implementation enters its resume stage; Completed
+   planning enters building without rerunning planning; and New issue enters planning. Do
+   not replay earlier completed stages.
 
 # Stage advancement
 
@@ -198,9 +229,13 @@ rules, verified branch, worktree, base, head, prior check evidence, and unfinish
 Explicitly forbid another branch, worktree, or pull request. Require it to inspect the
 existing diff, finish only the issue scope, run focused checks, commit changes, and return
 the Build handoff. If the existing implementation is already committed, clean, and has
-complete check evidence for its current head, skip further building and enter local
-review. Otherwise verify the completed Build handoff, update the state comment, and enter
-Local review.
+complete check evidence for its current head, skip further building. Set
+`machinist:verifying` and persist the branch, head, check evidence, and review entry point
+before entering Local review. Otherwise verify the completed Build handoff, update the
+state comment, and enter Local review.
+
+For Completed planning, use the New issue build instructions but reuse the verified
+refined specification and do not invoke a planning subagent.
 
 ## Local review
 
@@ -225,21 +260,26 @@ does not, return to local review. When no pull request exists, push the immutabl
 non-draft pull request linked to the issue with a short summary and exact verification
 evidence. Confirm its base, head, issue link, and non-draft state. Add or update one issue
 comment containing exactly one `<!-- machinist:foreman-pr -->` marker and the pull request
-URL. If a pull request already exists, reuse it and never open another. Keep the worktree
-while that pull request remains open.
+URL. If a pull request already exists, confirm the approved local SHA descends from its
+remote head, push that exact approved SHA refspec to the existing branch, and never open
+another. Keep the worktree while that pull request remains open.
 
 Set `machinist:verifying`, update the state comment, and enter the automation gate.
 
 ## Open pull request: automation gate
 
-Print the CI start line. From the trusted default branch, inventory available CI in
-workflow files and branch protection, plus configured or observed automated reviewers.
-For the current remote head, wait for automation to register. Discovery is stable only
-after the same non-missing set appears in two polls at least 30 seconds apart. Then wait
-for every discovered check and observed automated reviewer to reach a terminal state.
-Poll no more often than every 30 seconds and wait at most 20 minutes for registration and
-completion together. A green test check is not proof that an observed review check or bot
-has finished.
+Print the CI start line. From the trusted default branch, build an expected automation
+inventory from branch protection, configured or previously observed automated reviewers,
+and only workflows applicable to this pull request's event, base and head branch filters,
+changed-path filters, and job or workflow conditions. Exclude workflows and jobs whose
+triggers or conditions provably do not apply. For the current remote head, wait for
+automation to register. Discovery is stable only when the observed non-missing results
+exactly match the applicable expected inventory in two polls at least 30 seconds apart.
+An additional observed result extends the expected inventory and restarts stabilization;
+an expected item with no result remains pending until the deadline. Then wait for every
+expected check and automated reviewer to reach a terminal state. Poll no more often than
+every 30 seconds and wait at most 20 minutes for registration and completion together. A
+green test check is not proof that an observed review check or bot has finished.
 
 After automation is terminal, read failures, pull request reviews, current review threads,
 and bot comments. Compare each finding with the current remote head and diff. Ignore
@@ -267,11 +307,13 @@ and bot comments, including findings discovered after a resumed run:
 4. Run Local review with a fresh reviewer on the new immutable head. Never push a repair
    without that approval. If there is no pull request yet, continue to Create or reuse the
    pull request. If the pull request exists, push the exact approved SHA refspec to its
-   existing branch, then reply to each addressed review thread with the repair commit and
-   check evidence. Resolve only threads whose feedback is fully addressed. For top-level
-   reviews or standalone bot comments, reply where supported or add one pull request
-   comment linking the original finding, repair commit, and checks. Keep new or still-valid
-   findings open. Return to the automation gate for the new remote head.
+   existing branch, then persist the new head, locally approved SHA, exact check evidence,
+   existing pull request URL, and repair count before continuing. Reply to each addressed
+   review thread with the repair commit and check evidence. Resolve only threads whose
+   feedback is fully addressed. For top-level reviews or standalone bot comments, reply
+   where supported or add one pull request comment linking the original finding, repair
+   commit, and checks. Keep new or still-valid findings open. Return to the automation gate
+   for the new remote head.
 
 # Ready or stopped
 
