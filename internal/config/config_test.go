@@ -453,6 +453,7 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"`machinist:ready-for-review` or a verified ready/completed state",
 		"stale remote",
 		"create one deterministic isolated worktree",
+		"each recorded head is an ancestor of",
 		"exact remote pull request head",
 		"clean worktree and equality between the local branch head",
 		"Every subagent prompt must require a concise Markdown handoff",

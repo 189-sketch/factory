@@ -46,8 +46,9 @@ using it. Never reset the repair count on resume.
 
 If duplicate state comments exist, order them by immutable comment ID. Use the newest and
 remove the marker from older comments only when their branch and pull request do not
-conflict, repair counts never fall, and Git proves the recorded heads form a linear
-history. Otherwise set `machinist:needs-human`, ask one precise question, and stop.
+conflict, repair counts never fall, and Git proves each recorded head is an ancestor of
+the next comment's head. Otherwise set `machinist:needs-human`, ask one precise question,
+and stop.
 
 At each phase boundary print only:
 
