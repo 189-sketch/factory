@@ -1,31 +1,52 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-set -eu
+set -euo pipefail
 
-if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
-  echo "usage: $0 DIRECTORY VERSION COMMIT OS/ARCH [execute]" >&2
+release_dir=${1:-dist}
+version=${2:-}
+
+if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "usage: $0 RELEASE_DIRECTORY vMAJOR.MINOR.PATCH" >&2
   exit 2
 fi
 
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-directory=$1
-version=$2
-commit=$3
-target=$4
-mode=${5:-}
-toolchain=$(tr -d '[:space:]' < "$root/.release/go-version")
-execute=
-if [ "$mode" = "execute" ]; then
-  execute=-execute
-elif [ -n "$mode" ]; then
-  echo "verification mode must be execute when provided" >&2
-  exit 2
-fi
+release_name=${version#v}
+commit=$(git rev-parse HEAD)
+targets=(
+  linux/amd64
+  linux/arm64
+  darwin/amd64
+  darwin/arm64
+)
 
-cd "$root"
-GO111MODULE=on GOARCH= GOAMD64=v1 GOARM64=v8.0 GODEBUG= GOENV=off \
-  GOEXPERIMENT= GOFIPS140=off GOFLAGS= GOOS= GOWORK=off \
-  GOTOOLCHAIN="go$toolchain" \
-  exec go run ./cmd/release-artifacts \
-  -root "$root" -output "$directory" -version "$version" -commit "$commit" \
-  -verify-target "$target" $execute
+(
+  cd "$release_dir"
+  shasum -a 256 -c checksums.txt
+)
+grep -F '"version": "'"$version"'"' "$release_dir/release-manifest.json"
+grep -F '"commit": "'"$commit"'"' "$release_dir/release-manifest.json"
+
+verify_dir=$(mktemp -d)
+trap 'rm -rf "$verify_dir"' EXIT
+host_target="$(go env GOOS)/$(go env GOARCH)"
+
+for target in "${targets[@]}"; do
+  goos=${target%/*}
+  goarch=${target#*/}
+  archive="$release_dir/machinist_${release_name}_${goos}_${goarch}.tar.gz"
+  target_dir="$verify_dir/${goos}_${goarch}"
+
+  test -f "$archive"
+  mkdir -p "$target_dir"
+  contents=$(tar -tzf "$archive" | LC_ALL=C sort)
+  expected=$(printf '%s\n' LICENSE README.md machinist | LC_ALL=C sort)
+  test "$contents" = "$expected"
+  tar -C "$target_dir" -xzf "$archive"
+  test -x "$target_dir/machinist"
+  go version -m "$target_dir/machinist" | grep -F "GOOS=$goos"
+  go version -m "$target_dir/machinist" | grep -F "GOARCH=$goarch"
+
+  if [[ "$target" == "$host_target" ]]; then
+    test "$("$target_dir/machinist" version)" = "$version"
+  fi
+done

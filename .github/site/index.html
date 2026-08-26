@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Machinist runs dependable coding-agent workflows against your local Git repositories.">
+    <meta name="theme-color" content="#12100e">
+    <title>Machinist | Coding-agent workflows that stay under your control</title>
+    <link rel="canonical" href="https://machinist.sh/">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="nav">
+      <a class="wordmark" href="/" aria-label="Machinist home">
+        <span aria-hidden="true">M/</span> Machinist
+      </a>
+      <a class="nav-link" href="https://github.com/owainlewis/machinist">GitHub</a>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Local control plane for coding agents</p>
+        <h1>Build a workflow.<br>Let the agents run it.</h1>
+        <p class="lede">
+          Machinist turns reusable prompts into direct or managed coding-agent
+          runs, while commands, repositories, and credentials stay on your machines.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/owainlewis/machinist#readme">Get started</a>
+          <a class="button secondary" href="https://github.com/owainlewis/machinist">View source</a>
+        </div>
+        <div class="install" aria-label="Install command">
+          <span>$</span>
+          <code>go install github.com/owainlewis/machinist/cmd/machinist@latest</code>
+        </div>
+      </section>
+
+      <section class="features" aria-label="Product capabilities">
+        <article>
+          <span class="number">01</span>
+          <h2>Define the work once</h2>
+          <p>Keep agents, prompts, models, and ordered pipelines in strict, reviewable configuration.</p>
+        </article>
+        <article>
+          <span class="number">02</span>
+          <h2>Run locally or managed</h2>
+          <p>Execute in the current worktree or submit durable jobs to workers through the local control plane.</p>
+        </article>
+        <article>
+          <span class="number">03</span>
+          <h2>Keep machine authority local</h2>
+          <p>Workers resolve logical names into local commands, repository paths, environments, and credentials.</p>
+        </article>
+      </section>
+
+      <section class="principle">
+        <p class="eyebrow">A deliberate boundary</p>
+        <blockquote>“The control plane sends intent. The worker owns machine authority.”</blockquote>
+        <p>
+          One Go binary includes the CLI, control plane, managed worker, SQLite
+          state, and browser interface. No hosted account is required.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <span>Machinist</span>
+      <span>Open source under the MIT License</span>
+    </footer>
+  </body>
+</html>
