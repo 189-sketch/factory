@@ -1,6 +1,6 @@
 # Local Control Plane V1
 
-Status: Proposed for local implementation
+Status: Implemented
 
 ## 1. Outcome
 
@@ -61,14 +61,17 @@ timeout = "60m"
 These are the two shipped agent definitions. Users can add their own agents and compose
 them into named pipelines; pipeline configuration and execution are unchanged.
 
-The worker file owns machine-specific execution, repositories, and credentials:
+The worker owns the machine-specific execution and credential boundary. Its
+configuration file stores executor commands, repository paths, and token-file
+paths. Provider credentials come from executor configuration or the worker
+process environment:
 
 ```toml
 data_directory = "~/.factory/worker"
 
 [control_plane]
 url = "http://127.0.0.1:7331"
-token_file = "~/.factory/worker.token"
+token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
 command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
@@ -179,8 +182,11 @@ terminate the local agent process, including when heartbeat delivery temporarily
 - `GET /`: embedded React application.
 - `GET /api/v1/status`: summary-only jobs, runs, workers, available selections, and CSRF
   token. Stored result and event payloads are not included in periodic status responses.
-- `POST /api/v1/jobs`: submit an agent or pipeline job from the local application. It requires a
-  server-generated CSRF token plus matching loopback Host and Origin headers.
+- `GET /api/v1/catalog`: agent and pipeline names plus every repository name previously
+  advertised by a worker. The CLI uses this catalog to validate managed submissions.
+- `POST /api/v1/jobs`: submit an agent or pipeline job. CLI submissions require the
+  worker bearer token. Browser submissions require a server-generated CSRF token plus
+  matching loopback Host and Origin headers.
 - `POST /api/v1/workers/poll`: authenticate a worker, update last-seen state, and lease
   one compatible run when available. The request includes the worker name and its
   process instance ID, executor names, repository names, and per-executor model aliases
@@ -193,11 +199,11 @@ terminate the local agent process, including when heartbeat delivery temporarily
   terminal result and optional result/events payload. The request must include the opaque
   lease token.
 
-Worker endpoints require `Authorization: Bearer <token>`. The V1 status page and form are
-intended for the loopback listener and have no user authentication. The submission form
-uses a random process-local CSRF token, and submissions with a missing or foreign Origin
-are rejected. Starting the server on a non-loopback address is rejected so that this
-limitation is explicit.
+Worker endpoints and CLI submissions require `Authorization: Bearer <token>`. The V1
+status page, catalog, and form are intended for the loopback listener and have no user
+authentication. The submission form uses a random process-local CSRF token, and browser
+submissions with a missing or foreign Origin are rejected. Starting the server on a
+non-loopback address is rejected so that this limitation is explicit.
 
 Workers permit plain HTTP only for loopback control-plane URLs. Non-loopback URLs require
 HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
@@ -250,7 +256,7 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
 
 GitHub or Linear intake, ticket synchronization, label interpretation, prompt result
 interpretation, live log streaming, worker enrollment, token issuance, general retry
-counts or backoff policy, interrupted-process resumption, event-file transfer,
-exactly-once side effects, cancellation, repository cloning, worktrees, scheduling,
+counts or backoff policy, interrupted-process resumption, exactly-once side effects,
+cancellation, repository cloning, worktrees, scheduling,
 multiple control-plane replicas, non-loopback serving, TLS, and production web
 authentication.

@@ -4,6 +4,7 @@ frontend:
     cd internal/controlplane/web && npm ci && npm run build
 
 build: frontend
+    mkdir -p bin
     go build -o bin/factory ./cmd/factory
 
 test:
