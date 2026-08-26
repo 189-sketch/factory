@@ -169,6 +169,52 @@ func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
 	}
 }
 
+func TestServerRejectsRepositoryRemovedFromCurrentWorkers(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+
+	auth := map[string]string{"Authorization": "Bearer secret"}
+	for _, instance := range []string{"worker-old-a", "worker-old-b"} {
+		workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+			"instance_id": instance, "name": instance, "executors": []string{"test"}, "repositories": []string{"removed"},
+		}, auth)
+		if workerPoll.StatusCode != http.StatusOK {
+			t.Fatalf("historical worker poll status = %d", workerPoll.StatusCode)
+		}
+		workerPoll.Body.Close()
+		if _, err := server.store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id=?`, time.Now().Add(-workerAvailabilityWindow-time.Second).UTC().Format(time.RFC3339Nano), instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	currentPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
+		"instance_id": "worker-current", "name": "current-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+	}, auth)
+	if currentPoll.StatusCode != http.StatusOK {
+		t.Fatalf("current worker poll status = %d", currentPoll.StatusCode)
+	}
+	currentPoll.Body.Close()
+
+	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
+		"prompt": "must not queue", "repository": "removed", "agent": "plan",
+	}, auth)
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("removed repository status = %d, body = %s", response.StatusCode, body)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || !strings.Contains(string(body), "not defined in the control plane") {
+		t.Fatalf("removed repository body = %q, error = %v", body, err)
+	}
+
+	status := getStatus(t, webServer.URL)
+	if len(status.Jobs) != 0 {
+		t.Fatalf("removed repository was persisted: %#v", status.Jobs)
+	}
+}
+
 func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	_, webServer := newTestHTTPServer(t)
 	defer webServer.Close()

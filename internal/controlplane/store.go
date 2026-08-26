@@ -503,6 +503,31 @@ func (s *Store) KnownRepositories(ctx context.Context) ([]string, error) {
 	return repositories, rows.Err()
 }
 
+// SubmissionRepositories uses current worker advertisements when any worker is
+// current, while retaining historical advertisements when all workers are away.
+func (s *Store) SubmissionRepositories(ctx context.Context, seenAfter time.Time) ([]string, error) {
+	repositories, err := s.AvailableRepositories(ctx, seenAfter)
+	if err != nil {
+		return nil, err
+	}
+	if len(repositories) > 0 {
+		return repositories, nil
+	}
+
+	var currentWorker bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM workers w
+WHERE julianday(w.last_seen_at) >= julianday(?)
+   OR EXISTS (SELECT 1 FROM runs r WHERE r.worker_instance=w.instance_id AND r.state='running')
+)`, seenAfter.UTC().Format(time.RFC3339Nano)).Scan(&currentWorker); err != nil {
+		return nil, err
+	}
+	if currentWorker {
+		return repositories, nil
+	}
+	return s.KnownRepositories(ctx)
+}
+
 func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) {
 	var output RunOutput
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(result,''),COALESCE(events,'') FROM runs WHERE id=?`, runID).Scan(&output.Result, &output.Events)
