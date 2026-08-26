@@ -3,10 +3,11 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
-	InstanceID   string   `json:"instance_id"`
-	Name         string   `json:"name"`
-	Executors    []string `json:"executors"`
-	Repositories []string `json:"repositories"`
+	InstanceID   string              `json:"instance_id"`
+	Name         string              `json:"name"`
+	Executors    []string            `json:"executors"`
+	Repositories []string            `json:"repositories"`
+	Models       map[string][]string `json:"models,omitempty"`
 }
 
 type PollResponse struct {
@@ -19,6 +20,7 @@ type RunSpec struct {
 	Agent          string `json:"agent"`
 	AgentHash      string `json:"agent_hash"`
 	Executor       string `json:"executor"`
+	Model          string `json:"model,omitempty"`
 	Repository     string `json:"repository"`
 	RenderedPrompt string `json:"rendered_prompt"`
 	TimeoutMillis  int64  `json:"timeout_millis"`

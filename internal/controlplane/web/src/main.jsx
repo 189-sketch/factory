@@ -18,6 +18,7 @@ function App() {
   const [selection, setSelection] = useState("");
   const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("");
   const [statusError, setStatusError] = useState("");
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [submitError, setSubmitError] = useState("");
@@ -105,7 +106,7 @@ function App() {
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Factory-CSRF": status.csrf_token },
-        body: JSON.stringify({ prompt, repository, [kind]: name }),
+        body: JSON.stringify({ prompt, repository, model: model.trim(), [kind]: name }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -162,7 +163,7 @@ function App() {
             </div>
           </header>
 
-          {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
@@ -189,7 +190,7 @@ function App() {
   );
 }
 
-function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, submitting, submit, close }) {
+function RunComposer({ choices, repositories, selection, setSelection, repository, setRepository, prompt, setPrompt, model, setModel, submitting, submit, close }) {
   return <Card className="overflow-hidden border-primary/25">
     <div className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-5">
       <h2 className="text-sm font-semibold">New run</h2>
@@ -200,6 +201,7 @@ function RunComposer({ choices, repositories, selection, setSelection, repositor
         <label><span className="field-label">Run with</span><select className="field-control" value={selection} onChange={(event) => setSelection(event.target.value)} required>{choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
         <label><span className="field-label">Repository</span><select className="field-control font-mono" value={repository} onChange={(event) => setRepository(event.target.value)} disabled={!repositories.length} required>{repositories.length ? repositories.map((name) => <option key={name} value={name}>{name}</option>) : <option value="">No registered repositories</option>}</select></label>
       </div>
+      <label><span className="field-label">Model <span className="font-normal normal-case tracking-normal text-muted-foreground">optional</span></span><input className="field-control font-mono" value={model} onChange={(event) => setModel(event.target.value)} placeholder="luna" maxLength={128} /></label>
       <label><span className="field-label">Prompt</span><textarea className="field-control min-h-28 resize-y" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Work on ticket https://github.com/acme/repo/issues/123" required /></label>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection || !repository}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
     </form>
@@ -244,6 +246,6 @@ function firstSelection(status) { if (status.pipelines?.length) return `pipeline
 function viewFromHash(hash) { const value = hash.replace(/^#\//, ""); return ["runs", "analytics", "workers", "agents", "pipelines"].includes(value) ? value : "runs"; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }
 function relativeTime(value) { if (!value || value === zeroTime) return "Not started"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000)); if (seconds < 10) return "just now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
-function runDetails(run) { const values = [run.worker_name || run.executor]; if (Number.isSafeInteger(run.duration_millis)) values.push(formatDurationMillis(run.duration_millis)); if (run.completed_at && run.completed_at !== zeroTime) values.push(`${formatTokenUsage(run.token_usage)} tokens`); return values.join(" · "); }
+function runDetails(run) { const values = [run.worker_name || run.executor]; if (run.model) values.push(run.model); if (Number.isSafeInteger(run.duration_millis)) values.push(formatDurationMillis(run.duration_millis)); if (run.completed_at && run.completed_at !== zeroTime) values.push(`${formatTokenUsage(run.token_usage)} tokens`); return values.join(" · "); }
 
 createRoot(document.getElementById("root")).render(<App />);

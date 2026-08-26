@@ -19,6 +19,7 @@ type commandOptions struct {
 	agentName         string
 	pipelineName      string
 	prompt            string
+	model             string
 	repository        string
 	stdin             io.Reader
 	stdout            io.Writer
@@ -157,6 +158,7 @@ func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
 		_ = run.MarkFlagRequired("agent")
 	}
 	run.Flags().StringVar(&options.prompt, "prompt", "", "work request supplied to the agent prompt (required)")
+	run.Flags().StringVar(&options.model, "model", "", "executor model or configured alias for this task")
 	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
 	run.Flags().StringVar(&options.factoryConfigPath, "factory-config", "", "shared Factory configuration file")
 	_ = run.MarkFlagRequired("prompt")
@@ -183,6 +185,16 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
+	if err := config.ValidateModelSelection(agents, options.model); err != nil {
+		return err
+	}
+	if options.model != "" {
+		for _, agent := range agents {
+			if _, err := worker.ResolveAgentModel(agent, options.model); err != nil {
+				return err
+			}
+		}
+	}
 	for index, agent := range agents {
 		fmt.Fprintf(options.stderr, "factory: pipeline %s: agent %d/%d %s\n", options.pipelineName, index+1, len(agents), agent.Name)
 		if err := runAgent(ctx, options, worker, agent); err != nil {
@@ -198,7 +210,7 @@ func runAgent(ctx context.Context, options *commandOptions, worker config.Worker
 	if err != nil {
 		return err
 	}
-	agent, err = worker.ResolveAgent(agent)
+	agent, err = worker.ResolveAgentModel(agent, options.model)
 	if err != nil {
 		return err
 	}

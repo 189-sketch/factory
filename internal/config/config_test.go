@@ -177,6 +177,95 @@ timeout = "45s"
 	}
 }
 
+func TestResolveAgentModelUsesAliasAndLeavesDefaultOptional(t *testing.T) {
+	worker := Worker{Executors: map[string]Executor{"codex": {
+		Command: []string{"codex", "exec", "--model=" + modelParameter, "-"},
+		Models:  map[string]string{"luna": "gpt-5.6-luna"},
+	}}}
+	agent := ResolvedAgent{Executor: "codex"}
+
+	resolved, err := worker.ResolveAgentModel(agent, "luna")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Model != "gpt-5.6-luna" || strings.Join(resolved.Command, " ") != "codex exec --model=gpt-5.6-luna -" {
+		t.Fatalf("resolved = %#v", resolved)
+	}
+	defaulted, err := worker.ResolveAgent(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaulted.Model != "" || strings.Join(defaulted.Command, " ") != "codex exec -" {
+		t.Fatalf("defaulted = %#v", defaulted)
+	}
+}
+
+func TestResolveAgentModelRejectsUnsupportedSelection(t *testing.T) {
+	for name, executor := range map[string]Executor{
+		"missing placeholder": {Command: []string{"agent", "run"}},
+		"unknown alias":       {Command: []string{"agent", "--model=" + modelParameter}, Models: map[string]string{"fast": "fast-v1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := (Worker{Executors: map[string]Executor{"test": executor}}).ResolveAgentModel(ResolvedAgent{Executor: "test"}, "other")
+			if err == nil {
+				t.Fatal("expected model selection error")
+			}
+		})
+	}
+}
+
+func TestWorkerModelCapabilitiesAndConfiguration(t *testing.T) {
+	worker, err := applyWorkerDefaultsWithHostname(Worker{
+		Name:          "test",
+		DataDirectory: t.TempDir(),
+		Executors: map[string]Executor{
+			"aliased": {Command: []string{"agent", "--model=" + modelParameter}, Models: map[string]string{"slow": "v2", "fast": "v1"}},
+			"raw":     {Command: []string{"agent", "--model=" + modelParameter}},
+			"fixed":   {Command: []string{"agent"}},
+		},
+	}, func() (string, error) { return "unused", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := worker.ModelCapabilities()
+	if strings.Join(capabilities["aliased"], ",") != "fast,slow" || capabilities["raw"] == nil {
+		t.Fatalf("capabilities = %#v", capabilities)
+	}
+	if _, ok := capabilities["fixed"]; ok {
+		t.Fatalf("fixed executor advertised model support: %#v", capabilities)
+	}
+
+	_, err = applyWorkerDefaultsWithHostname(Worker{
+		Name:          "test",
+		DataDirectory: t.TempDir(),
+		Executors:     map[string]Executor{"invalid": {Command: []string{"agent"}, Models: map[string]string{"fast": "v1"}}},
+	}, func() (string, error) { return "unused", nil })
+	if err == nil || !strings.Contains(err.Error(), modelParameter) {
+		t.Fatalf("invalid model config error = %v", err)
+	}
+}
+
+func TestValidateModelSelectionRejectsMixedExecutorPipeline(t *testing.T) {
+	agents := []ResolvedAgent{{Name: "plan", Executor: "codex"}, {Name: "build", Executor: "claude"}}
+	if err := ValidateModelSelection(agents, "fast"); err == nil {
+		t.Fatal("expected mixed-executor model selection error")
+	}
+	if err := ValidateModelSelection(agents, ""); err != nil {
+		t.Fatalf("model-less pipeline: %v", err)
+	}
+}
+
+func TestLoadWorkerRejectsCompoundModelPlaceholderArgument(t *testing.T) {
+	_, err := applyWorkerDefaultsWithHostname(Worker{
+		Name:          "test",
+		DataDirectory: t.TempDir(),
+		Executors:     map[string]Executor{"invalid": {Command: []string{"agent", "prefix-" + modelParameter}}},
+	}, func() (string, error) { return "unused", nil })
+	if err == nil || !strings.Contains(err.Error(), "complete optional") {
+		t.Fatalf("compound placeholder error = %v", err)
+	}
+}
+
 func TestRenderPromptReplacesEveryPromptParameterWithoutReevaluation(t *testing.T) {
 	agent := ResolvedAgent{Prompt: "Before {{factory.prompt}} between {{factory.prompt}} after"}
 	prompt := "fix {{factory.prompt}} and $(touch never)"
