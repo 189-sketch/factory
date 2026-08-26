@@ -438,32 +438,61 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rule := range []string{
-		"Never plan the solution, edit code",
-		"Use at most two repair attempts",
-		"Use attempt `0` for planning",
-		"attempts `1` and `2` for the first and second repairs",
-		"Every planning, build, review, and repair subagent prompt",
-		"SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>",
-		"print or paste a complete diff",
-		"replace it with a fresh subagent on the same immutable head",
-		"issue URL, acceptance criteria, worktree, branch, base SHA, head SHA",
-		"Never inline or print the diff",
-		"open one non-draft pull request",
-		"Keep the issue labeled `machinist:verifying`",
-		"poll no more often than every 30 seconds",
+		"Never plan the",
+		"Perform this discovery at the start of every run",
+		"CI failure:",
+		"Review feedback:",
+		"Open pull request:",
+		"Existing implementation:",
+		"New issue:",
+		"A resumed run still has at most two total repair attempts",
+		"Existing work must reuse its branch, absolute worktree, and pull request",
+		"create a second pull request for the issue",
+		"Every subagent prompt must require its final response to be a concise Markdown handoff",
+		"## Planning handoff",
+		"## Build handoff",
+		"## Review handoff",
+		"## Repair handoff",
+		"Never print a complete diff",
+		"fresh subagent on the same immutable head",
+		"issue URL, acceptance criteria, worktree, branch, base",
+		"Never inline the",
+		"non-draft pull request linked to the issue",
+		"Use this one loop for defects from local review, CI",
+		"After every code change",
+		"An approval applies only to the reviewed SHA",
+		"push the immutable",
+		"Poll no more often than every 30 seconds",
 		"at most 20 minutes",
 		"set `machinist:blocked`",
-		"resolve only threads whose feedback is fully",
-		"Treat only findings that still apply to the current",
-		"Never merge the pull request",
+		"Resolve only threads whose feedback is fully",
+		"Compare each finding with the current remote head and diff",
+		"one `<!-- machinist:foreman-pr -->` marker",
+		"Never merge",
+		"Keep the open-pull-request",
 	} {
 		if !strings.Contains(foreman.Prompt, rule) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
 		}
 	}
-	for _, forbidden := range []string{"open one draft pull request", "mark the pull request ready for human review", "branch, complete diff"} {
+	for _, forbidden := range []string{
+		"open one draft pull request",
+		"mark the pull request ready for human review",
+		"branch, complete diff",
+		"SUBAGENT role=<role>",
+	} {
 		if strings.Contains(foreman.Prompt, forbidden) {
 			t.Fatalf("foreman prompt still contains %q", forbidden)
+		}
+	}
+	for _, heading := range []string{
+		"# Ordered state entry\n",
+		"## Local review\n",
+		"## Open pull request: automation gate\n",
+		"# Shared repair loop\n",
+	} {
+		if count := strings.Count(foreman.Prompt, heading); count != 1 {
+			t.Fatalf("foreman prompt contains %q %d times, want once", heading, count)
 		}
 	}
 
