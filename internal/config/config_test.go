@@ -454,6 +454,8 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"`machinist:ready-for-review` or a verified ready/completed state",
 		"stale remote",
 		"Repair or create its deterministic isolated worktree",
+		"fast-forward a clean local head that is an ancestor",
+		"Preserve dirty, ahead, or unpublished",
 		"each recorded head is an ancestor of",
 		"Never overwrite",
 		"Create a missing local",
@@ -470,12 +472,16 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"Never inline the diff",
 		"non-draft pull request linked",
 		"For both paths, confirm the base, exact head, issue link",
+		"recheck that it is open before pushing",
+		"return to linked-pull-request resolution",
 		"Use this one loop for local review, CI",
 		"Resolve linked pull requests before",
-		"Reuse exactly one open pull request and ignore historical closed requests",
-		"If multiple are open or any is merged",
-		"Only when none is open, reopen and verify one uniquely safe",
-		"multiple candidates or any selection, reopening, or verification",
+		"Reuse exactly one open pull request and ignore historical closed or merged",
+		"If multiple are open, or none is open and any is merged",
+		"With none open and",
+		"closed-unmerged candidates present",
+		"multiple candidates or any",
+		"selection, reopening, or verification failure",
 		"For any existing or reopened",
 		"open pull request without a usable worktree",
 		"After every code change",
@@ -494,8 +500,9 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"`<!-- machinist:foreman-pr -->`",
 		"persist its head, approval, checks",
 		"If none remain, return to the originating stage",
-		"Persist the increment",
-		"failure keeps the",
+		"Persist the count",
+		"immediately after a code-changing commit and before Local review",
+		"failure keeps the prior count",
 		"If no",
 		"pull request exists, continue to Create or reuse the pull request",
 		"Never merge",
@@ -529,11 +536,11 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	if existing, open := strings.Index(foreman.Prompt, "**Existing implementation:**"), strings.Index(foreman.Prompt, "**Open pull request:**"); existing < 0 || open < 0 || existing > open {
 		t.Fatalf("foreman prompt must classify unpublished implementation before open pull request: existing=%d open=%d", existing, open)
 	}
-	if reopen, recover := strings.Index(foreman.Prompt, "Only when none is open, reopen and verify"), strings.Index(foreman.Prompt, "For any existing or reopened"); reopen < 0 || recover < 0 || reopen > recover {
+	if reopen, recover := strings.Index(foreman.Prompt, "closed-unmerged candidates present"), strings.Index(foreman.Prompt, "For any existing or reopened"); reopen < 0 || recover < 0 || reopen > recover {
 		t.Fatalf("foreman prompt must reopen a unique safe pull request before worktree recovery: reopen=%d recover=%d", reopen, recover)
 	}
-	if words := len(strings.Fields(foreman.Prompt)); words > 2150 {
-		t.Fatalf("foreman prompt has %d words, want no more than 2150", words)
+	if words := len(strings.Fields(foreman.Prompt)); words > 2200 {
+		t.Fatalf("foreman prompt has %d words, want no more than 2200", words)
 	}
 
 	audit, err := LoadAgent(definition, "audit")

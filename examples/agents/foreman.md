@@ -93,17 +93,20 @@ discovery.
 Associate existing work using verified branch names, commits, pull request links, and
 recorded state. Existing work must reuse its branch, worktree, and pull request. Never
 create a second pull request for the issue. Resolve linked pull requests before
-classification. Reuse exactly one open pull request and ignore historical closed requests.
-If multiple are open or any is merged, persist `machinist:needs-human`, ask one precise
-question, and stop. Only when none is open, reopen and verify one uniquely safe
-closed-unmerged request. On multiple candidates or any selection, reopening, or verification
-failure, persist `machinist:needs-human`, ask one precise question, and stop. For any existing or reopened
-open pull request without a usable worktree, fetch its head. Create a missing local branch
+classification. Reuse exactly one open pull request and ignore historical closed or merged
+requests. If multiple are open, or none is open and any is merged, persist
+`machinist:needs-human`, ask one precise question, and stop. With none open and
+closed-unmerged candidates present, reopen and verify one only when uniquely safe. On multiple candidates or any
+selection, reopening, or verification failure, persist `machinist:needs-human`, ask one
+precise question, and stop. For any existing or reopened open pull request without a usable worktree, fetch its head. Create a missing local branch
 at that exact SHA, or recover an
 existing branch there only when it has no unpublished state. Preserve an unpublished branch
 at its head. Repair or create its deterministic isolated worktree at
 `~/Code/.worktrees/<repo>/<issue>-resume`, then route through Existing implementation; ask
-one precise question if its history diverges. Never overwrite a branch.
+one precise question if its history diverges. Never overwrite a branch. Whether the
+worktree existed or was recovered, fast-forward a clean local head that is an ancestor of
+the remote pull request head to that exact remote SHA. Preserve dirty, ahead, or unpublished
+state; send divergent history to `machinist:needs-human`.
 
 Reconstruct used repair attempts from the state comment, repair commits, and issue or pull
 request history. Use the greatest proved count. A resumed run still has at most two total
@@ -189,9 +192,10 @@ request, push `<approved-sha>:refs/heads/<branch>` and open one non-draft pull r
 to the issue with a short summary and exact checks. Add or update one issue comment
 containing `<!-- machinist:foreman-pr -->` and its URL.
 With an existing pull request, verify the approved SHA descends from its remote head and
-push the same immutable refspec to that branch. Never create another pull request. Keep the
+recheck that it is open before pushing the same immutable refspec to that branch. If it
+closed, return to linked-pull-request resolution. Never create another pull request. Keep the
 worktree while it is open. For both paths, confirm the base, exact head, issue link, and
-non-draft state. On failure set `machinist:needs-human`, persist the evidence, and stop.
+open non-draft state. On failure set `machinist:needs-human`, persist the evidence, and stop.
 Otherwise persist the state, set `machinist:verifying`, and enter the Automation gate.
 
 ## Automation gate
@@ -220,13 +224,13 @@ including feedback found on a resumed run:
 1. Recheck findings against the current head and keep only valid unresolved code defects.
    If none remain, return to the originating stage without consuming an attempt. The
    Automation gate handles terminal non-code failures.
-2. Reserve the next repair count and block if it would exceed two. Persist the increment
-   only after code changes; a tooling, credential, or infrastructure failure keeps the
-   prior count.
+2. Reserve the next repair count and block if it would exceed two.
 3. Set `machinist:building` and prompt a fresh repair subagent with only the refined task,
    verified branch and worktree, current head, exact failing evidence, and valid findings.
    It fixes only those findings, runs affected checks, inspects its diff, commits without an
-   agent co-author, avoids GitHub changes, and returns the Repair handoff.
+   agent co-author, avoids GitHub changes, and returns the Repair handoff. Persist the count
+   immediately after a code-changing commit and before Local review. A tooling, credential,
+   or infrastructure failure keeps the prior count.
 4. Run Local review on the new immutable head. Never push without fresh approval. If no
    pull request exists, continue to Create or reuse the pull request. Otherwise push the
    approved SHA to its existing branch, then persist its head, approval, checks, pull
