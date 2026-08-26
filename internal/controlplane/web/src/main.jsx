@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { formatDurationMillis, formatTokenUsage } from "@/run-metrics";
+import { runDetails } from "@/run-metrics";
 import "./styles.css";
 
 const activeStates = new Set(["queued", "running"]);
@@ -246,6 +246,4 @@ function firstSelection(status) { if (status.pipelines?.length) return `pipeline
 function viewFromHash(hash) { const value = hash.replace(/^#\//, ""); return ["runs", "analytics", "workers", "agents", "pipelines"].includes(value) ? value : "runs"; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }
 function relativeTime(value) { if (!value || value === zeroTime) return "Not started"; const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 1000)); if (seconds < 10) return "just now"; if (seconds < 60) return `${seconds}s ago`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
-function runDetails(run) { const values = [run.worker_name || run.executor]; if (run.model) values.push(run.model); if (Number.isSafeInteger(run.duration_millis)) values.push(formatDurationMillis(run.duration_millis)); if (run.completed_at && run.completed_at !== zeroTime) values.push(`${formatTokenUsage(run.token_usage)} tokens`); return values.join(" · "); }
-
 createRoot(document.getElementById("root")).render(<App />);

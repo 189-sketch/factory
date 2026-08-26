@@ -26,4 +26,13 @@ export function formatTokenUsage(value) {
   return typeof value === "string" && /^(0|[1-9]\d*)$/.test(value) ? value.replace(/\B(?=(\d{3})+(?!\d))/g, ",") : "Unavailable";
 }
 
+export function runDetails(run) {
+  const values = [run.executor];
+  if (run.worker_name) values.push(run.worker_name);
+  if (run.model) values.push(run.model);
+  if (Number.isSafeInteger(run.duration_millis)) values.push(formatDurationMillis(run.duration_millis));
+  if (run.completed_at && run.completed_at !== zeroTime) values.push(`${formatTokenUsage(run.token_usage)} tokens`);
+  return values.join(" · ");
+}
+
 function validDate(value) { return Boolean(value && value !== zeroTime && Number.isFinite(Date.parse(value))); }

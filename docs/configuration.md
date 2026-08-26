@@ -9,9 +9,9 @@ settings.
 | Worker configuration | executors, model aliases, repositories, token paths | `~/.factory/worker.toml` |
 
 `--config` names the primary configuration for each command. It selects the
-Factory definition for `factory start` and the worker file for `factory run` or
-`factory worker start`. For direct runs, select a separate Factory definition
-with `--factory-config`.
+Factory definition for `factory start` and the worker file for `factory run`,
+`factory submit`, or `factory worker start`. For direct runs, select a separate
+Factory definition with `--factory-config`.
 
 ## Define an agent
 

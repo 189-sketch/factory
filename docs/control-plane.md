@@ -45,6 +45,23 @@ repository names, and model aliases, then accepts one compatible run at a time.
 Node.js is not needed at runtime. The React application is embedded in the
 Factory binary.
 
+## Submit from the CLI
+
+The browser and `factory submit` use the same managed queue. Pass the configured
+repository name, not its worker-local path:
+
+```sh
+factory submit \
+  --agent=foreman \
+  --repo=factory \
+  --prompt="Complete https://github.com/example/project/issues/123"
+```
+
+Submit reads the control-plane URL and bearer-token path from `worker.toml`,
+checks the repository and selected agent or pipeline against the server's
+catalog, queues the job, and prints its ID. Use `factory run` when you want to
+execute immediately without contacting the control plane.
+
 ## Ownership boundary
 
 The server sends a worker only:

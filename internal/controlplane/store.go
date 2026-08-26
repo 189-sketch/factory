@@ -486,6 +486,23 @@ ORDER BY wr.repository`, seenAfter.UTC().Format(time.RFC3339Nano))
 	return repositories, rows.Err()
 }
 
+func (s *Store) KnownRepositories(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT repository FROM worker_repositories ORDER BY repository`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	repositories := []string{}
+	for rows.Next() {
+		var repository string
+		if err := rows.Scan(&repository); err != nil {
+			return nil, err
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, rows.Err()
+}
+
 func (s *Store) RunOutput(ctx context.Context, runID string) (RunOutput, error) {
 	var output RunOutput
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(result,''),COALESCE(events,'') FROM runs WHERE id=?`, runID).Scan(&output.Result, &output.Events)

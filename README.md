@@ -110,6 +110,21 @@ Then start the server and worker in separate terminals:
 Open [http://127.0.0.1:7331](http://127.0.0.1:7331), choose a repository and
 agent, and submit a work request.
 
+You can also queue managed work from the CLI. Use the repository name from
+`worker.toml`, not its local path:
+
+```sh
+./bin/factory submit \
+  --agent=foreman \
+  --prompt="Complete https://github.com/your-org/your-repo/issues/123" \
+  --repo=my-project
+```
+
+`factory run` executes immediately and never contacts the control plane.
+`factory submit` validates the selection with the control plane, queues it, and
+prints the admitted job ID. `factory worker run` remains available as the
+worker-namespaced direct path for a single agent.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md): requirements, installation, and
@@ -129,6 +144,10 @@ agent, and submit a work request.
 Factory is early software. It currently targets trusted local automation on
 macOS and Linux. The control plane intentionally accepts only loopback listeners;
 remote deployment needs a separate authentication and TLS boundary.
+
+The opt-in Python eval under [`evals/`](evals/) runs the complete default workflow against
+a dedicated scratch repository and verifies its issue-label lifecycle. It is separate
+from `just check` because it creates real GitHub issues and pull requests.
 
 ## License
 

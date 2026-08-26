@@ -24,6 +24,16 @@ factory run \
 Use direct mode for one task, local experimentation, or scripts that already
 have their own scheduling.
 
+`factory worker run` is the worker-namespaced direct path. It runs one named
+agent locally and remains independent of the control plane:
+
+```sh
+factory worker run \
+  --agent=foreman \
+  --repo=/absolute/path/to/repository \
+  --prompt="Complete https://github.com/example/project/issues/123"
+```
+
 Factory deliberately does not manage clones, worktrees, branches, commits, or
 pull requests in direct mode. The selected agent and its reviewed prompt own
 those actions.
@@ -41,6 +51,20 @@ The server owns portable definitions, rendered prompts, the job queue, and run
 history. Each worker owns executable commands, repository paths, credentials,
 and local artifacts. See [Local control plane](control-plane.md) for setup and
 security boundaries.
+
+Submit managed work from the browser or the CLI. The CLI uses a configured
+repository name rather than a local path:
+
+```sh
+factory submit \
+  --agent=foreman \
+  --repo=my-project \
+  --prompt="Complete https://github.com/example/project/issues/123"
+```
+
+`factory submit` validates the repository and agent or pipeline against the
+control-plane catalog, queues the job through its API, and prints the admitted
+job ID. It does not execute the agent locally.
 
 ## Agents and pipelines
 
