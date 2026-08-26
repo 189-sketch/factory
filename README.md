@@ -14,8 +14,8 @@ checked pull request, on your machine and under your control.
 [![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-18181b)](#project-status)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-7c3aed)](LICENSE)
 
-[Website](https://machinist.sh) · [Getting started](docs/getting-started.md) ·
-[How it works](docs/how-it-works.md) · [Architecture](ARCHITECTURE.md)
+[Getting started](docs/getting-started.md) · [How it works](docs/how-it-works.md) ·
+[Architecture](ARCHITECTURE.md)
 
 </div>
 
@@ -109,9 +109,10 @@ flowchart LR
 
 The shared `config.toml` supplies portable agents, prompts, and pipelines to the
 CLI and control plane. Machine-local `worker.toml` settings supply executors,
-repositories, and model mappings to direct runs and managed workers. This split
-keeps commands, paths, credentials, and artifacts with the machine that performs
-the work.
+model mappings, and the data directory to both execution paths. Named repository
+mappings belong to managed workers; direct mode takes an existing Git worktree
+path. This split keeps commands, paths, credentials, and artifacts with the
+machine that performs the work.
 
 ## Why Machinist?
 
