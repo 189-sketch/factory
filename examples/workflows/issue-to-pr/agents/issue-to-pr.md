@@ -60,11 +60,13 @@ Finish with one line:
    continue until every discovered check and reviewer is terminal. Wait at most 20
    minutes. Repair confirmed code defects within the same two-round limit and run a fresh
    local review before each push, then repeat this wait for the new head. Do not spend a
-   repair round on unavailable infrastructure. If any discovered check or reviewer is
-   still pending at the deadline, set the state to `factory:blocked`, comment with the
-   pending names and elapsed time, and stop. After all automation is terminal, if an
-   unsuccessful result is not a confirmed code defect that can enter the repair loop,
-   set the state to `factory:blocked`, comment with the exact failure evidence, and stop.
+   repair round on unavailable infrastructure. If a confirmed code defect remains after
+   both repair rounds, set the state to `factory:blocked`, comment with the unresolved
+   evidence, and stop. If any discovered check or reviewer is still pending at the
+   deadline, set the state to `factory:blocked`, comment with the pending names and
+   elapsed time, and stop. After all automation is terminal, if an unsuccessful result is
+   not a confirmed code defect that can enter the repair loop, set the state to
+   `factory:blocked`, comment with the exact failure evidence, and stop.
 8. Only when every discovered check and reviewer for the current head is terminal, all
    checks pass, and no review finding remains unresolved, set the state to
    `factory:ready-for-review` and comment on the issue with the pull request, checks,
