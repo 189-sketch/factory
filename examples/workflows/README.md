@@ -10,10 +10,21 @@ contract easy to scan without adding another Factory schema.
 | [Multi-review](multi-review/README.md) | Runs a Codex review and then a Claude Code review against the same pull request. |
 | [Code audit](code-audit/README.md) | Audits a repository and opens issues only for independently verified bugs. |
 
-Every example runs directly with `factory run`. To use one with the control plane, copy
-its agent and pipeline definitions into `~/.factory/config.toml`, copy its prompt files
-under `~/.factory/agents/`, and register the target checkout in
-`~/.factory/worker.toml`:
+Every example runs directly with `factory run`. Initialize Factory once:
+
+```sh
+factory init
+```
+
+Before a direct or managed run, ensure `~/.factory/worker.toml` defines every executor
+named by the selected example. Issue to PR and code audit require `codex`; multi-review
+requires both `codex` and `claude`. The shipped [worker configuration](../worker.toml)
+contains both definitions. `factory init` keeps an existing worker file unchanged, so add
+missing executors yourself when upgrading an existing setup.
+
+To use an example with the control plane, copy its agent and pipeline definitions into
+`~/.factory/config.toml`, copy its prompt files under `~/.factory/agents/`, and register
+the target checkout in `~/.factory/worker.toml`:
 
 ```toml
 [repositories.my-project]
