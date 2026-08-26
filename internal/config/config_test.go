@@ -438,49 +438,54 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rule := range []string{
-		"Never plan the",
+		"Never plan the solution",
 		"Perform this discovery at the start of every run",
-		"CI failure:",
-		"Review feedback:",
-		"Open pull request:",
-		"Existing implementation:",
-		"Completed planning:",
-		"New issue:",
-		"A resumed run still has at most two total repair attempts",
-		"Existing work must reuse its branch, absolute worktree, and pull request",
+		"**Existing implementation:**",
+		"**CI failure:**",
+		"**Review feedback:**",
+		"**Open pull request:**",
+		"**Completed planning:**",
+		"**New issue:**",
+		"a verified branch without an open pull request",
+		"at most two total",
+		"Existing work must reuse its branch, worktree, and pull request",
 		"create a second pull request for the issue",
-		"Treat a verified `machinist:ready-for-review` label",
-		"Never let stale remote CI or review state",
-		"recreate the recorded isolated worktree",
-		"do not select one",
-		"Every subagent prompt must require its final response to be a concise Markdown handoff",
+		"`machinist:ready-for-review` or a verified ready/completed state",
+		"stale remote",
+		"create one deterministic isolated worktree",
+		"exact remote pull request head",
+		"clean worktree and equality between the local branch head",
+		"Every subagent prompt must require a concise Markdown handoff",
 		"## Planning handoff",
 		"## Build handoff",
 		"## Review handoff",
 		"## Repair handoff",
-		"Never print a complete diff",
-		"inspect the branch, HEAD,",
-		"never replace it on the old immutable head",
-		"issue URL, acceptance criteria, worktree, branch, base",
-		"Never inline the",
-		"non-draft pull request linked to the issue",
-		"Use this one loop for defects from local review, CI",
+		"complete diff",
+		"inspect the branch, HEAD, worktree, and commits",
+		"read-only reviewer",
+		"Never inline the diff",
+		"non-draft pull request linked",
+		"Use this one loop for local review, CI",
 		"After every code change",
-		"An approval applies only to the reviewed SHA",
-		"push the immutable",
-		"and persist the branch, head, check evidence",
-		"only workflows applicable to this pull request's event",
-		"exactly match the applicable expected inventory",
-		"an expected item with no result remains pending",
-		"Poll no more often than",
+		"Approval applies only to the reviewed SHA",
+		"push `<approved-sha>:refs/heads/<branch>`",
+		"automated reviewers and review bots",
+		"event, branch, path",
+		"exactly match the",
+		"missing expected results remain pending",
+		"Exclude human",
+		"Poll no more often than every 30 seconds",
 		"at most 20 minutes",
 		"set `machinist:blocked`",
-		"Resolve only threads whose",
-		"Compare each finding with the current remote head and diff",
-		"one `<!-- machinist:foreman-pr -->` marker",
-		"persist the new head, locally approved SHA",
+		"resolve only threads whose feedback is fully addressed",
+		"Compare each finding with",
+		"`<!-- machinist:foreman-pr -->`",
+		"persist its head, approval, checks",
+		"If none remain, return to the originating stage",
+		"If no",
+		"pull request exists, continue to Create or reuse the pull request",
 		"Never merge",
-		"Keep the open-pull-request",
+		"Keep the open-pull-request worktree",
 	} {
 		if !strings.Contains(foreman.Prompt, rule) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
@@ -499,15 +504,18 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	for _, heading := range []string{
 		"# Ordered state entry\n",
 		"## Local review\n",
-		"## Open pull request: automation gate\n",
+		"## Automation gate\n",
 		"# Shared repair loop\n",
 	} {
 		if count := strings.Count(foreman.Prompt, heading); count != 1 {
 			t.Fatalf("foreman prompt contains %q %d times, want once", heading, count)
 		}
 	}
-	if existing, open := strings.Index(foreman.Prompt, "- **Existing implementation:**"), strings.Index(foreman.Prompt, "- **Open pull request:**"); existing < 0 || open < 0 || existing > open {
+	if existing, open := strings.Index(foreman.Prompt, "**Existing implementation:**"), strings.Index(foreman.Prompt, "**Open pull request:**"); existing < 0 || open < 0 || existing > open {
 		t.Fatalf("foreman prompt must classify unpublished implementation before open pull request: existing=%d open=%d", existing, open)
+	}
+	if words := len(strings.Fields(foreman.Prompt)); words > 2100 {
+		t.Fatalf("foreman prompt has %d words, want no more than 2100", words)
 	}
 
 	audit, err := LoadAgent(definition, "audit")
