@@ -49,7 +49,10 @@ Finish with one line:
    `~/Code/.worktrees/<repo>/<task>`, make
    only the required change, add focused tests, run relevant checks, review its full diff,
    and create Conventional Commits with no agent co-author. It must not push or open a
-   pull request.
+   pull request. It must return the worktree, branch, base SHA, head SHA, changed files,
+   and check evidence. If it times out, crashes, reports a tooling or credential blocker,
+   or returns without all of that evidence, set the state to `factory:blocked`, comment
+   with the failure evidence, and stop before verification.
 5. Set the state to `factory:verifying`. Give a fresh read-only review subagent the issue
    URL, acceptance criteria, worktree, branch, base SHA, head SHA, changed files, and check
    evidence. It must inspect every changed line and verify the criteria. It must not edit,
@@ -81,10 +84,14 @@ Finish with one line:
    After all automation is terminal, if an unsuccessful result is not a confirmed code
    defect that can enter the repair loop, set the state to `factory:blocked`, comment with
    the exact failure evidence, and stop.
-8. Only when every discovered check and reviewer for the current head is terminal, all
-   checks pass, and no review finding remains unresolved, set the state to
-   `factory:ready-for-review` and comment on the issue with the pull request, checks,
-   review result, and repair count.
+8. Immediately before handoff, fetch the pull request's remote head SHA and compare it
+   with the exact SHA approved by the latest local reviewer. If they differ, do not mark
+   the issue ready. Review the remote head in a fresh isolated worktree and repeat the
+   automation gate, or set the state to `factory:blocked` if the unexpected head cannot be
+   reviewed safely. Only when the remote head equals the latest locally approved SHA,
+   every discovered check and reviewer for that head is terminal, all checks pass, and no
+   review finding remains unresolved, set the state to `factory:ready-for-review` and
+   comment on the issue with the pull request, checks, review result, and repair count.
 
 # Boundaries
 
