@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,11 @@ import (
 )
 
 const (
-	outputChunkBytes = 32 << 10
-	outputDrainGrace = time.Second
+	outputChunkBytes       = 32 << 10
+	outputDrainGrace       = time.Second
+	tokenUsageFileName     = "token_usage"
+	tokenUsageEnvironment  = "FACTORY_TOKEN_USAGE_PATH"
+	maxTokenUsageFileBytes = 64
 )
 
 type State string
@@ -53,6 +57,7 @@ type Result struct {
 	StartedAt      time.Time `json:"started_at"`
 	CompletedAt    time.Time `json:"completed_at"`
 	DurationMillis int64     `json:"duration_millis"`
+	TokenUsage     *int64    `json:"token_usage,omitempty"`
 	EventsPath     string    `json:"events_path"`
 }
 
@@ -136,10 +141,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if err := log.append("run.started", "", fmt.Sprintf("agent=%s repository=%s", options.Agent.Name, repository)); err != nil {
 		return result, &RuntimeError{Cause: err}
 	}
+	tokenUsagePath := filepath.Join(runDirectory, tokenUsageFileName)
+	if err := os.Remove(tokenUsagePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return completeFailure(&result, log, runDirectory, fmt.Errorf("reset executor token usage report: %w", err))
+	}
 
 	command := exec.Command(options.Agent.Command[0], options.Agent.Command[1:]...)
 	command.Dir = repository
-	command.Env = append(sanitizedEnvironment(os.Environ()), "FACTORY_RUN_ID="+runID, "FACTORY_REPOSITORY="+repository)
+	command.Env = append(sanitizedEnvironment(os.Environ()), "FACTORY_RUN_ID="+runID, "FACTORY_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
 	configureProcess(command)
 
 	stdinReader, stdinWriter, err := os.Pipe()
@@ -456,10 +465,28 @@ func finish(result *Result, log *eventLog, runDirectory string, state State, exi
 	result.ExitCode = exitCode
 	result.CompletedAt = completedAt
 	result.DurationMillis = completedAt.Sub(result.StartedAt).Milliseconds()
+	result.TokenUsage = readTokenUsage(filepath.Join(runDirectory, tokenUsageFileName))
 	if err := writeResult(filepath.Join(runDirectory, "result.json"), *result); err != nil {
 		return err
 	}
 	return nil
+}
+
+func readTokenUsage(path string) *int64 {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, maxTokenUsageFileBytes+1))
+	if err != nil || len(body) > maxTokenUsageFileBytes {
+		return nil
+	}
+	value, err := strconv.ParseInt(strings.TrimSpace(string(body)), 10, 64)
+	if err != nil || value < 0 {
+		return nil
+	}
+	return &value
 }
 
 func writeResult(path string, result Result) error {

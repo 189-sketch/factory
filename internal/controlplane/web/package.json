@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "1.2.4",

@@ -17,10 +17,8 @@ import (
 var initialFiles = []string{
 	"config.toml",
 	"worker.toml",
-	"agents/plan.md",
-	"agents/build.md",
-	"agents/verify.md",
 	"agents/foreman.md",
+	"agents/audit.md",
 }
 
 func newInitCommand(options *commandOptions) *cobra.Command {
