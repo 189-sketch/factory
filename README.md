@@ -64,7 +64,7 @@ evidence instead of quietly continuing forever.
 | **Quality gates** | Independent review and repository checks must pass before handoff. |
 | **Repeatable execution** | The same runner supervises direct work and managed jobs. |
 | **Traceability** | Ordered event logs, terminal results, job state, and run history record what happened. |
-| **Human authority** | Machinist prepares the change. A person owns the final merge decision. |
+| **Human authority** | The shipped foreman stops after preparing the change. Its workflow leaves the merge decision to a person. |
 
 The default `foreman` runs the issue-to-pull-request production line. Machinist
 also ships a read-only `audit` agent that inspects a repository, independently
@@ -140,7 +140,9 @@ the work.
 | **Server required** | No | Yes, on loopback by default |
 
 Both modes use the same configuration, prompt rendering, process supervision,
-exit behavior, and artifact format.
+and artifact format. Direct commands map process outcomes to CLI exit codes.
+Managed submission returns after admission; the durable job records each later
+run outcome.
 
 ## Quick start
 
@@ -234,8 +236,9 @@ You can submit the same managed work from the CLI. Use the repository name from
    work.
 4. **Failure is visible and bounded.** Timeouts, cancellations, findings,
    failed checks, and exhausted repairs produce explicit outcomes.
-5. **The human remains accountable.** Automation can prepare and verify a pull
-   request. It cannot make the merge decision.
+5. **The human remains accountable.** The shipped foreman prepares and verifies
+   a pull request, then stops. Its workflow leaves the merge decision to a
+   person.
 
 ## Documentation
 
@@ -258,6 +261,11 @@ You can submit the same managed work from the CLI. Use the repository name from
 Machinist is early software for trusted local automation on macOS and Linux.
 The control plane intentionally accepts only loopback listeners. Remote
 deployment needs a separate authenticated web surface and TLS boundary.
+
+Prompt rules define the shipped agents' behavior, including the instruction not
+to merge. Operating-system permissions, repository permissions, and credential
+scope enforce their actual capabilities. Review the prompts and executor
+commands before use.
 
 The opt-in Python evaluation suite under [`evals/`](evals/) exercises the
 complete default workflow against a dedicated scratch repository. It is
