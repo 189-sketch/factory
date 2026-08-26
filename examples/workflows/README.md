@@ -12,4 +12,13 @@ contract easy to scan without adding another Factory schema.
 
 Every example runs directly with `factory run`. To use one with the control plane, copy
 its agent and pipeline definitions into `~/.factory/config.toml`, copy its prompt files
-under `~/.factory/agents/`, restart `factory start`, and submit it with `factory submit`.
+under `~/.factory/agents/`, and register the target checkout in
+`~/.factory/worker.toml`:
+
+```toml
+[repositories.my-project]
+path = "/absolute/path/to/my-project"
+```
+
+Restart `factory start` and `factory worker start`, then submit with
+`factory submit --repo=my-project`.
