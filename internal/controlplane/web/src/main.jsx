@@ -159,7 +159,7 @@ function App() {
             <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setDark((value) => !value)} aria-label="Toggle theme">{dark ? <Moon className="size-4" /> : <Sun className="size-4" />}</Button>
-              <Button onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
+              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
             </div>
           </header>
 
@@ -170,7 +170,7 @@ function App() {
             <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-1 overflow-x-auto" role="group" aria-label="Filter runs">
                 {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"]].map(([value, label]) => (
-                  <Button key={value} variant={filter === value ? "outline" : "ghost"} size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={filter === value ? "bg-surface" : ""}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
+                  <Button key={value} variant={filter === value ? "outline" : "ghost"} size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={cn("text-xs!", filter === value && "bg-surface")}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">{counts.all} run{counts.all === 1 ? "" : "s"}</p>
