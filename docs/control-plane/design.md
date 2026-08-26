@@ -1,6 +1,6 @@
 # Local Control Plane V1
 
-Status: Proposed for local implementation
+Status: Implemented
 
 ## 1. Outcome
 
@@ -61,14 +61,17 @@ timeout = "60m"
 These are the two shipped agent definitions. Users can add their own agents and compose
 them into named pipelines; pipeline configuration and execution are unchanged.
 
-The worker file owns machine-specific execution, repositories, and credentials:
+The worker owns the machine-specific execution and credential boundary. Its
+configuration file stores executor commands, repository paths, and token-file
+paths. Provider credentials come from executor configuration or the worker
+process environment:
 
 ```toml
 data_directory = "~/.factory/worker"
 
 [control_plane]
 url = "http://127.0.0.1:7331"
-token_file = "~/.factory/worker.token"
+token_file = "~/.factory/server/worker.token"
 
 [executors.codex]
 command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
@@ -250,7 +253,7 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
 
 GitHub or Linear intake, ticket synchronization, label interpretation, prompt result
 interpretation, live log streaming, worker enrollment, token issuance, general retry
-counts or backoff policy, interrupted-process resumption, event-file transfer,
-exactly-once side effects, cancellation, repository cloning, worktrees, scheduling,
+counts or backoff policy, interrupted-process resumption, exactly-once side effects,
+cancellation, repository cloning, worktrees, scheduling,
 multiple control-plane replicas, non-loopback serving, TLS, and production web
 authentication.

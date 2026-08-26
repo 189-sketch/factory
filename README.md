@@ -1,230 +1,135 @@
 # Factory
 
-Factory runs coding agents as supervised workloads. V1 is a standalone Worker:
-one command selects a configured agent prompt, runs it inside a Git repository,
-streams its output, and saves an ordered event log and terminal result.
+Run a local team of coding agents that turns GitHub issues into reviewed pull
+requests.
 
-Factory deliberately does not manage clones, worktrees, branches, commits, or
-pull requests in this version. Those responsibilities belong to the selected
-agent and its trusted prompt.
-
-## Build
-
-Requirements are macOS or Linux, Go 1.26 or newer, Git, and the agent executable
-named by your definition.
-
-```sh
-just build
-```
-
-## Configure
-
-`config.toml` contains shared server, agent, and pipeline configuration.
-`worker.toml` contains machine-local executors, repositories, and credentials.
-
-```sh
-factory init
-```
-
-This installs editable defaults in `~/.factory`: shared configuration, worker
-configuration, the `foreman` and `audit` prompts, and a random worker token.
-Running it again creates any missing files and keeps every existing file unchanged.
-
-Add repositories to `~/.factory/worker.toml`:
-
-```toml
-data_directory = "~/.factory/worker"
-
-[control_plane]
-url = "http://127.0.0.1:7331"
-token_file = "~/.factory/server/worker.token"
-
-[executors.codex]
-command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
-models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
-
-[executors.claude]
-command = ["claude", "--print", "--model={{factory.model}}", "--dangerously-skip-permissions"]
-models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
-
-# [repositories.my-project]
-# path = "/absolute/path/to/my-project"
-```
-
-The optional worker `name` defaults to the machine hostname. Set it only when a
-different display name is useful.
-
-Choose a model for one task with `--model=luna`. Factory resolves the alias through
-the selected executor and substitutes `{{factory.model}}` in that executor's command.
-Omit `--model` to use the coding agent's normal default. The control-plane New run
-form accepts the same optional alias. Put the placeholder in a complete optional
-`--flag={{factory.model}}` argument. Model-selected pipelines must use one executor.
-
-The shared configuration resolves prompt paths relative to itself:
-
-```toml
-[agents.foreman]
-executor = "codex"
-prompt_file = "agents/foreman.md"
-timeout = "120m"
-
-[agents.audit]
-executor = "codex"
-prompt_file = "agents/audit.md"
-timeout = "60m"
-```
-
-The default agents are trusted local automation. `foreman` supervises fresh planning,
-build, and review subagents and can change files and GitHub state. `audit` delegates
-repository inspection and independent bug verification to fresh subagents. It keeps the
-repository read-only and can create at most three GitHub issues for verified,
-non-duplicate correctness bugs. Both use Codex with `danger-full-access` so GitHub and
-worktrees outside the current repository are available. Review prompts before running
-them and use them only on repositories and issues you trust. The prompts treat task and
-repository content as untrusted text.
-
-Each agent prompt is a strict Factory template and must place the runtime work request using
-the supported parameter:
+Factory is an open-source runtime and control plane for supervised coding work.
+Give its foreman an issue. It plans the work, dispatches fresh agents to build
+and review the change, waits for the repository's checks, and hands you a pull
+request to merge.
 
 ```text
-{{factory.prompt}}
+GitHub issue -> plan -> build -> independent review -> CI -> pull request
+                                                            ^
+                                                      you decide to merge
 ```
 
-Factory substitutes the input prompt as plain text. It does not evaluate it as a
-shell command or recursively expand parameters inside it. The rendered agent prompt
-is limited to 512 KiB.
+Factory runs on your machine, in your repositories, with the coding tools you
+already use. Agent prompts and workflows are files you can read, change, and
+version. The control plane records what ran without trying to guess whether an
+agent's prose means the job is done.
 
-## Run
+## Why Factory?
 
-Use the foreman for supervised coding work:
+- **One request, a complete workflow.** The foreman coordinates planning,
+  implementation, review, repair, and CI instead of stopping after one coding
+  session.
+- **Review before handoff.** A fresh agent reviews the exact change. Failed
+  checks and valid findings go back through a bounded repair loop.
+- **Your tools and models.** Factory launches configured executors such as Codex
+  or Claude. Model aliases let you choose per task without hard-coding provider
+  details into prompts.
+- **Local by default.** Repository paths, credentials, and executor commands
+  stay on the worker. Managed results and event logs are copied only to the
+  loopback control plane's local SQLite database.
+- **A human owns the merge.** The shipped foreman can prepare and verify a pull
+  request. It never merges one.
+
+Factory also ships a read-only `audit` agent that inspects a repository,
+independently verifies possible bugs, and opens evidence-backed issues for the
+ones it can prove.
+
+## Quick start
+
+You need macOS or Linux, Go 1.26+, Git, an authenticated
+[GitHub CLI](https://cli.github.com/), and an authenticated
+[Codex CLI](https://developers.openai.com/codex/cli/). The default foreman uses
+Codex and its native subagents.
+
+### 1. Build and initialize
+
+From a Factory source checkout:
 
 ```sh
-factory run \
+mkdir -p ./bin
+go build -o ./bin/factory ./cmd/factory
+./bin/factory init
+```
+
+`factory init` creates editable configuration and agent prompts in
+`~/.factory`. It keeps existing files unchanged when you run it again.
+
+### 2. Give the foreman an issue
+
+```sh
+./bin/factory run \
   --agent=foreman \
+  --repo=/absolute/path/to/your-repository \
   --prompt="Complete https://github.com/your-org/your-repo/issues/123"
 ```
 
-The foreman writes each subagent prompt from the latest task state. It allows at most two
-targeted repair attempts, requires one-line subagent summaries, records every phase and
-attempt in the run output, and opens a non-draft pull request after local approval. The
-issue stays in `factory:verifying` while available CI and automated review run, and changes
-to `factory:ready-for-review` only when every review gate passes. The foreman never merges.
+Use a small, well-defined issue for the first run. Factory streams the agent's
+output and saves an ordered event log and terminal result under
+`~/.factory/worker/runs/`.
 
-Use the audit agent to inspect a repository without changing it:
+### 3. Review the pull request
+
+The foreman leaves the issue and pull request ready for a person to review. It
+does not merge.
+
+To inspect a repository without changing it:
 
 ```sh
-factory run \
+./bin/factory run \
   --agent=audit \
+  --repo=/absolute/path/to/your-repository \
   --prompt="Audit the request handling and persistence code"
 ```
 
-The audit sends inspection to fresh general-purpose subagents and uses a different fresh
-subagent to verify each candidate correctness bug. It checks current open GitHub issues
-for duplicates before creating up to three evidence-backed bug tickets. It never edits
-code, creates a branch or commit, pushes code, or opens a pull request.
+## Run the local control plane
 
-Factory still supports user-defined agents and pipelines. For example, after adding the
-corresponding prompt files, a configuration can define its own quality pipeline:
+Direct mode is the fastest way to try Factory. When you want a queue, durable
+run history, and a browser UI, add a repository to
+`~/.factory/worker.toml`:
 
 ```toml
-[agents.lint]
-executor = "codex"
-prompt_file = "agents/lint.md"
-timeout = "20m"
-
-[agents.test]
-executor = "codex"
-prompt_file = "agents/test.md"
-timeout = "30m"
-
-[pipelines.quality]
-agents = ["lint", "test"]
+[repositories.my-project]
+path = "/absolute/path/to/my-project"
 ```
 
-Run a user-defined pipeline by name:
+Then start the server and worker in separate terminals:
 
 ```sh
-factory run \
-  --pipeline=quality \
-  --prompt="Check the current repository"
+./bin/factory start
 ```
-
-Factory runs each listed agent independently and in order, passing the same input prompt
-to every run. It stops before the next agent when a run fails. Agent output remains
-opaque: a zero pipeline exit status means every agent process completed successfully,
-not that Factory interpreted or approved the result.
-
-Or pass the repository and configuration explicitly:
 
 ```sh
-factory run --agent=foreman \
-  --prompt="Complete https://github.com/your-org/your-repo/issues/123" \
-  --repo=/absolute/path/to/repository \
-  --config=/absolute/path/to/worker.toml
+./bin/factory worker start
 ```
 
-Each agent receives its rendered prompt on standard input and runs with the Git
-repository as its working directory. `--prompt` is required and replaces every
-`{{factory.prompt}}` token byte-for-byte. The input may be a ticket instruction or any
-other work request. Standard output and error remain live.
-Factory records byte-faithful output chunks as base64 under
-`<data_directory>/runs/<run-id>/events.jsonl` and writes the terminal outcome to
-`result.json` in the same directory. Managed redispatches place each lease attempt under
-`<data_directory>/runs/<run-id>/<lease-token>/` so an abandoned attempt remains intact.
-Every result records measured duration. An executor may explicitly report its exact total
-token usage by writing one non-negative base-10 integer to `FACTORY_TOKEN_USAGE_PATH`.
-Factory stores and displays that value without estimating it; when the file is not written
-or is invalid, token usage remains unavailable rather than becoming zero.
-Recording stops after 64 MiB of process output or
-when the encoded event file reaches 32 MiB, and adds a truncation event while live output
-and the agent run continue.
+Open [http://127.0.0.1:7331](http://127.0.0.1:7331), choose a repository and
+agent, and submit a work request.
 
-Ctrl-C cancels the complete agent process group. A configured timeout does the
-same. Factory returns the agent's exit status, `1` for a Worker runtime failure,
-`124` for timeout, `130` for cancellation, and `2` for invalid commands or
-configuration.
+## Documentation
 
-## Control plane
+- [Getting started](docs/getting-started.md): requirements, installation, and
+  first runs
+- [How Factory works](docs/how-it-works.md): direct runs, managed runs,
+  supervision, and artifacts
+- [Configuration](docs/configuration.md): agents, executors, models, prompts,
+  and pipelines
+- [Local control plane](docs/control-plane.md): server, workers, security, and
+  failure recovery
+- [Development](docs/development.md): build, test, and project layout
+- [Control-plane design](docs/control-plane/design.md): the detailed V1 design
+  and invariants
 
-The optional local control plane stores jobs and runs in SQLite and serves an embedded
-React application. Node is needed only to rebuild the frontend; the resulting Factory
-binary contains the static assets.
+## Project status
 
-`factory init` creates the shared worker token. Start both processes after adding
-at least one repository to `worker.toml`. Each command reads its default configuration
-file:
-
-```sh
-factory start
-factory worker start
-```
-
-Factory listens on [http://127.0.0.1:7331](http://127.0.0.1:7331). Port 8080 is not
-used. This first control-plane phase deliberately rejects non-loopback listeners. The
-server owns prompts and pipelines; the worker owns executor commands, repository paths,
-and credentials. Workers receive only a rendered prompt, executor name, repository key,
-timeout, and opaque lease. Managed leases expire after 30 seconds and are renewed every
-10 seconds while an agent runs. Polling requeues abandoned runs whose lease is no longer
-renewed, allowing a compatible worker to receive a new token and execute them. A stale
-worker may finish locally after losing connectivity, but it cannot update control-plane
-state after redispatch.
-
-The control plane treats output as opaque. It records whether each agent process is
-queued, running, or terminal, but it does not interpret ticket labels or decide whether
-the requested product outcome is complete.
-
-Rebuild the React assets and Go binary together with:
-
-```sh
-just build
-```
-
-## Verify
-
-```sh
-just check
-```
+Factory is early software. It currently targets trusted local automation on
+macOS and Linux. The control plane intentionally accepts only loopback listeners;
+remote deployment needs a separate authentication and TLS boundary.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
