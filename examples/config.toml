@@ -1,7 +1,7 @@
 [server]
 listen = "127.0.0.1:7331"
-database = "~/.factory/server/factory.db"
-worker_token_file = "~/.factory/server/worker.token"
+database = "~/.machinist/server/machinist.db"
+worker_token_file = "~/.machinist/server/worker.token"
 
 [agents.foreman]
 executor = "codex"

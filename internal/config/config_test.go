@@ -21,7 +21,7 @@ func TestLoadWorkerResolvesRelativePathsFromConfig(t *testing.T) {
 	if worker.DataDirectory != filepath.Join(directory, "state") {
 		t.Fatalf("data directory = %q", worker.DataDirectory)
 	}
-	definition, err := worker.ResolveFactoryConfig("")
+	definition, err := worker.ResolveMachinistConfig("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,14 +94,14 @@ token_file = "token"
 [executors.test]
 command = ["agent", "run"]
 
-[repositories.factory]
+[repositories.machinist]
 path = "repository"
 `)
 	worker, err := LoadWorker(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repository, err := worker.ResolveRepository("factory"); err != nil || repository != filepath.Join(directory, "repository") {
+	if repository, err := worker.ResolveRepository("machinist"); err != nil || repository != filepath.Join(directory, "repository") {
 		t.Fatalf("repository = %q, %v", repository, err)
 	}
 	if token, err := worker.WorkerToken(); err != nil || token != "secret" {
@@ -117,9 +117,9 @@ func TestLoadConfigCombinesServerAgentsAndPipelines(t *testing.T) {
 	directory := t.TempDir()
 	writeTestFile(t, filepath.Join(directory, "token"), "secret")
 	path := filepath.Join(directory, "config.toml")
-	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{factory.prompt}}.\n")
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{machinist.prompt}}.\n")
 	writeTestFile(t, path, `[server]
-database = "state/factory.db"
+database = "state/machinist.db"
 worker_token_file = "token"
 
 [agents.plan]
@@ -129,16 +129,16 @@ prompt_file = "plan.md"
 [pipelines.code]
 agents = ["plan"]
 `)
-	factoryConfig, err := LoadConfig(path)
+	machinistConfig, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := factoryConfig.Server
-	if server.Listen != "127.0.0.1:7331" || server.Database != filepath.Join(directory, "state", "factory.db") {
+	server := machinistConfig.Server
+	if server.Listen != "127.0.0.1:7331" || server.Database != filepath.Join(directory, "state", "machinist.db") {
 		t.Fatalf("server = %#v", server)
 	}
-	if factoryConfig.Path() != path || len(factoryConfig.Agents) != 1 || len(factoryConfig.Pipelines) != 1 {
-		t.Fatalf("Factory config = %#v, path = %q", factoryConfig, factoryConfig.Path())
+	if machinistConfig.Path() != path || len(machinistConfig.Agents) != 1 || len(machinistConfig.Pipelines) != 1 {
+		t.Fatalf("Machinist config = %#v, path = %q", machinistConfig, machinistConfig.Path())
 	}
 	if token, err := server.WorkerToken(); err != nil || token != "secret" {
 		t.Fatalf("token = %q, %v", token, err)
@@ -147,7 +147,7 @@ agents = ["plan"]
 
 func TestLoadAgentResolvesPromptAndHashesDefinition(t *testing.T) {
 	directory := t.TempDir()
-	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository for {{factory.prompt}}.\n")
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Inspect the repository for {{machinist.prompt}}.\n")
 	definition := filepath.Join(directory, "config.toml")
 	writeTestFile(t, definition, `[agents.plan]
 executor = "test"
@@ -159,7 +159,7 @@ timeout = "45s"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Name != "plan" || agent.Prompt != "Inspect the repository for {{factory.prompt}}.\n" {
+	if agent.Name != "plan" || agent.Prompt != "Inspect the repository for {{machinist.prompt}}.\n" {
 		t.Fatalf("unexpected agent: %#v", agent)
 	}
 	if agent.Timeout != 45*time.Second {
@@ -266,9 +266,20 @@ func TestLoadWorkerRejectsCompoundModelPlaceholderArgument(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerRejectsLegacyFactoryModelParameter(t *testing.T) {
+	_, err := applyWorkerDefaultsWithHostname(Worker{
+		Name:          "test",
+		DataDirectory: t.TempDir(),
+		Executors:     map[string]Executor{"invalid": {Command: []string{"agent", "--model={{factory.model}}"}}},
+	}, func() (string, error) { return "unused", nil })
+	if err == nil || !strings.Contains(err.Error(), "legacy Factory parameter namespace") {
+		t.Fatalf("legacy model parameter error = %v", err)
+	}
+}
+
 func TestRenderPromptReplacesEveryPromptParameterWithoutReevaluation(t *testing.T) {
-	agent := ResolvedAgent{Prompt: "Before {{factory.prompt}} between {{factory.prompt}} after"}
-	prompt := "fix {{factory.prompt}} and $(touch never)"
+	agent := ResolvedAgent{Prompt: "Before {{machinist.prompt}} between {{machinist.prompt}} after"}
+	prompt := "fix {{machinist.prompt}} and $(touch never)"
 	rendered, err := RenderPrompt(agent, prompt)
 	if err != nil {
 		t.Fatal(err)
@@ -299,17 +310,18 @@ func TestRenderPromptRejectsOversizedRenderedPromptBeforeReplacement(t *testing.
 	}
 }
 
-func TestLoadAgentRequiresPromptParameterAndRejectsUnsupportedFactoryParameter(t *testing.T) {
+func TestLoadAgentRequiresPromptParameterAndRejectsUnsupportedMachinistParameter(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		prompt string
 		want   string
 	}{
-		{name: "missing prompt", prompt: "Plan this ticket.\n", want: "must include {{factory.prompt}}"},
-		{name: "legacy task parameter", prompt: "Plan {{factory.task}}.\n", want: "unsupported Factory parameter"},
-		{name: "unsupported parameter", prompt: "Plan {{factory.prompt}} in {{factory.repository}}.\n", want: "unsupported Factory parameter"},
-		{name: "empty parameter", prompt: "Plan {{factory.prompt}} with {{factory.}}.\n", want: "unsupported Factory parameter"},
-		{name: "unclosed parameter", prompt: "Plan {{factory.prompt}} with {{factory.repository.\n", want: "malformed Factory parameter"},
+		{name: "missing prompt", prompt: "Plan this ticket.\n", want: "must include {{machinist.prompt}}"},
+		{name: "legacy Factory namespace", prompt: "Plan {{machinist.prompt}} with {{factory.prompt}}.\n", want: "legacy Factory parameter namespace"},
+		{name: "legacy task parameter", prompt: "Plan {{machinist.task}}.\n", want: "unsupported Machinist parameter"},
+		{name: "unsupported parameter", prompt: "Plan {{machinist.prompt}} in {{machinist.repository}}.\n", want: "unsupported Machinist parameter"},
+		{name: "empty parameter", prompt: "Plan {{machinist.prompt}} with {{machinist.}}.\n", want: "unsupported Machinist parameter"},
+		{name: "unclosed parameter", prompt: "Plan {{machinist.prompt}} with {{machinist.repository.\n", want: "malformed Machinist parameter"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()
@@ -341,8 +353,8 @@ prompt_file = "plan.md"
 
 func TestLoadPipelineResolvesAgentsInOrder(t *testing.T) {
 	directory := t.TempDir()
-	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{factory.prompt}}.\n")
-	writeTestFile(t, filepath.Join(directory, "build.md"), "Build {{factory.prompt}}.\n")
+	writeTestFile(t, filepath.Join(directory, "plan.md"), "Plan {{machinist.prompt}}.\n")
+	writeTestFile(t, filepath.Join(directory, "build.md"), "Build {{machinist.prompt}}.\n")
 	definition := filepath.Join(directory, "config.toml")
 	writeTestFile(t, definition, `[agents.plan]
 executor = "plan"
@@ -437,10 +449,10 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"issue URL, acceptance criteria, worktree, branch, base SHA, head SHA",
 		"Never inline or print the diff",
 		"open one non-draft pull request",
-		"Keep the issue labeled `factory:verifying`",
+		"Keep the issue labeled `machinist:verifying`",
 		"poll no more often than every 30 seconds",
 		"at most 20 minutes",
-		"set `factory:blocked`",
+		"set `machinist:blocked`",
 		"resolve only threads whose feedback is fully",
 		"Treat only findings that still apply to the current",
 		"Never merge the pull request",

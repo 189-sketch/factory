@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/protocol"
-	"github.com/owainlewis/factory-v2/internal/runner"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/protocol"
+	"github.com/owainlewis/machinist-v2/internal/runner"
 )
 
 func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
@@ -25,13 +25,13 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	if status.CSRFToken == "" || len(status.Agents) != 1 || status.Agents[0] != "plan" {
 		t.Fatalf("status = %#v", status)
 	}
-	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"}}, map[string]string{"Authorization": "Bearer secret"})
+	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"machinist"}}, map[string]string{"Authorization": "Bearer secret"})
 	if workerPoll.StatusCode != http.StatusOK {
 		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
 	}
 	workerPoll.Body.Close()
 	status = getStatus(t, webServer.URL)
-	if len(status.Workers) != 1 || len(status.Workers[0].Repositories) != 1 || status.Workers[0].Repositories[0] != "factory" || len(status.Repositories) != 1 || status.Repositories[0] != "factory" {
+	if len(status.Workers) != 1 || len(status.Workers[0].Repositories) != 1 || status.Workers[0].Repositories[0] != "machinist" || len(status.Repositories) != 1 || status.Repositories[0] != "machinist" {
 		t.Fatalf("status = %#v", status)
 	}
 
@@ -41,15 +41,22 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	}
 	unauthorized.Body.Close()
 
-	foreignHeaders := map[string]string{"Origin": "https://evil.example", "X-Factory-CSRF": status.CSRFToken}
-	foreign := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "factory", "agent": "plan"}, foreignHeaders)
+	foreignHeaders := map[string]string{"Origin": "https://evil.example", "X-Machinist-CSRF": status.CSRFToken}
+	foreign := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "agent": "plan"}, foreignHeaders)
 	if foreign.StatusCode != http.StatusForbidden {
 		t.Fatalf("foreign submission status = %d", foreign.StatusCode)
 	}
 	foreign.Body.Close()
 
-	headers := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
-	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "factory", "agent": "plan", "model": "luna"}, headers)
+	legacyHeaders := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
+	legacy := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "agent": "plan"}, legacyHeaders)
+	if legacy.StatusCode != http.StatusForbidden {
+		t.Fatalf("legacy CSRF header status = %d", legacy.StatusCode)
+	}
+	legacy.Body.Close()
+
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
+	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{"prompt": "Work locally", "repository": "machinist", "agent": "plan", "model": "luna"}, headers)
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d", created.StatusCode)
 	}
@@ -63,7 +70,7 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{"prompt":"x"}`))
 	request.Host = "127.0.0.1:7331"
 	request.Header.Set("Origin", "http://127.0.0.1:7331")
-	request.Header.Set("X-Factory-CSRF", server.csrfToken)
+	request.Header.Set("X-Machinist-CSRF", server.csrfToken)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -76,7 +83,7 @@ func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
 	defer webServer.Close()
 
 	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
-		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"machinist"},
 	}, map[string]string{"Authorization": "Bearer secret"})
 	if workerPoll.StatusCode != http.StatusOK {
 		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
@@ -84,7 +91,7 @@ func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
 	workerPoll.Body.Close()
 
 	created := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
-		"prompt": "queue from terminal", "repository": "factory", "agent": "plan",
+		"prompt": "queue from terminal", "repository": "machinist", "agent": "plan",
 	}, map[string]string{"Authorization": "Bearer secret"})
 	if created.StatusCode != http.StatusCreated {
 		t.Fatalf("bearer submission status = %d", created.StatusCode)
@@ -92,7 +99,7 @@ func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
 	created.Body.Close()
 
 	invalid := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
-		"prompt": "must not queue", "repository": "factory", "agent": "plan",
+		"prompt": "must not queue", "repository": "machinist", "agent": "plan",
 	}, map[string]string{"Authorization": "Bearer invalid"})
 	if invalid.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("invalid bearer status = %d", invalid.StatusCode)
@@ -110,7 +117,7 @@ func TestServerRejectsUnavailableRepositoryBeforePersistence(t *testing.T) {
 	defer webServer.Close()
 
 	status := getStatus(t, webServer.URL)
-	headers := map[string]string{"Origin": webServer.URL, "X-Factory-CSRF": status.CSRFToken}
+	headers := map[string]string{"Origin": webServer.URL, "X-Machinist-CSRF": status.CSRFToken}
 	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
 		"prompt": "unknown repository", "repository": "missing", "agent": "plan",
 	}, headers)
@@ -135,7 +142,7 @@ func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
 
 	auth := map[string]string{"Authorization": "Bearer secret"}
 	workerPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
-		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+		"instance_id": "worker-a", "name": "test-worker", "executors": []string{"test"}, "repositories": []string{"machinist"},
 	}, auth)
 	if workerPoll.StatusCode != http.StatusOK {
 		t.Fatalf("worker poll status = %d", workerPoll.StatusCode)
@@ -146,7 +153,7 @@ func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
 	}
 
 	response := postJSON(t, webServer.URL+"/api/v1/jobs", map[string]string{
-		"prompt": "queue while worker is away", "repository": "factory", "agent": "plan",
+		"prompt": "queue while worker is away", "repository": "machinist", "agent": "plan",
 	}, auth)
 	if response.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(response.Body)
@@ -164,7 +171,7 @@ func TestServerQueuesKnownRepositoryWithoutLiveWorker(t *testing.T) {
 	if err := json.NewDecoder(catalogHTTPResponse.Body).Decode(&catalog); err != nil {
 		t.Fatal(err)
 	}
-	if catalogHTTPResponse.StatusCode != http.StatusOK || len(catalog.Repositories) != 1 || catalog.Repositories[0] != "factory" {
+	if catalogHTTPResponse.StatusCode != http.StatusOK || len(catalog.Repositories) != 1 || catalog.Repositories[0] != "machinist" {
 		t.Fatalf("catalog = %#v, status = %d", catalog, catalogHTTPResponse.StatusCode)
 	}
 }
@@ -188,7 +195,7 @@ func TestServerQueuesKnownRepositoryWithUnrelatedLiveWorker(t *testing.T) {
 	}
 
 	currentPoll := postJSON(t, webServer.URL+"/api/v1/workers/poll", map[string]any{
-		"instance_id": "worker-current", "name": "current-worker", "executors": []string{"test"}, "repositories": []string{"factory"},
+		"instance_id": "worker-current", "name": "current-worker", "executors": []string{"test"}, "repositories": []string{"machinist"},
 	}, auth)
 	if currentPoll.StatusCode != http.StatusOK {
 		t.Fatalf("current worker poll status = %d", currentPoll.StatusCode)
@@ -246,7 +253,7 @@ func TestServerExposesReadOnlyDefinitions(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&definitions); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || len(definitions.Agents) != 1 || definitions.Agents[0].Name != "plan" || definitions.Agents[0].Executor != "test" || definitions.Agents[0].Timeout != "1m0s" || !strings.Contains(definitions.Agents[0].Prompt, "{{factory.prompt}}") {
+	if response.StatusCode != http.StatusOK || response.Header.Get("Cache-Control") != "no-store" || len(definitions.Agents) != 1 || definitions.Agents[0].Name != "plan" || definitions.Agents[0].Executor != "test" || definitions.Agents[0].Timeout != "1m0s" || !strings.Contains(definitions.Agents[0].Prompt, "{{machinist.prompt}}") {
 		t.Fatalf("definitions = %#v", definitions)
 	}
 	if len(definitions.Pipelines) != 1 || definitions.Pipelines[0].Name != "default" || len(definitions.Pipelines[0].Agents) != 1 || definitions.Pipelines[0].Agents[0] != "plan" {
@@ -279,10 +286,10 @@ func TestHeartbeatEndpointAuthenticatesAndRejectsInvalidLeases(t *testing.T) {
 	}
 	unknown.Body.Close()
 
-	if _, err := server.store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+	if _, err := server.store.CreateJob(t.Context(), "request", "machinist", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
 		t.Fatal(err)
 	}
-	pollResponse := postJSON(t, webServer.URL+"/api/v1/workers/poll", pollRequest("worker-a", []string{"codex"}, []string{"factory"}), auth)
+	pollResponse := postJSON(t, webServer.URL+"/api/v1/workers/poll", pollRequest("worker-a", []string{"codex"}, []string{"machinist"}), auth)
 	if pollResponse.StatusCode != http.StatusOK {
 		t.Fatalf("poll status = %d", pollResponse.StatusCode)
 	}
@@ -351,14 +358,14 @@ func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	directory := t.TempDir()
 	promptPath := filepath.Join(directory, "plan.md")
-	if err := os.WriteFile(promptPath, []byte("Plan this request:\n{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(promptPath, []byte("Plan this request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	definitionPath := filepath.Join(directory, "config.toml")
 	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n\n[pipelines.default]\nagents = [\"plan\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store := openTestStore(t, filepath.Join(directory, "factory.db"))
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
 	server, err := NewServer(store, definitionPath, "secret")
 	if err != nil {
 		t.Fatal(err)

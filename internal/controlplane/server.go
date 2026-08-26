@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/protocol"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/protocol"
 )
 
 // The runner records up to 64 MiB before base64 encoding. The JSON envelope remains
@@ -397,7 +397,7 @@ func writeUnauthorized(response http.ResponseWriter) {
 }
 
 func (s *Server) validBrowserRequest(request *http.Request) bool {
-	if subtle.ConstantTimeCompare([]byte(request.Header.Get("X-Factory-CSRF")), []byte(s.csrfToken)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(request.Header.Get("X-Machinist-CSRF")), []byte(s.csrfToken)) != 1 {
 		return false
 	}
 	origin, err := url.Parse(request.Header.Get("Origin"))

@@ -1,4 +1,4 @@
-module github.com/owainlewis/factory-v2
+module github.com/owainlewis/machinist-v2
 
 go 1.26.6
 

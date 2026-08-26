@@ -1,8 +1,8 @@
-# Factory architecture
+# Machinist architecture
 
 ## Executive summary
 
-Factory runs trusted coding-agent definitions against existing local Git worktrees. Its
+Machinist runs trusted coding-agent definitions against existing local Git worktrees. Its
 source of truth is split on purpose: `config.toml` owns shared agent prompts and pipelines,
 while `worker.toml` owns machine-local executor commands, repository paths, credentials,
 and the control-plane connection. The direct path resolves both files in one process. The
@@ -17,7 +17,7 @@ environment, and credentials.
 
 ```mermaid
 flowchart LR
-    U[Operator or script] --> CLI[factory CLI]
+    U[Operator or script] --> CLI[machinist CLI]
     U --> WEB[Local React UI]
     CLI --> DIRECT[Direct execution]
     CLI --> CP[Control plane HTTP API]
@@ -38,7 +38,7 @@ connect over loopback HTTP or to a non-loopback HTTPS URL.
 
 ```mermaid
 flowchart TD
-    MAIN[cmd/factory] --> CLI[internal/cli]
+    MAIN[cmd/machinist] --> CLI[internal/cli]
     CLI --> CONFIG[internal/config]
     CLI --> RUNNER[internal/runner]
     CLI --> CP[internal/controlplane]
@@ -68,17 +68,17 @@ loading, which prevents misspelled settings from being ignored.
 
 Configuration files are limited to 1 MiB. An agent prompt and an input prompt are each
 limited to 256 KiB, and the rendered prompt is limited to 512 KiB. The only supported
-prompt parameter is `{{factory.prompt}}`. Model selection uses a separate
-`{{factory.model}}` executor argument placeholder. Neither parameter is evaluated by a
+prompt parameter is `{{machinist.prompt}}`. Model selection uses a separate
+`{{machinist.model}}` executor argument placeholder. Neither parameter is evaluated by a
 shell.
 
-`factory init` installs embedded example definitions under `~/.factory`. It creates files
+`machinist init` installs embedded example definitions under `~/.machinist`. It creates files
 with mode `0600`, directories with mode `0700`, and never overwrites an existing regular
 file.
 
 ## Direct execution
 
-`factory run` and `factory worker run` use the same local execution flow:
+`machinist run` and `machinist worker run` use the same local execution flow:
 
 1. The CLI loads `worker.toml` and resolves the shared `config.toml` path.
 2. It loads one agent or the agents in one pipeline from the shared definition.
@@ -101,7 +101,7 @@ automation boundary.
 
 The managed path adds durable admission and leasing while reusing the same runner:
 
-1. `factory submit` reads the worker token, fetches the control-plane catalog, validates
+1. `machinist submit` reads the worker token, fetches the control-plane catalog, validates
    the logical repository and agent or pipeline, and submits the request with bearer
    authentication.
 2. The control plane reloads the shared definition, resolves and renders every selected
@@ -157,7 +157,7 @@ state, but the first version has one shared token and no per-user roles.
 
 Agent prompts, executor commands, repository mappings, and the non-Git process environment
 are trusted local configuration. A work request is inserted as plain prompt text and is
-not evaluated by Factory. The invoked agent may still act on that text using every tool
+not evaluated by Machinist. The invoked agent may still act on that text using every tool
 and credential its executor environment allows. Prompt rules guide behavior. Operating-
 system permissions, repository permissions, and credential scope enforce capability.
 
@@ -189,7 +189,7 @@ software outcome is correct.
 
 | Concept | Authoritative source |
 | --- | --- |
-| CLI commands and exit mapping | `internal/cli/root.go`, `cmd/factory/main.go` |
+| CLI commands and exit mapping | `internal/cli/root.go`, `cmd/machinist/main.go` |
 | Shared and worker configuration | `internal/config/config.go`, `examples/config.toml`, `examples/worker.toml` |
 | Process supervision and artifacts | `internal/runner/runner.go`, `internal/runner/events.go`, `internal/runner/process_unix.go` |
 | Worker protocol | `internal/protocol/protocol.go` |
@@ -202,10 +202,13 @@ software outcome is correct.
 ## Verification
 
 The architecture was checked against the implementation and the focused tests under
-`cmd/factory` and `internal/`. On 2026-08-26, `just check` passed the frontend tests and
+`cmd/machinist` and `internal/`. On 2026-08-26, `just check` passed the frontend tests and
 build, `go vet`, the race-enabled Go suite, and the Go build. The optional Python eval
 unit suite also passed. The external GitHub lifecycle eval was not run because it creates
 real issues and pull requests.
 
-No real-browser check was needed for this documentation-only change. Browser behavior is
-covered here only to the level supported by the current frontend source and tests.
+A real-browser pass covered the embedded control plane and the public site at 1280px and
+390px widths. Navigation, the new-run form, theme switching, responsive menus, asset
+loading, and horizontal overflow all passed without browser warnings or errors. A managed
+smoke test also submitted a job through a real server and worker, completed it in a
+disposable repository, and confirmed that the result survived a server restart.

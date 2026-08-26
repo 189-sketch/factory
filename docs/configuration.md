@@ -1,21 +1,21 @@
 # Configuration
 
-Factory separates portable workflow definitions from machine-local execution
+Machinist separates portable workflow definitions from machine-local execution
 settings.
 
 | File | Owns | Default path |
 | --- | --- | --- |
-| Factory definition | server, agents, prompt paths, pipelines | `~/.factory/config.toml` |
-| Worker configuration | executors, model aliases, repositories, token paths | `~/.factory/worker.toml` |
+| Machinist definition | server, agents, prompt paths, pipelines | `~/.machinist/config.toml` |
+| Worker configuration | executors, model aliases, repositories, token paths | `~/.machinist/worker.toml` |
 
 `--config` names the primary configuration for each command. It selects the
-Factory definition for `factory start` and the worker file for `factory run`,
-`factory submit`, or `factory worker start`. For direct runs, select a separate
-Factory definition with `--factory-config`.
+Machinist definition for `machinist start` and the worker file for `machinist run`,
+`machinist submit`, or `machinist worker start`. For direct runs, select a separate
+Machinist definition with `--machinist-config`.
 
 ## Define an agent
 
-Agents live in the Factory definition:
+Agents live in the Machinist definition:
 
 ```toml
 [agents.foreman]
@@ -29,14 +29,14 @@ prompt_file = "agents/audit.md"
 timeout = "60m"
 ```
 
-Prompt paths are resolved relative to the Factory definition. Every prompt must
+Prompt paths are resolved relative to the Machinist definition. Every prompt must
 contain the supported work-request parameter:
 
 ```text
-{{factory.prompt}}
+{{machinist.prompt}}
 ```
 
-Factory replaces every occurrence byte-for-byte with the `--prompt` value. It
+Machinist replaces every occurrence byte-for-byte with the `--prompt` value. It
 does not recursively expand parameters in user input. The final rendered prompt
 is limited to 512 KiB.
 
@@ -47,15 +47,15 @@ are machine-specific:
 
 ```toml
 [executors.codex]
-command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
+command = ["codex", "exec", "--model={{machinist.model}}", "--sandbox", "danger-full-access", "-"]
 models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 
 [executors.claude]
-command = ["claude", "--print", "--model={{factory.model}}", "--dangerously-skip-permissions"]
+command = ["claude", "--print", "--model={{machinist.model}}", "--dangerously-skip-permissions"]
 models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
 ```
 
-Factory sends the rendered agent prompt to the command's standard input and uses
+Machinist sends the rendered agent prompt to the command's standard input and uses
 the target repository as its working directory. Standard output and error remain
 live.
 
@@ -67,19 +67,19 @@ own configuration or the worker process environment; they are not fields in
 
 ## Select models per task
 
-The optional `{{factory.model}}` parameter belongs in one complete optional
-argument such as `--model={{factory.model}}`. If a run omits `--model`, Factory
+The optional `{{machinist.model}}` parameter belongs in one complete optional
+argument such as `--model={{machinist.model}}`. If a run omits `--model`, Machinist
 removes that argument and lets the executable use its default.
 
 When an executor declares aliases, callers must choose one of those aliases:
 
 ```sh
-factory run --agent=foreman --model=terra \
+machinist run --agent=foreman --model=terra \
   --repo=/path/to/repository \
   --prompt="Complete https://github.com/example/project/issues/123"
 ```
 
-Factory resolves `terra` through the selected executor before starting the
+Machinist resolves `terra` through the selected executor before starting the
 process. Model-selected pipelines must use one executor so the alias has one
 unambiguous meaning.
 
@@ -105,12 +105,12 @@ agents = ["lint", "test"]
 Then run the pipeline by name:
 
 ```sh
-factory run --pipeline=quality \
+machinist run --pipeline=quality \
   --repo=/path/to/repository \
   --prompt="Check the current repository"
 ```
 
-Factory runs each agent independently, in order, with the same input. It stops
+Machinist runs each agent independently, in order, with the same input. It stops
 at the first unsuccessful process.
 
 ## Register repositories for managed work
@@ -134,9 +134,9 @@ local paths.
 Pass both configuration files when you do not want the defaults:
 
 ```sh
-factory run --agent=foreman \
+machinist run --agent=foreman \
   --config=/absolute/path/to/worker.toml \
-  --factory-config=/absolute/path/to/config.toml \
+  --machinist-config=/absolute/path/to/config.toml \
   --repo=/absolute/path/to/repository \
   --prompt="Complete https://github.com/example/project/issues/123"
 ```

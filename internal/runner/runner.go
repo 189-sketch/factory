@@ -16,14 +16,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/config"
 )
 
 const (
 	outputChunkBytes       = 32 << 10
 	outputDrainGrace       = time.Second
 	tokenUsageFileName     = "token_usage"
-	tokenUsageEnvironment  = "FACTORY_TOKEN_USAGE_PATH"
+	tokenUsageEnvironment  = "MACHINIST_TOKEN_USAGE_PATH"
 	maxTokenUsageFileBytes = 64
 )
 
@@ -148,7 +148,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	command := exec.Command(options.Agent.Command[0], options.Agent.Command[1:]...)
 	command.Dir = repository
-	command.Env = append(sanitizedEnvironment(os.Environ()), "FACTORY_RUN_ID="+runID, "FACTORY_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
 	configureProcess(command)
 
 	stdinReader, stdinWriter, err := os.Pipe()

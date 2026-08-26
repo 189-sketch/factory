@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	factoryexamples "github.com/owainlewis/factory-v2/examples"
+	machinistexamples "github.com/owainlewis/machinist-v2/examples"
 	"github.com/spf13/cobra"
 )
 
@@ -24,20 +24,20 @@ var initialFiles = []string{
 func newInitCommand(options *commandOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
-		Short: "Create the default Factory configuration",
+		Short: "Create the default Machinist configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return initializeFactory(options.stdout)
+			return initializeMachinist(options.stdout)
 		},
 	}
 }
 
-func initializeFactory(output io.Writer) error {
+func initializeMachinist(output io.Writer) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("find user home directory: %w", err)
 	}
-	directory := filepath.Join(home, ".factory")
+	directory := filepath.Join(home, ".machinist")
 	for _, path := range []string{directory, filepath.Join(directory, "agents"), filepath.Join(directory, "server")} {
 		if err := ensureDirectory(path); err != nil {
 			return err
@@ -45,7 +45,7 @@ func initializeFactory(output io.Writer) error {
 	}
 
 	for _, name := range initialFiles {
-		body, err := factoryexamples.Files.ReadFile(name)
+		body, err := machinistexamples.Files.ReadFile(name)
 		if err != nil {
 			return fmt.Errorf("read default %s: %w", name, err)
 		}
@@ -62,7 +62,7 @@ func initializeFactory(output io.Writer) error {
 		return err
 	}
 
-	fmt.Fprintf(output, "Factory configuration is ready in %s\n", directory)
+	fmt.Fprintf(output, "Machinist configuration is ready in %s\n", directory)
 	fmt.Fprintln(output, "Add repositories to worker.toml before starting a managed worker.")
 	return nil
 }

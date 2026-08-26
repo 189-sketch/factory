@@ -6,18 +6,18 @@ opens a pull request but never merges it.
 
 ## Set up
 
-You need authenticated `git`, `gh`, and `codex` commands. Initialize Factory once and make
-sure the `codex` executor exists in `~/.factory/worker.toml`:
+You need authenticated `git`, `gh`, and `codex` commands. Initialize Machinist once and make
+sure the `codex` executor exists in `~/.machinist/worker.toml`:
 
 ```sh
-factory init
+machinist init
 ```
 
 Set these paths for your checkouts:
 
 ```sh
-FACTORY_EXAMPLE_ROOT=/absolute/path/to/factory-v2/examples/workflows/issue-to-pr
-FACTORY_TARGET_REPO=/absolute/path/to/the/repository
+MACHINIST_EXAMPLE_ROOT=/absolute/path/to/machinist-v2/examples/workflows/issue-to-pr
+MACHINIST_TARGET_REPO=/absolute/path/to/the/repository
 ```
 
 ## Run it
@@ -25,15 +25,15 @@ FACTORY_TARGET_REPO=/absolute/path/to/the/repository
 Pass one open issue URL in the prompt:
 
 ```sh
-factory run \
-  --factory-config="$FACTORY_EXAMPLE_ROOT/config.toml" \
+machinist run \
+  --machinist-config="$MACHINIST_EXAMPLE_ROOT/config.toml" \
   --agent=issue-to-pr \
-  --repo="$FACTORY_TARGET_REPO" \
+  --repo="$MACHINIST_TARGET_REPO" \
   --prompt="Complete https://github.com/owner/repository/issues/123"
 ```
 
 The run succeeds when the issue is ready for human review. It may instead stop with
-`factory:needs-human` for a missing decision or `factory:blocked` with concrete evidence.
+`machinist:needs-human` for a missing decision or `machinist:blocked` with concrete evidence.
 
 ## Use a different Codex model
 

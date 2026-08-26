@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/protocol"
-	"github.com/owainlewis/factory-v2/internal/runner"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/protocol"
+	"github.com/owainlewis/machinist-v2/internal/runner"
 )
 
 type Worker struct {
@@ -86,7 +86,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			if !wait(ctx, time.Second) {
 				return nil
 			}
-			fmt.Fprintf(w.stderr, "factory: worker poll: %v\n", err)
+			fmt.Fprintf(w.stderr, "machinist: worker poll: %v\n", err)
 			continue
 		}
 		if run == nil {
@@ -127,7 +127,7 @@ func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 			return completion
 		case <-ticks:
 			if err := w.heartbeat(ctx, spec); err != nil {
-				fmt.Fprintf(w.stderr, "factory: heartbeat run %s: %v\n", spec.ID, err)
+				fmt.Fprintf(w.stderr, "machinist: heartbeat run %s: %v\n", spec.ID, err)
 			}
 		case <-ctx.Done():
 			return <-done
@@ -194,7 +194,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 
 func (w *Worker) deliverWithHeartbeats(ctx context.Context, spec protocol.RunSpec, completion protocol.Completion) error {
 	if err := w.heartbeat(ctx, spec); err != nil {
-		fmt.Fprintf(w.stderr, "factory: heartbeat run %s before completion: %v\n", spec.ID, err)
+		fmt.Fprintf(w.stderr, "machinist: heartbeat run %s before completion: %v\n", spec.ID, err)
 	}
 	ticks := w.heartbeatTicks
 	var ticker *time.Ticker
@@ -213,7 +213,7 @@ func (w *Worker) deliverWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 			return err
 		case <-ticks:
 			if err := w.heartbeat(ctx, spec); err != nil {
-				fmt.Fprintf(w.stderr, "factory: heartbeat run %s during completion: %v\n", spec.ID, err)
+				fmt.Fprintf(w.stderr, "machinist: heartbeat run %s during completion: %v\n", spec.ID, err)
 			}
 		case <-ctx.Done():
 			return <-done
@@ -232,7 +232,7 @@ func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.
 		if errors.As(err, &responseErr) && responseErr.status >= 400 && responseErr.status < 500 && responseErr.status != http.StatusRequestTimeout && responseErr.status != http.StatusTooManyRequests {
 			return err
 		}
-		fmt.Fprintf(w.stderr, "factory: report run %s: %v\n", runID, err)
+		fmt.Fprintf(w.stderr, "machinist: report run %s: %v\n", runID, err)
 		if !wait(ctx, backoff) {
 			return ctx.Err()
 		}

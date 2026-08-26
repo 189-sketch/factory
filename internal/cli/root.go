@@ -13,26 +13,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/controlplane"
-	"github.com/owainlewis/factory-v2/internal/managedworker"
-	"github.com/owainlewis/factory-v2/internal/runner"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/controlplane"
+	"github.com/owainlewis/machinist-v2/internal/managedworker"
+	"github.com/owainlewis/machinist-v2/internal/runner"
 	"github.com/spf13/cobra"
 )
 
 type commandOptions struct {
-	configPath        string
-	factoryConfigPath string
-	agentName         string
-	pipelineName      string
-	prompt            string
-	model             string
-	repository        string
-	stdin             io.Reader
-	stdout            io.Writer
-	stderr            io.Writer
-	version           string
-	listen            string
+	configPath          string
+	machinistConfigPath string
+	agentName           string
+	pipelineName        string
+	prompt              string
+	model               string
+	repository          string
+	stdin               io.Reader
+	stdout              io.Writer
+	stderr              io.Writer
+	version             string
+	listen              string
 }
 
 func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
@@ -48,21 +48,21 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	var outcome *runner.OutcomeError
 	if errors.As(err, &outcome) {
-		fmt.Fprintf(stderr, "factory: %s\n", outcome.Error())
+		fmt.Fprintf(stderr, "machinist: %s\n", outcome.Error())
 		return outcome.ExitCode
 	}
 	var runtime *runner.RuntimeError
 	if errors.As(err, &runtime) {
-		fmt.Fprintf(stderr, "factory: %s\n", runtime.Error())
+		fmt.Fprintf(stderr, "machinist: %s\n", runtime.Error())
 		return 1
 	}
-	fmt.Fprintf(stderr, "factory: %s\n", err)
+	fmt.Fprintf(stderr, "machinist: %s\n", err)
 	return 2
 }
 
 func newRootCommand(options *commandOptions) *cobra.Command {
 	root := &cobra.Command{
-		Use:           "factory",
+		Use:           "machinist",
 		Short:         "Run coding agents as supervised workloads",
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -73,14 +73,14 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newSubmitCommand(options))
 	root.AddCommand(newStartCommand(options))
 
-	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Factory Worker"}
+	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
 	worker.AddCommand(newRunCommand(options, false))
 	worker.AddCommand(newWorkerStartCommand(options))
 	root.AddCommand(worker)
 
 	root.AddCommand(&cobra.Command{
 		Use:   "version",
-		Short: "Print the Factory version",
+		Short: "Print the Machinist version",
 		Args:  cobra.NoArgs,
 		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Fprintln(options.stdout, options.version)
@@ -123,7 +123,7 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 	var agentName, pipelineName, prompt, model, repository string
 	submit := &cobra.Command{
 		Use:   "submit",
-		Short: "Queue work for a managed Factory Worker",
+		Short: "Queue work for a managed Machinist Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			return submitSelection(command.Context(), options, agentName, pipelineName, prompt, model, repository)
@@ -257,14 +257,14 @@ func contains(values []string, want string) bool {
 func newStartCommand(options *commandOptions) *cobra.Command {
 	start := &cobra.Command{
 		Use:   "start",
-		Short: "Start the Factory control plane",
+		Short: "Start the Machinist control plane",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			factoryConfig, err := config.LoadConfig(options.configPath)
+			machinistConfig, err := config.LoadConfig(options.configPath)
 			if err != nil {
 				return err
 			}
-			serverConfig := factoryConfig.Server
+			serverConfig := machinistConfig.Server
 			if options.listen != "" {
 				serverConfig.Listen = options.listen
 			}
@@ -277,11 +277,11 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			server, err := controlplane.NewServer(store, factoryConfig.Path(), token)
+			server, err := controlplane.NewServer(store, machinistConfig.Path(), token)
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(options.stderr, "factory: control plane listening on http://%s\n", serverConfig.Listen)
+			fmt.Fprintf(options.stderr, "machinist: control plane listening on http://%s\n", serverConfig.Listen)
 			return server.Serve(command.Context(), serverConfig.Listen)
 		},
 	}
@@ -292,7 +292,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 func newWorkerStartCommand(options *commandOptions) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start a managed Factory Worker",
+		Short: "Start a managed Machinist Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			workerConfig, err := config.LoadWorker(options.configPath)
@@ -303,7 +303,7 @@ func newWorkerStartCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(options.stderr, "factory: worker %s connecting to %s\n", workerConfig.Name, workerConfig.ControlPlane.URL)
+			fmt.Fprintf(options.stderr, "machinist: worker %s connecting to %s\n", workerConfig.Name, workerConfig.ControlPlane.URL)
 			return worker.Run(command.Context())
 		},
 	}
@@ -322,9 +322,9 @@ func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
 			return runSelection(command.Context(), options)
 		},
 	}
-	run.Flags().StringVar(&options.agentName, "agent", "", "agent name from the Factory definition")
+	run.Flags().StringVar(&options.agentName, "agent", "", "agent name from the Machinist definition")
 	if allowPipeline {
-		run.Flags().StringVar(&options.pipelineName, "pipeline", "", "pipeline name from the Factory definition")
+		run.Flags().StringVar(&options.pipelineName, "pipeline", "", "pipeline name from the Machinist definition")
 		run.MarkFlagsMutuallyExclusive("agent", "pipeline")
 		run.MarkFlagsOneRequired("agent", "pipeline")
 	} else {
@@ -333,7 +333,7 @@ func newRunCommand(options *commandOptions, allowPipeline bool) *cobra.Command {
 	run.Flags().StringVar(&options.prompt, "prompt", "", "work request supplied to the agent prompt (required)")
 	run.Flags().StringVar(&options.model, "model", "", "executor model or configured alias for this task")
 	run.Flags().StringVar(&options.repository, "repo", ".", "Git repository path")
-	run.Flags().StringVar(&options.factoryConfigPath, "factory-config", "", "shared Factory configuration file")
+	run.Flags().StringVar(&options.machinistConfigPath, "machinist-config", "", "shared Machinist configuration file")
 	_ = run.MarkFlagRequired("prompt")
 	return run
 }
@@ -343,7 +343,7 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 	if err != nil {
 		return err
 	}
-	definitionPath, err := worker.ResolveFactoryConfig(options.factoryConfigPath)
+	definitionPath, err := worker.ResolveMachinistConfig(options.machinistConfigPath)
 	if err != nil {
 		return err
 	}
@@ -369,7 +369,7 @@ func runSelection(ctx context.Context, options *commandOptions) error {
 		}
 	}
 	for index, agent := range agents {
-		fmt.Fprintf(options.stderr, "factory: pipeline %s: agent %d/%d %s\n", options.pipelineName, index+1, len(agents), agent.Name)
+		fmt.Fprintf(options.stderr, "machinist: pipeline %s: agent %d/%d %s\n", options.pipelineName, index+1, len(agents), agent.Name)
 		if err := runAgent(ctx, options, worker, agent); err != nil {
 			return err
 		}
@@ -395,7 +395,7 @@ func runAgent(ctx context.Context, options *commandOptions, worker config.Worker
 		Stderr:        options.stderr,
 	})
 	if result.ID != "" {
-		fmt.Fprintf(options.stderr, "factory: run %s %s; events: %s\n", result.ID, result.State, result.EventsPath)
+		fmt.Fprintf(options.stderr, "machinist: run %s %s; events: %s\n", result.ID, result.State, result.EventsPath)
 	}
 	return err
 }

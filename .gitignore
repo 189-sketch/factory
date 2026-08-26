@@ -1,5 +1,6 @@
 /bin/
 /.factory/
+/.machinist/
 *.tmp
 __pycache__/
 *.py[cod]

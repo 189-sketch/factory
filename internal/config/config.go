@@ -17,17 +17,18 @@ import (
 )
 
 const (
-	defaultTimeout         = 30 * time.Minute
-	maxConfigBytes         = 1 << 20
-	maxPromptBytes         = 256 << 10
-	maxInputPromptBytes    = 256 << 10
-	maxRenderedPromptBytes = maxPromptBytes + maxInputPromptBytes
-	maxTokenBytes          = 8 << 10
-	defaultWorkerDirName   = ".factory/worker"
-	defaultServerDirName   = ".factory/server"
-	promptParameter        = "{{factory.prompt}}"
-	modelParameter         = "{{factory.model}}"
-	factoryParameterPrefix = "{{factory"
+	defaultTimeout           = 30 * time.Minute
+	maxConfigBytes           = 1 << 20
+	maxPromptBytes           = 256 << 10
+	maxInputPromptBytes      = 256 << 10
+	maxRenderedPromptBytes   = maxPromptBytes + maxInputPromptBytes
+	maxTokenBytes            = 8 << 10
+	defaultWorkerDirName     = ".machinist/worker"
+	defaultServerDirName     = ".machinist/server"
+	promptParameter          = "{{machinist.prompt}}"
+	modelParameter           = "{{machinist.model}}"
+	machinistParameterPrefix = "{{machinist"
+	legacyFactoryPrefix      = "{{factory."
 )
 
 type Worker struct {
@@ -123,45 +124,45 @@ func LoadWorker(path string) (Worker, error) {
 
 func LoadConfig(path string) (Config, error) {
 	if path == "" {
-		defaultPath, err := defaultFactoryConfigPath()
+		defaultPath, err := defaultMachinistConfigPath()
 		if err != nil {
 			return Config{}, err
 		}
 		path = defaultPath
 	}
-	factoryConfig, err := loadConfigFile(path)
+	machinistConfig, err := loadConfigFile(path)
 	if err != nil {
 		return Config{}, err
 	}
-	factoryConfig.Server.configDir = filepath.Dir(factoryConfig.path)
-	factoryConfig.Server, err = applyServerDefaults(factoryConfig.Server)
+	machinistConfig.Server.configDir = filepath.Dir(machinistConfig.path)
+	machinistConfig.Server, err = applyServerDefaults(machinistConfig.Server)
 	if err != nil {
 		return Config{}, err
 	}
-	return factoryConfig, nil
+	return machinistConfig, nil
 }
 
 func loadConfigFile(path string) (Config, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("resolve Factory config: %w", err)
+		return Config{}, fmt.Errorf("resolve Machinist config: %w", err)
 	}
 	body, err := readBoundedFile(absPath, maxConfigBytes)
 	if err != nil {
-		return Config{}, fmt.Errorf("read Factory config %q: %w", absPath, err)
+		return Config{}, fmt.Errorf("read Machinist config %q: %w", absPath, err)
 	}
-	factoryConfig := Config{path: absPath}
+	machinistConfig := Config{path: absPath}
 	decoder := toml.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&factoryConfig); err != nil {
-		return Config{}, fmt.Errorf("parse Factory config %q: %w", absPath, err)
+	if err := decoder.Decode(&machinistConfig); err != nil {
+		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
 	}
-	return factoryConfig, nil
+	return machinistConfig, nil
 }
 
 func (c Config) Path() string { return c.path }
 
-func (w Worker) ResolveFactoryConfig(override string) (string, error) {
+func (w Worker) ResolveMachinistConfig(override string) (string, error) {
 	path := override
 	base := ""
 	if path == "" {
@@ -177,7 +178,7 @@ func (w Worker) ResolveFactoryConfig(override string) (string, error) {
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve Factory config: %w", err)
+		return "", fmt.Errorf("resolve Machinist config: %w", err)
 	}
 	return filepath.Clean(absPath), nil
 }
@@ -404,21 +405,24 @@ func ValidateModelSelection(agents []ResolvedAgent, model string) error {
 }
 
 func validatePromptParameters(agentName, prompt string) error {
+	if strings.Contains(prompt, legacyFactoryPrefix) {
+		return fmt.Errorf("agent %q prompt uses the unsupported legacy Factory parameter namespace", agentName)
+	}
 	hasPrompt := false
 	remaining := prompt
 	for {
-		start := strings.Index(remaining, factoryParameterPrefix)
+		start := strings.Index(remaining, machinistParameterPrefix)
 		if start < 0 {
 			break
 		}
 		remaining = remaining[start:]
 		end := strings.Index(remaining, "}}")
 		if end < 0 {
-			return fmt.Errorf("agent %q prompt contains a malformed Factory parameter", agentName)
+			return fmt.Errorf("agent %q prompt contains a malformed Machinist parameter", agentName)
 		}
 		parameter := remaining[:end+2]
 		if parameter != promptParameter {
-			return fmt.Errorf("agent %q prompt uses unsupported Factory parameter %q", agentName, parameter)
+			return fmt.Errorf("agent %q prompt uses unsupported Machinist parameter %q", agentName, parameter)
 		}
 		hasPrompt = true
 		remaining = remaining[end+2:]
@@ -506,7 +510,7 @@ func applyServerDefaults(server Server) (Server, error) {
 		if err != nil {
 			return Server{}, fmt.Errorf("find user home directory: %w", err)
 		}
-		server.Database = filepath.Join(home, filepath.FromSlash(defaultServerDirName), "factory.db")
+		server.Database = filepath.Join(home, filepath.FromSlash(defaultServerDirName), "machinist.db")
 	} else {
 		path, err := resolveConfigPath(server.Database, server.configDir)
 		if err != nil {
@@ -532,6 +536,9 @@ func validateCommand(name string, command []string) error {
 	for index, argument := range command {
 		if strings.ContainsRune(argument, '\x00') {
 			return fmt.Errorf("executor %q command argument %d contains a null byte", name, index)
+		}
+		if strings.Contains(argument, legacyFactoryPrefix) {
+			return fmt.Errorf("executor %q command uses the unsupported legacy Factory parameter namespace", name)
 		}
 		if index == 0 && strings.Contains(argument, modelParameter) {
 			return fmt.Errorf("executor %q command executable cannot contain %s", name, modelParameter)
@@ -584,15 +591,15 @@ func defaultWorkerConfigPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("find user home directory: %w", err)
 	}
-	return filepath.Join(home, ".factory", "worker.toml"), nil
+	return filepath.Join(home, ".machinist", "worker.toml"), nil
 }
 
-func defaultFactoryConfigPath() (string, error) {
+func defaultMachinistConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("find user home directory: %w", err)
 	}
-	return filepath.Join(home, ".factory", "config.toml"), nil
+	return filepath.Join(home, ".machinist", "config.toml"), nil
 }
 
 func expandHome(path string) (string, error) {

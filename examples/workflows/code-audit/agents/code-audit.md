@@ -7,7 +7,7 @@ verification. Do not fix anything.
 # Input
 
 <work-request>
-{{factory.prompt}}
+{{machinist.prompt}}
 </work-request>
 
 # Required result

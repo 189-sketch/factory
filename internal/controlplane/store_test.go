@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/protocol"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/protocol"
 )
 
 func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "factory.db")
+	database := filepath.Join(t.TempDir(), "machinist.db")
 	store := openTestStore(t, database)
 	agents := []config.ResolvedAgent{
 		testAgent("plan", "Plan request"),
@@ -23,22 +23,22 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 		testAgent("verify", "Verify request"),
 	}
 	agents[0].Model = "luna"
-	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "code", agents)
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "pipeline", "code", agents)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	incompatible, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"other"}, []string{"factory"}))
+	incompatible, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"other"}, []string{"machinist"}))
 	if err != nil || incompatible != nil {
 		t.Fatalf("incompatible poll = %#v, %v", incompatible, err)
 	}
-	wrongModel := pollRequest("worker-b", []string{"codex"}, []string{"factory"})
+	wrongModel := pollRequest("worker-b", []string{"codex"}, []string{"machinist"})
 	wrongModel.Models = map[string][]string{"codex": {"terra"}}
 	incompatible, err = store.Poll(t.Context(), wrongModel)
 	if err != nil || incompatible != nil {
 		t.Fatalf("wrong-model poll = %#v, %v", incompatible, err)
 	}
-	compatible := pollRequest("worker-a", []string{"codex"}, []string{"factory"})
+	compatible := pollRequest("worker-a", []string{"codex"}, []string{"machinist"})
 	compatible.Models = map[string][]string{"codex": {"luna"}}
 	first, err := store.Poll(t.Context(), compatible)
 	if err != nil || first == nil || first.Agent != "plan" || first.RenderedPrompt != "Plan request" || first.Model != "luna" {
@@ -62,7 +62,7 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 	if err != nil || output.Events != "event\n" {
 		t.Fatalf("run output = %#v, %v", output, err)
 	}
-	second, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	second, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil || second == nil || second.Agent != "build" {
 		t.Fatalf("second lease = %#v, %v", second, err)
 	}
@@ -91,9 +91,9 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 }
 
 func TestStorePersistsRunMetricsWithAndWithoutTokenUsage(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "factory.db")
+	database := filepath.Join(t.TempDir(), "machinist.db")
 	store := openTestStore(t, database)
-	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "metrics", []config.ResolvedAgent{
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "pipeline", "metrics", []config.ResolvedAgent{
 		testAgent("reported", "Report usage"),
 		testAgent("missing", "Do not report usage"),
 	})
@@ -101,7 +101,7 @@ func TestStorePersistsRunMetricsWithAndWithoutTokenUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestStorePersistsRunMetricsWithAndWithoutTokenUsage(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	second, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +145,11 @@ func TestStoreRejectsContradictoryOutcomes(t *testing.T) {
 		{state: "cancelled", exitCode: 1},
 	} {
 		t.Run(test.state, func(t *testing.T) {
-			store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
-			if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+			store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+			if _, err := store.CreateJob(t.Context(), "request", "machinist", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
 				t.Fatal(err)
 			}
-			run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+			run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,8 +166,8 @@ func TestStoreRejectsContradictoryOutcomes(t *testing.T) {
 }
 
 func TestConcurrentPollsLeaseRunOnce(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
-	if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	if _, err := store.CreateJob(t.Context(), "request", "machinist", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,7 +180,7 @@ func TestConcurrentPollsLeaseRunOnce(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			run, err := store.Poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"factory"}))
+			run, err := store.Poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}))
 			results <- run
 			errorsChannel <- err
 		}()
@@ -207,9 +207,9 @@ func TestConcurrentPollsLeaseRunOnce(t *testing.T) {
 
 func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
 	store.now = clock.Now
-	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "code", []config.ResolvedAgent{
+	jobID, err := store.CreateJob(t.Context(), "request", "machinist", "pipeline", "code", []config.ResolvedAgent{
 		testAgent("plan", "Plan request"),
 		testAgent("build", "Build request"),
 	})
@@ -217,13 +217,13 @@ func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil || first == nil {
 		t.Fatalf("first lease = %#v, %v", first, err)
 	}
 	assertLeaseExpiry(t, store, first.ID, clock.Now().Add(leaseDuration))
 	clock.Advance(9 * time.Second)
-	repeated, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	repeated, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil || repeated == nil || repeated.LeaseToken != first.LeaseToken {
 		t.Fatalf("repeated lease = %#v, %v", repeated, err)
 	}
@@ -251,13 +251,13 @@ func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
 		t.Fatalf("expired completion error = %v", err)
 	}
 
-	incompatible, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"other"}, []string{"factory"}))
+	incompatible, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"other"}, []string{"machinist"}))
 	if err != nil || incompatible != nil {
 		t.Fatalf("incompatible poll = %#v, %v", incompatible, err)
 	}
 	assertReclaimedRun(t, store, first.ID, jobID)
 
-	redispatched, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"factory"}))
+	redispatched, err := store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"machinist"}))
 	if err != nil || redispatched == nil || redispatched.ID != first.ID || redispatched.LeaseToken == first.LeaseToken {
 		t.Fatalf("redispatched lease = %#v, %v", redispatched, err)
 	}
@@ -276,12 +276,12 @@ func TestStoreRenewsAndRedispatchesExpiredLease(t *testing.T) {
 
 func TestConcurrentPollsReclaimExpiredRunOnce(t *testing.T) {
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
 	store.now = clock.Now
-	if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+	if _, err := store.CreateJob(t.Context(), "request", "machinist", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	initial, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestConcurrentPollsReclaimExpiredRunOnce(t *testing.T) {
 		go func(instance string) {
 			defer group.Done()
 			<-start
-			run, pollErr := store.Poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"factory"}))
+			run, pollErr := store.Poll(context.Background(), pollRequest(instance, []string{"codex"}, []string{"machinist"}))
 			results <- run
 			errorsChannel <- pollErr
 		}(instance)
@@ -325,7 +325,7 @@ func TestConcurrentPollsReclaimExpiredRunOnce(t *testing.T) {
 }
 
 func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "factory.db")
+	database := filepath.Join(t.TempDir(), "machinist.db")
 	createPreviousDatabase(t, database)
 	store := openTestStore(t, database)
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
@@ -369,7 +369,7 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 		t.Fatalf("migrated model = %q", migrated.Model)
 	}
 
-	run, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"}))
+	run, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"machinist"}))
 	if err != nil || run == nil || run.ID != "run-running" || run.LeaseToken == "old-token" {
 		t.Fatalf("recovered pre-migration lease = %#v, %v", run, err)
 	}
@@ -377,55 +377,55 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 }
 
 func TestStorePersistsCurrentWorkerRepositories(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
-	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"other", "factory", "factory"})); err != nil || run != nil {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"other", "machinist", "machinist"})); err != nil || run != nil {
 		t.Fatalf("first poll = %#v, %v", run, err)
 	}
 	snapshot, err := store.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Workers) != 1 || len(snapshot.Workers[0].Repositories) != 2 || snapshot.Workers[0].Repositories[0] != "factory" || snapshot.Workers[0].Repositories[1] != "other" {
+	if len(snapshot.Workers) != 1 || len(snapshot.Workers[0].Repositories) != 2 || snapshot.Workers[0].Repositories[0] != "machinist" || snapshot.Workers[0].Repositories[1] != "other" {
 		t.Fatalf("workers = %#v", snapshot.Workers)
 	}
-	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"})); err != nil || run != nil {
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"machinist"})); err != nil || run != nil {
 		t.Fatalf("second poll = %#v, %v", run, err)
 	}
 	snapshot, err = store.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Workers[0].Repositories) != 1 || snapshot.Workers[0].Repositories[0] != "factory" {
+	if len(snapshot.Workers[0].Repositories) != 1 || snapshot.Workers[0].Repositories[0] != "machinist" {
 		t.Fatalf("workers = %#v", snapshot.Workers)
 	}
 }
 
 func TestAvailableRepositoriesExcludesStaleWorkerInstances(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
 	if _, err := store.Poll(t.Context(), pollRequest("worker-old", []string{"codex"}, []string{"removed"})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(t.Context(), `UPDATE workers SET last_seen_at=? WHERE instance_id='worker-old'`, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"})); err != nil {
+	if _, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"machinist"})); err != nil {
 		t.Fatal(err)
 	}
 	repositories, err := store.AvailableRepositories(t.Context(), time.Now().Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repositories) != 1 || repositories[0] != "factory" {
+	if len(repositories) != 1 || repositories[0] != "machinist" {
 		t.Fatalf("repositories = %#v", repositories)
 	}
 }
 
 func TestAvailableRepositoriesIncludesWorkerWithRunningExecution(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "factory.db"))
-	if _, err := store.CreateJob(t.Context(), "request", "factory", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	if _, err := store.CreateJob(t.Context(), "request", "machinist", "agent", "plan", []config.ResolvedAgent{testAgent("plan", "Plan request")}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.Poll(t.Context(), pollRequest("worker-busy", []string{"codex"}, []string{"factory"}))
+	run, err := store.Poll(t.Context(), pollRequest("worker-busy", []string{"codex"}, []string{"machinist"}))
 	if err != nil || run == nil {
 		t.Fatalf("poll = %#v, %v", run, err)
 	}
@@ -436,7 +436,7 @@ func TestAvailableRepositoriesIncludesWorkerWithRunningExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repositories) != 1 || repositories[0] != "factory" {
+	if len(repositories) != 1 || repositories[0] != "machinist" {
 		t.Fatalf("repositories = %#v", repositories)
 	}
 }
@@ -582,12 +582,12 @@ CREATE TABLE runs (
 CREATE TABLE workers (
   instance_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL
 );
-INSERT INTO jobs VALUES ('job-completed','done','factory','agent','plan','succeeded','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
-INSERT INTO jobs VALUES ('job-running','active','factory','agent','plan','running','2026-08-24T13:00:00Z','2026-08-24T13:01:00Z');
+INSERT INTO jobs VALUES ('job-completed','done','machinist','agent','plan','succeeded','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
+INSERT INTO jobs VALUES ('job-running','active','machinist','agent','plan','running','2026-08-24T13:00:00Z','2026-08-24T13:01:00Z');
 INSERT INTO workers VALUES ('worker-old','old worker','2026-08-24T13:01:00Z');
-INSERT INTO runs VALUES ('run-completed','job-completed',0,'plan','plan-hash','codex','factory','Done',60000,'succeeded','worker-old','completed-token',0,'','{"answer":42,"duration_millis":60000,"token_usage":1234}','completed event
+INSERT INTO runs VALUES ('run-completed','job-completed',0,'plan','plan-hash','codex','machinist','Done',60000,'succeeded','worker-old','completed-token',0,'','{"answer":42,"duration_millis":60000,"token_usage":1234}','completed event
 ','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
-INSERT INTO runs VALUES ('run-running','job-running',0,'plan','plan-hash','codex','factory','Active',60000,'running','worker-old','old-token',NULL,'',NULL,NULL,'2026-08-24T13:01:00Z',NULL);
+INSERT INTO runs VALUES ('run-running','job-running',0,'plan','plan-hash','codex','machinist','Active',60000,'running','worker-old','old-token',NULL,'',NULL,NULL,'2026-08-24T13:01:00Z',NULL);
 `
 	if _, err := db.ExecContext(t.Context(), schema); err != nil {
 		t.Fatal(err)

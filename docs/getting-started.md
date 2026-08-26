@@ -1,11 +1,11 @@
 # Getting started
 
-This guide takes Factory from a source checkout to its first supervised coding
+This guide takes Machinist from a source checkout to its first supervised coding
 run.
 
 ## Requirements
 
-Factory runs on macOS and Linux. You need:
+Machinist runs on macOS and Linux. You need:
 
 - Go 1.26.6 or newer
 - Git
@@ -19,18 +19,18 @@ with native subagents available.
 Node.js and `just` are only needed when you change and rebuild the control-plane
 frontend.
 
-## Build Factory
+## Build Machinist
 
 ```sh
 mkdir -p ./bin
-go build -o ./bin/factory ./cmd/factory
+go build -o ./bin/machinist ./cmd/machinist
 ```
 
 Confirm the binary works:
 
 ```sh
-./bin/factory version
-./bin/factory --help
+./bin/machinist version
+./bin/machinist --help
 ```
 
 Source builds report the version as `dev` unless a release build supplies a
@@ -39,13 +39,13 @@ version at link time.
 ## Create the default configuration
 
 ```sh
-./bin/factory init
+./bin/machinist init
 ```
 
-Factory creates these files:
+Machinist creates these files:
 
 ```text
-~/.factory/
+~/.machinist/
 ├── config.toml
 ├── worker.toml
 ├── agents/
@@ -55,7 +55,7 @@ Factory creates these files:
     └── worker.token
 ```
 
-All files are created with user-only permissions. Re-running `factory init`
+All files are created with user-only permissions. Re-running `machinist init`
 creates missing files and keeps existing files unchanged.
 
 Review the prompts before running them. The default agents are trusted local
@@ -68,7 +68,7 @@ Choose an open issue in the target GitHub repository. A narrow issue with an
 observable outcome makes the first run easy to judge.
 
 ```sh
-./bin/factory run \
+./bin/machinist run \
   --agent=foreman \
   --repo=/absolute/path/to/your-repository \
   --prompt="Complete https://github.com/your-org/your-repo/issues/123"
@@ -83,7 +83,7 @@ The default foreman:
 5. opens a non-draft pull request and waits for available checks; and
 6. hands the verified pull request back without merging it.
 
-It also maintains `factory:*` lifecycle labels on the issue so progress is
+It also maintains `machinist:*` lifecycle labels on the issue so progress is
 visible where the work started.
 
 ## Run an audit
@@ -93,7 +93,7 @@ requires independent verification for every candidate bug, checks open issues
 for duplicates, and may open up to three issues for bugs it can prove.
 
 ```sh
-./bin/factory run \
+./bin/machinist run \
   --agent=audit \
   --repo=/absolute/path/to/your-repository \
   --prompt="Audit the request handling and persistence code"
@@ -107,7 +107,7 @@ The default worker configuration maps short aliases to models. Select one for a
 run with `--model`:
 
 ```sh
-./bin/factory run \
+./bin/machinist run \
   --agent=foreman \
   --model=terra \
   --repo=/absolute/path/to/your-repository \
@@ -118,7 +118,7 @@ Omit `--model` to use the executor's normal default.
 
 ## Next steps
 
-- Read [How Factory works](how-it-works.md) for execution modes and run
+- Read [How Machinist works](how-it-works.md) for execution modes and run
   artifacts.
 - Read [Configuration](configuration.md) to change prompts, executors, models,
   or pipelines.

@@ -1,17 +1,17 @@
 # Machine-local paths only. Agents and pipelines belong in config.toml.
 # name is optional and defaults to the machine hostname.
-data_directory = "~/.factory/worker"
+data_directory = "~/.machinist/worker"
 
 [control_plane]
 url = "http://127.0.0.1:7331"
-token_file = "~/.factory/server/worker.token"
+token_file = "~/.machinist/server/worker.token"
 
 [executors.codex]
-command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
+command = ["codex", "exec", "--model={{machinist.model}}", "--sandbox", "danger-full-access", "-"]
 models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 
 [executors.claude]
-command = ["claude", "--print", "--model={{factory.model}}", "--dangerously-skip-permissions"]
+command = ["claude", "--print", "--model={{machinist.model}}", "--dangerously-skip-permissions"]
 models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
 
 # Register each repository that managed workers may run in.
