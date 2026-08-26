@@ -6,7 +6,7 @@ correctness, regressions, security, needless complexity, and missing proof. Do n
 # Input
 
 <work-request>
-{{factory.prompt}}
+{{machinist.prompt}}
 </work-request>
 
 The request must identify exactly one open pull request in the repository for the current

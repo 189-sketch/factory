@@ -1,21 +1,21 @@
-# How Factory works
+# How Machinist works
 
-Factory treats coding agents as supervised processes. It renders a trusted agent
+Machinist treats coding agents as supervised processes. It renders a trusted agent
 prompt with one work request, starts the configured executable in a Git
 repository, streams its output, and records the result.
 
-Factory does not parse an agent's prose to decide whether the requested product
+Machinist does not parse an agent's prose to decide whether the requested product
 outcome is correct. The agent prompt defines the workflow and its review gates;
-Factory records execution facts.
+Machinist records execution facts.
 
 ## Two execution modes
 
 ### Direct mode
 
-`factory run` starts immediately and does not contact a server:
+`machinist run` starts immediately and does not contact a server:
 
 ```sh
-factory run \
+machinist run \
   --agent=foreman \
   --repo=/absolute/path/to/repository \
   --prompt="Complete https://github.com/example/project/issues/123"
@@ -24,17 +24,17 @@ factory run \
 Use direct mode for one task, local experimentation, or scripts that already
 have their own scheduling.
 
-`factory worker run` is the worker-namespaced direct path. It runs one named
+`machinist worker run` is the worker-namespaced direct path. It runs one named
 agent locally and remains independent of the control plane:
 
 ```sh
-factory worker run \
+machinist worker run \
   --agent=foreman \
   --repo=/absolute/path/to/repository \
   --prompt="Complete https://github.com/example/project/issues/123"
 ```
 
-Factory deliberately does not manage clones, worktrees, branches, commits, or
+Machinist deliberately does not manage clones, worktrees, branches, commits, or
 pull requests in direct mode. The selected agent and its reviewed prompt own
 those actions.
 
@@ -56,13 +56,13 @@ Submit managed work from the browser or the CLI. The CLI uses a configured
 repository name rather than a local path:
 
 ```sh
-factory submit \
+machinist submit \
   --agent=foreman \
   --repo=my-project \
   --prompt="Complete https://github.com/example/project/issues/123"
 ```
 
-`factory submit` validates the repository and agent or pipeline against the
+`machinist submit` validates the repository and agent or pipeline against the
 control-plane catalog, queues the job through its API, and prints the admitted
 job ID. It does not execute the agent locally.
 
@@ -75,12 +75,12 @@ An agent combines three things:
 - a timeout.
 
 The worker maps the executor name to a local command. This keeps credentials,
-provider setup, and machine paths out of the shared Factory definition.
+provider setup, and machine paths out of the shared Machinist definition.
 
 A pipeline is an ordered list of agents. Every agent receives the same input
-prompt. Factory stops before the next step when an agent process fails. A zero
+prompt. Machinist stops before the next step when an agent process fails. A zero
 pipeline exit status means every process exited successfully; it does not mean
-Factory interpreted or approved the agents' output.
+Machinist interpreted or approved the agents' output.
 
 ## Run artifacts
 
@@ -101,21 +101,21 @@ overwritten by a redispatched one:
 
 `events.jsonl` stores ordered, byte-faithful stdout and stderr chunks encoded as
 base64. `result.json` stores the terminal state, exit code, duration, and exact
-token usage when the executor reports it through `FACTORY_TOKEN_USAGE_PATH`.
-Factory does not estimate missing token usage.
+token usage when the executor reports it through `MACHINIST_TOKEN_USAGE_PATH`.
+Machinist does not estimate missing token usage.
 
 Recording stops after 64 MiB of process output or when the encoded event file
-reaches 32 MiB. Factory adds a truncation event, but the live agent process keeps
+reaches 32 MiB. Machinist adds a truncation event, but the live agent process keeps
 running.
 
 ## Exit behavior
 
-Factory returns:
+Machinist returns:
 
 | Exit code | Meaning |
 | --- | --- |
 | agent exit code | the agent process exited unsuccessfully |
-| `1` | Factory could not run or record the process |
+| `1` | Machinist could not run or record the process |
 | `2` | the command or configuration was invalid |
 | `124` | the configured timeout expired |
 | `130` | the run was cancelled |
@@ -125,7 +125,7 @@ the top-level executable.
 
 ## Trust boundary
 
-Factory templates insert the runtime request as plain text. They do not execute
+Machinist templates insert the runtime request as plain text. They do not execute
 it as a shell command or expand parameters inside it. That protects the runner,
 but the agent still reads repository content, issues, comments, and tool output.
 Agent prompts must treat those sources as untrusted instructions.

@@ -17,20 +17,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/config"
 )
 
 func TestEscapedDescendantHelper(t *testing.T) {
-	if os.Getenv("FACTORY_TEST_ESCAPED") != "1" {
+	if os.Getenv("MACHINIST_TEST_ESCAPED") != "1" {
 		return
 	}
-	if os.Getenv("FACTORY_TEST_HOLD_STDIN") != "1" {
+	if os.Getenv("MACHINIST_TEST_HOLD_STDIN") != "1" {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 	}
 	if _, err := syscall.Setsid(); err != nil {
 		os.Exit(2)
 	}
-	marker := os.Getenv("FACTORY_TEST_MARKER")
+	marker := os.Getenv("MACHINIST_TEST_MARKER")
 	if err := os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 		os.Exit(3)
 	}
@@ -159,6 +159,25 @@ func TestExecutePersistsOnlyExplicitValidTokenUsage(t *testing.T) {
 	}
 }
 
+func TestExecuteInjectsMachinistEnvironment(t *testing.T) {
+	repository := newGitRepository(t)
+	var stdout bytes.Buffer
+	result, err := Execute(t.Context(), Options{
+		Agent:         helperAgent("environment", time.Second),
+		Repository:    repository,
+		DataDirectory: t.TempDir(),
+		Stdout:        &stdout,
+		Stderr:        io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{result.ID, repository, filepath.Join(filepath.Dir(result.EventsPath), tokenUsageFileName)}, "\n") + "\n"
+	if stdout.String() != want {
+		t.Fatalf("executor environment = %q, want %q", stdout.String(), want)
+	}
+}
+
 func TestExecuteUsesManagedRunIDAndRejectsUnsafeIDs(t *testing.T) {
 	repository := newGitRepository(t)
 	dataDirectory := t.TempDir()
@@ -265,10 +284,10 @@ func TestExecuteFinishesWhenDescendantKeepsOutputPipesOpen(t *testing.T) {
 
 func TestExecuteFinishesWhenSessionDetachedDescendantKeepsPipesOpen(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "detached.pid")
-	script := `cat >/dev/null; FACTORY_TEST_ESCAPED=1 FACTORY_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
+	script := `cat >/dev/null; MACHINIST_TEST_ESCAPED=1 MACHINIST_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
 	agent := config.ResolvedAgent{
 		Name:       "plan",
-		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
+		Command:    []string{"/bin/sh", "-c", script, "machinist-helper", os.Args[0], marker},
 		Prompt:     "complete prompt\n",
 		Timeout:    5 * time.Second,
 		Definition: "/definition/config.toml",
@@ -292,10 +311,10 @@ func TestExecuteFinishesWhenSessionDetachedDescendantKeepsPipesOpen(t *testing.T
 
 func TestExecuteFinishesWhenSessionDetachedDescendantKeepsAllPipesOpen(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "detached.pid")
-	script := `FACTORY_TEST_ESCAPED=1 FACTORY_TEST_HOLD_STDIN=1 FACTORY_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
+	script := `MACHINIST_TEST_ESCAPED=1 MACHINIST_TEST_HOLD_STDIN=1 MACHINIST_TEST_MARKER="$2" "$1" -test.run=^TestEscapedDescendantHelper$ & while [ ! -f "$2" ]; do sleep 0.01; done; exit 0`
 	agent := config.ResolvedAgent{
 		Name:       "plan",
-		Command:    []string{"/bin/sh", "-c", script, "factory-helper", os.Args[0], marker},
+		Command:    []string{"/bin/sh", "-c", script, "machinist-helper", os.Args[0], marker},
 		Prompt:     strings.Repeat("prompt", 40<<10),
 		Timeout:    5 * time.Second,
 		Definition: "/definition/config.toml",
@@ -536,7 +555,7 @@ func TestExecuteDoesNotStartAgentWhenAlreadyCancelled(t *testing.T) {
 	result, err := Execute(ctx, Options{
 		Agent: config.ResolvedAgent{
 			Name:       "plan",
-			Command:    []string{"/bin/sh", "-c", `touch "$1"`, "factory-test", marker},
+			Command:    []string{"/bin/sh", "-c", `touch "$1"`, "machinist-test", marker},
 			Prompt:     "complete prompt\n",
 			Timeout:    time.Second,
 			Definition: "/definition/config.toml",
@@ -627,15 +646,17 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedAgent {
 	case "stream":
 		script = "cat >/dev/null; printf partial; sleep 1; printf done"
 	case "flood":
-		script = "cat >/dev/null; yes factory"
+		script = "cat >/dev/null; yes machinist"
 	case "exact-prompt":
 		script = "dd bs=16 count=1 of=/dev/null 2>/dev/null"
+	case "environment":
+		script = `cat >/dev/null; printf '%s\n%s\n%s\n' "$MACHINIST_RUN_ID" "$MACHINIST_REPOSITORY" "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "tokens":
-		script = `cat >/dev/null; printf 4321 > "$FACTORY_TOKEN_USAGE_PATH"`
+		script = `cat >/dev/null; printf 4321 > "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "zero-tokens":
-		script = `cat >/dev/null; printf 0 > "$FACTORY_TOKEN_USAGE_PATH"`
+		script = `cat >/dev/null; printf 0 > "$MACHINIST_TOKEN_USAGE_PATH"`
 	case "invalid-tokens":
-		script = `cat >/dev/null; printf unknown > "$FACTORY_TOKEN_USAGE_PATH"`
+		script = `cat >/dev/null; printf unknown > "$MACHINIST_TOKEN_USAGE_PATH"`
 	default:
 		panic("unknown helper mode")
 	}

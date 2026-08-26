@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/owainlewis/factory-v2/internal/config"
-	"github.com/owainlewis/factory-v2/internal/controlplane"
-	"github.com/owainlewis/factory-v2/internal/protocol"
+	"github.com/owainlewis/machinist-v2/internal/config"
+	"github.com/owainlewis/machinist-v2/internal/controlplane"
+	"github.com/owainlewis/machinist-v2/internal/protocol"
 )
 
 func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
@@ -28,13 +28,13 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 	}
 	definitionPath := filepath.Join(directory, "config.toml")
 	promptPath := filepath.Join(directory, "plan.md")
-	if err := os.WriteFile(promptPath, []byte("{{factory.prompt}}"), 0o600); err != nil {
+	if err := os.WriteFile(promptPath, []byte("{{machinist.prompt}}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor=\"test\"\nprompt_file=\"plan.md\"\ntimeout=\"5s\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	store, err := controlplane.OpenStore(filepath.Join(directory, "factory.db"))
+	store, err := controlplane.OpenStore(filepath.Join(directory, "machinist.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateJob(t.Context(), "managed request", "factory", "agent", "plan", []config.ResolvedAgent{agent}); err != nil {
+	if _, err := store.CreateJob(t.Context(), "managed request", "machinist", "agent", "plan", []config.ResolvedAgent{agent}); err != nil {
 		t.Fatal(err)
 	}
 	server, err := controlplane.NewServer(store, definitionPath, "secret")
@@ -64,8 +64,8 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 		Name:          "local-test",
 		DataDirectory: filepath.Join(directory, "worker-data"),
 		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
-		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", `cat >/dev/null; printf managed-output; printf 2468 > "$FACTORY_TOKEN_USAGE_PATH"`}}},
-		Repositories:  map[string]config.Repository{"factory": {Path: repository}},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", `cat >/dev/null; printf managed-output; printf 2468 > "$MACHINIST_TOKEN_USAGE_PATH"`}}},
+		Repositories:  map[string]config.Repository{"machinist": {Path: repository}},
 	}, os.Stdout, os.Stderr)
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestManagedWorkerRequiresHTTPSForRemoteControlPlane(t *testing.T) {
 		Name:         "remote",
 		ControlPlane: config.ControlPlane{URL: "http://10.0.0.5:7331", TokenFile: "unused"},
 		Executors:    map[string]config.Executor{"test": {Command: []string{"agent"}}},
-		Repositories: map[string]config.Repository{"factory": {Path: "."}},
+		Repositories: map[string]config.Repository{"machinist": {Path: "."}},
 	}, os.Stdout, os.Stderr)
 	if err == nil || !strings.Contains(err.Error(), "must use https") {
 		t.Fatalf("error = %v", err)
@@ -212,7 +212,7 @@ func TestManagedWorkerHeartbeatsDuringExecutionAndContinuesAfterFailure(t *testi
 	if completion.State != "succeeded" || requests.Load() != 2 {
 		t.Fatalf("completion = %#v, requests = %d", completion, requests.Load())
 	}
-	if !strings.Contains(stderr.String(), "factory: heartbeat run run-test") {
+	if !strings.Contains(stderr.String(), "machinist: heartbeat run run-test") {
 		t.Fatalf("heartbeat failure was not logged: %q", stderr.String())
 	}
 }
@@ -289,7 +289,7 @@ func TestManagedWorkerSeparatesRedispatchedLeaseArtifacts(t *testing.T) {
 		config: config.Worker{
 			DataDirectory: directory,
 			Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "cat >/dev/null"}}},
-			Repositories:  map[string]config.Repository{"factory": {Path: repository}},
+			Repositories:  map[string]config.Repository{"machinist": {Path: repository}},
 		},
 		instanceID: "worker-test",
 		stdout:     io.Discard,
@@ -302,7 +302,7 @@ func TestManagedWorkerSeparatesRedispatchedLeaseArtifacts(t *testing.T) {
 			Agent:          "plan",
 			AgentHash:      "plan-hash",
 			Executor:       "test",
-			Repository:     "factory",
+			Repository:     "machinist",
 			RenderedPrompt: "managed prompt",
 			TimeoutMillis:  5000,
 			LeaseToken:     lease,

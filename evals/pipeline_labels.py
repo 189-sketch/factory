@@ -1,4 +1,4 @@
-"""Run Factory's foreman and verify its GitHub issue-label lifecycle."""
+"""Run Machinist's foreman and verify its GitHub issue-label lifecycle."""
 
 from __future__ import annotations
 
@@ -15,15 +15,15 @@ from typing import Any, Sequence
 
 
 EXPECTED_LABELS = (
-    "factory:planning",
-    "factory:building",
-    "factory:verifying",
-    "factory:ready-for-review",
+    "machinist:planning",
+    "machinist:building",
+    "machinist:verifying",
+    "machinist:ready-for-review",
 )
-FACTORY_STATE_LABELS = frozenset(
-    (*EXPECTED_LABELS, "factory:needs-human", "factory:blocked")
+MACHINIST_STATE_LABELS = frozenset(
+    (*EXPECTED_LABELS, "machinist:needs-human", "machinist:blocked")
 )
-PR_MARKER = "<!-- factory:foreman-pr -->"
+PR_MARKER = "<!-- machinist:foreman-pr -->"
 REPOSITORY_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PR_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 
@@ -67,10 +67,10 @@ def gh_json(arguments: Sequence[str], *, cwd: Path | None = None) -> Any:
 def assert_label_lifecycle(
     final_labels: Sequence[str],
     label_events: Sequence[tuple[str, str]],
-    factory_exit_code: int,
+    machinist_exit_code: int,
 ) -> None:
-    if factory_exit_code != 0:
-        raise EvalFailure(f"Factory exited with status {factory_exit_code}")
+    if machinist_exit_code != 0:
+        raise EvalFailure(f"Machinist exited with status {machinist_exit_code}")
     states: list[str] = []
     active: set[str] = set()
     for action, label in label_events:
@@ -80,7 +80,7 @@ def assert_label_lifecycle(
         active.add(label)
         if len(active) != 1:
             raise EvalFailure(
-                f"expected one active Factory label, observed {sorted(active)}"
+                f"expected one active Machinist label, observed {sorted(active)}"
             )
         if not states or states[-1] != label:
             states.append(label)
@@ -88,20 +88,20 @@ def assert_label_lifecycle(
     valid = states[:3] == expected_start
     position = 3
     while valid and states[position : position + 2] == [
-        "factory:building",
-        "factory:verifying",
+        "machinist:building",
+        "machinist:verifying",
     ]:
         position += 2
-    valid = valid and states[position:] == ["factory:ready-for-review"]
+    valid = valid and states[position:] == ["machinist:ready-for-review"]
     if not valid:
         raise EvalFailure(
             "expected planning -> building -> verifying, optional repair cycles, "
             f"then ready-for-review; observed {states}"
         )
-    observed_final = FACTORY_STATE_LABELS.intersection(final_labels)
-    if observed_final != {"factory:ready-for-review"}:
+    observed_final = MACHINIST_STATE_LABELS.intersection(final_labels)
+    if observed_final != {"machinist:ready-for-review"}:
         raise EvalFailure(
-            "expected only factory:ready-for-review at completion, "
+            "expected only machinist:ready-for-review at completion, "
             f"observed {sorted(observed_final)}"
         )
     if active != observed_final:
@@ -113,12 +113,12 @@ def assert_label_lifecycle(
 def assert_run_result(
     final_labels: Sequence[str],
     label_events: Sequence[tuple[str, str]],
-    factory_exit_code: int,
+    machinist_exit_code: int,
     pr_url: str | None,
 ) -> None:
     if pr_url is None:
-        raise EvalFailure("Factory did not leave an owned pull request for cleanup")
-    assert_label_lifecycle(final_labels, label_events, factory_exit_code)
+        raise EvalFailure("Machinist did not leave an owned pull request for cleanup")
+    assert_label_lifecycle(final_labels, label_events, machinist_exit_code)
 
 
 def issue_number(issue_url: str) -> int:
@@ -166,7 +166,7 @@ def worktree_for_branch(output: str, branch: str) -> Path | None:
 
 def owned_branch(pr: Any, run_id: str) -> str:
     branch = pr.get("headRefName") if isinstance(pr, dict) else None
-    expected = f"codex/factory-eval-{run_id}"
+    expected = f"codex/machinist-eval-{run_id}"
     if branch != expected or pr.get("isCrossRepository") is not False:
         raise EvalFailure(f"refused to remove unexpected eval branch {branch!r}")
     return branch
@@ -192,11 +192,11 @@ def ensure_branch_absent(repository_path: Path, branch: str) -> None:
 
 
 def create_issue(repository: str, run_id: str) -> str:
-    filename = f"factory-eval-{run_id}.md"
-    branch = f"codex/factory-eval-{run_id}"
+    filename = f"machinist-eval-{run_id}.md"
+    branch = f"codex/machinist-eval-{run_id}"
     body = f"""## Outcome
 
-Add `{filename}` at the repository root with exactly one line: `Factory eval {run_id}`.
+Add `{filename}` at the repository root with exactly one line: `Machinist eval {run_id}`.
 
 ## Scope
 
@@ -205,7 +205,7 @@ Create only that file. Do not modify any existing file.
 ## Acceptance criteria
 
 - `{filename}` exists at the repository root.
-- Its only line is `Factory eval {run_id}`.
+- Its only line is `Machinist eval {run_id}`.
 - No other file changes.
 
 ## Verification
@@ -216,7 +216,7 @@ Read the file and inspect the complete diff.
 
 Use the exact branch name `{branch}`.
 
-This disposable issue was created by Factory eval `{run_id}`.
+This disposable issue was created by Machinist eval `{run_id}`.
 """
     result = command(
         (
@@ -226,7 +226,7 @@ This disposable issue was created by Factory eval `{run_id}`.
             "--repo",
             repository,
             "--title",
-            f"[factory-eval:{run_id}] Add a temporary eval marker",
+            f"[machinist-eval:{run_id}] Add a temporary eval marker",
             "--body-file",
             "-",
         ),
@@ -260,7 +260,7 @@ def capture_evidence(
         if event.get("event") in ("labeled", "unlabeled")
         and isinstance(event.get("label"), dict)
         and isinstance(event["label"].get("name"), str)
-        and event["label"]["name"] in FACTORY_STATE_LABELS
+        and event["label"]["name"] in MACHINIST_STATE_LABELS
     )
     comments = issue.get("comments")
     pr_url = pull_request_url(
@@ -277,7 +277,7 @@ def cleanup(
     run_id: str,
 ) -> list[str]:
     errors: list[str] = []
-    branch = f"codex/factory-eval-{run_id}"
+    branch = f"codex/machinist-eval-{run_id}"
     if pr_url is not None:
         try:
             pr = gh_json(
@@ -298,7 +298,7 @@ def cleanup(
             "close",
             issue_url,
             "--comment",
-            f"Factory eval `{run_id}` finished and cleanup was attempted.",
+            f"Machinist eval `{run_id}` finished and cleanup was attempted.",
         )
     )
     if result.returncode != 0:
@@ -351,14 +351,14 @@ def remove_local_worktree(repository_path: Path, branch: str) -> None:
         raise EvalFailure((result.stderr or f"could not delete {branch}").strip())
 
 
-def validate(repository: str, repository_path: Path, factory: str) -> str:
+def validate(repository: str, repository_path: Path, machinist: str) -> str:
     if REPOSITORY_NAME.fullmatch(repository) is None:
         raise EvalFailure("--repository must use owner/name format")
     if not repository_path.is_absolute() or not repository_path.is_dir():
         raise EvalFailure("--repo-path must be an existing absolute directory")
-    executable = shutil.which(factory)
+    executable = shutil.which(machinist)
     if executable is None:
-        raise EvalFailure(f"Factory executable was not found: {factory}")
+        raise EvalFailure(f"Machinist executable was not found: {machinist}")
     checked(command(("gh", "auth", "status")), "GitHub authentication")
     local = gh_json(("repo", "view", "--json", "nameWithOwner"), cwd=repository_path)
     if not isinstance(local, dict) or local.get("nameWithOwner") != repository:
@@ -374,13 +374,13 @@ def validate(repository: str, repository_path: Path, factory: str) -> str:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        description="Run Factory's foreman and verify its issue-label lifecycle."
+        description="Run Machinist's foreman and verify its issue-label lifecycle."
     )
     result.add_argument("--repository", required=True, help="scratch repo as owner/name")
     result.add_argument("--repo-path", required=True, type=Path)
-    result.add_argument("--factory", default="factory")
+    result.add_argument("--machinist", default="machinist")
     result.add_argument("--worker-config", type=Path)
-    result.add_argument("--factory-config", type=Path)
+    result.add_argument("--machinist-config", type=Path)
     result.add_argument("--model")
     return result
 
@@ -392,15 +392,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
     run_id = f"{time.strftime('%Y%m%d%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
     failure: BaseException | None = None
     try:
-        executable = validate(options.repository, options.repo_path, options.factory)
+        executable = validate(options.repository, options.repo_path, options.machinist)
         ensure_branch_absent(
-            options.repo_path, f"codex/factory-eval-{run_id}"
+            options.repo_path, f"codex/machinist-eval-{run_id}"
         )
         issue_url = create_issue(options.repository, run_id)
-        factory_command = [executable]
+        machinist_command = [executable]
         if options.worker_config is not None:
-            factory_command.append(f"--config={options.worker_config.resolve()}")
-        factory_command.extend(
+            machinist_command.append(f"--config={options.worker_config.resolve()}")
+        machinist_command.extend(
             (
                 "run",
                 "--agent=foreman",
@@ -408,16 +408,16 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 f"--repo={options.repo_path}",
             )
         )
-        if options.factory_config is not None:
-            factory_command.append(f"--factory-config={options.factory_config.resolve()}")
+        if options.machinist_config is not None:
+            machinist_command.append(f"--machinist-config={options.machinist_config.resolve()}")
         if options.model is not None:
-            factory_command.append(f"--model={options.model}")
-        factory_result = command(factory_command, cwd=options.repo_path, capture=False)
+            machinist_command.append(f"--model={options.model}")
+        machinist_result = command(machinist_command, cwd=options.repo_path, capture=False)
         final_labels, label_events, pr_url = capture_evidence(
             options.repository, issue_url
         )
         assert_run_result(
-            final_labels, label_events, factory_result.returncode, pr_url
+            final_labels, label_events, machinist_result.returncode, pr_url
         )
     except BaseException as error:
         failure = error

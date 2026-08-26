@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	factoryexamples "github.com/owainlewis/factory-v2/examples"
-	"github.com/owainlewis/factory-v2/internal/config"
+	machinistexamples "github.com/owainlewis/machinist-v2/examples"
+	"github.com/owainlewis/machinist-v2/internal/config"
 )
 
 func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
@@ -27,7 +27,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
-	directory := filepath.Join(home, ".factory")
+	directory := filepath.Join(home, ".machinist")
 	wantFiles := []string{
 		"agents/audit.md",
 		"agents/foreman.md",
@@ -39,7 +39,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 		t.Fatalf("installed files = %#v, want %#v", got, wantFiles)
 	}
 	for _, name := range initialFiles {
-		want, err := factoryexamples.Files.ReadFile(name)
+		want, err := machinistexamples.Files.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -60,13 +60,23 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	if err != nil || len(decoded) != 32 {
 		t.Fatalf("worker token is not 32 random bytes: %q, %v", token, err)
 	}
-	for _, path := range []string{filepath.Join(directory, "config.toml"), tokenPath} {
+	for _, name := range wantFiles {
+		path := filepath.Join(directory, filepath.FromSlash(name))
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("mode for %s = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+	for _, path := range []string{directory, filepath.Join(directory, "agents"), filepath.Join(directory, "server")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Fatalf("mode for %s = %o, want 700", path, info.Mode().Perm())
 		}
 	}
 
@@ -91,13 +101,42 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	}
 }
 
+func TestInitLeavesLegacyFactoryDirectoryUntouched(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyDirectory := filepath.Join(home, ".factory")
+	if err := os.Mkdir(legacyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(legacyDirectory, "config.toml")
+	legacyBody := []byte("incompatible legacy configuration\n")
+	if err := os.WriteFile(legacyPath, legacyBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test"); exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	got, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatalf("read legacy configuration: %v", err)
+	}
+	if !bytes.Equal(got, legacyBody) {
+		t.Fatalf("legacy configuration changed: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".machinist", "config.toml")); err != nil {
+		t.Fatalf("Machinist configuration was not created: %v", err)
+	}
+}
+
 func TestInitKeepsExistingFilesAndRestoresMissingDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}, "test"); exitCode != 0 {
 		t.Fatalf("first init exit code = %d", exitCode)
 	}
-	directory := filepath.Join(home, ".factory")
+	directory := filepath.Join(home, ".machinist")
 	for name, body := range map[string]string{
 		"config.toml":         "custom config\n",
 		"worker.toml":         "custom worker\n",
@@ -136,7 +175,7 @@ func TestInitKeepsExistingFilesAndRestoresMissingDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAudit, err := factoryexamples.Files.ReadFile("agents/audit.md")
+	wantAudit, err := machinistexamples.Files.ReadFile("agents/audit.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +250,7 @@ func TestInitRejectsExistingNonFile(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
-			directory := filepath.Join(home, ".factory")
+			directory := filepath.Join(home, ".machinist")
 			if err := os.MkdirAll(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -231,7 +270,7 @@ func TestInitRejectsExistingNonFile(t *testing.T) {
 }
 
 func TestInitRejectsSymlinkedSetupDirectories(t *testing.T) {
-	for _, name := range []string{".factory", ".factory/agents", ".factory/server"} {
+	for _, name := range []string{".machinist", ".machinist/agents", ".machinist/server"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
@@ -360,7 +399,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 		switch request.URL.Path {
 		case "/api/v1/catalog":
 			writeTestJSON(response, map[string]any{
-				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"factory"},
+				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"machinist"},
 			})
 		case "/api/v1/jobs":
 			gotAuthorization = request.Header.Get("Authorization")
@@ -382,7 +421,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 		"--agent=plan",
 		"--model=luna",
 		"--prompt=fix issue 13",
-		"--repo=factory",
+		"--repo=machinist",
 		"--config=" + workerConfig,
 	}, strings.NewReader(""), &stdout, &stderr, "test")
 	if exitCode != 0 || stdout.String() != "job_admitted\n" {
@@ -391,7 +430,7 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	if gotAuthorization != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuthorization)
 	}
-	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "factory", Agent: "plan", Model: "luna"}) {
+	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "machinist", Agent: "plan", Model: "luna"}) {
 		t.Fatalf("submission = %#v", gotRequest)
 	}
 }
@@ -402,7 +441,7 @@ func TestSubmitQueuesPipeline(t *testing.T) {
 		switch request.URL.Path {
 		case "/api/v1/catalog":
 			writeTestJSON(response, map[string]any{
-				"agents": []string{}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
+				"agents": []string{}, "pipelines": []string{"quality"}, "repositories": []string{"machinist"},
 			})
 		case "/api/v1/jobs":
 			if err := json.NewDecoder(request.Body).Decode(&gotRequest); err != nil {
@@ -422,13 +461,13 @@ func TestSubmitQueuesPipeline(t *testing.T) {
 		"submit",
 		"--pipeline=quality",
 		"--prompt=check the repository",
-		"--repo=factory",
+		"--repo=machinist",
 		"--config=" + workerConfig,
 	}, strings.NewReader(""), &stdout, &stderr, "test")
 	if exitCode != 0 || stdout.String() != "job_pipeline\n" {
 		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
 	}
-	if gotRequest != (submitJobRequest{Prompt: "check the repository", Repository: "factory", Pipeline: "quality"}) {
+	if gotRequest != (submitJobRequest{Prompt: "check the repository", Repository: "machinist", Pipeline: "quality"}) {
 		t.Fatalf("submission = %#v", gotRequest)
 	}
 }
@@ -444,7 +483,7 @@ func TestSubmitUsesCatalogWhenStatusHistoryIsLarge(t *testing.T) {
 		case "/api/v1/catalog":
 			catalogRequested = true
 			writeTestJSON(response, map[string]any{
-				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"factory"},
+				"agents": []string{"plan"}, "pipelines": []string{}, "repositories": []string{"machinist"},
 			})
 		case "/api/v1/jobs":
 			writeTestJSON(response, map[string]string{"id": "job_large_history"})
@@ -460,7 +499,7 @@ func TestSubmitUsesCatalogWhenStatusHistoryIsLarge(t *testing.T) {
 		"submit",
 		"--agent=plan",
 		"--prompt=work despite history",
-		"--repo=factory",
+		"--repo=machinist",
 		"--config=" + workerConfig,
 	}, strings.NewReader(""), &stdout, &stderr, "test")
 	if exitCode != 0 || stdout.String() != "job_large_history\n" || !catalogRequested {
@@ -473,7 +512,7 @@ func TestSubmitRejectsUnknownValuesBeforeCreatingJob(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/api/v1/catalog" {
 			writeTestJSON(response, map[string]any{
-				"agents": []string{"plan"}, "pipelines": []string{"quality"}, "repositories": []string{"factory"},
+				"agents": []string{"plan"}, "pipelines": []string{"quality"}, "repositories": []string{"machinist"},
 			})
 			return
 		}
@@ -490,8 +529,8 @@ func TestSubmitRejectsUnknownValuesBeforeCreatingJob(t *testing.T) {
 		args []string
 		want string
 	}{
-		{name: "agent", args: []string{"--agent=missing", "--prompt=work", "--repo=factory"}, want: `agent "missing" is not defined`},
-		{name: "pipeline", args: []string{"--pipeline=missing", "--prompt=work", "--repo=factory"}, want: `pipeline "missing" is not defined`},
+		{name: "agent", args: []string{"--agent=missing", "--prompt=work", "--repo=machinist"}, want: `agent "missing" is not defined`},
+		{name: "pipeline", args: []string{"--pipeline=missing", "--prompt=work", "--repo=machinist"}, want: `pipeline "missing" is not defined`},
 		{name: "repository", args: []string{"--agent=plan", "--prompt=work", "--repo=missing"}, want: `repository "missing" is not defined in the control plane`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -570,6 +609,14 @@ func TestWorkerRunRejectsLegacyTaskFlag(t *testing.T) {
 	}
 }
 
+func TestWorkerRunRejectsLegacyFactoryConfigFlag(t *testing.T) {
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{"worker", "run", "--agent=plan", "--prompt=issue 42", "--factory-config=legacy.toml"}, strings.NewReader(""), &bytes.Buffer{}, &stderr, "test")
+	if exitCode != 2 || !strings.Contains(stderr.String(), "unknown flag: --factory-config") {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+}
+
 func TestWorkerRunRejectsEmptyPrompt(t *testing.T) {
 	var stderr bytes.Buffer
 	exitCode := Execute(t.Context(), []string{
@@ -586,7 +633,7 @@ func TestWorkerRunRejectsEmptyPrompt(t *testing.T) {
 
 func TestWorkerRunDoesNotEvaluatePromptAsTemplateOrShell(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "not-run")
-	prompt := "fix $(touch " + marker + ") and preserve {{factory.prompt}}\nsecond line"
+	prompt := "fix $(touch " + marker + ") and preserve {{machinist.prompt}}\nsecond line"
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	exitCode := Execute(t.Context(), []string{
@@ -696,16 +743,16 @@ func TestVersion(t *testing.T) {
 func writeCLIConfig(t *testing.T, mode string) string {
 	t.Helper()
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("configured plan prompt\n\nPrompt:\n{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("configured plan prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "review.md"), []byte("configured review prompt\n\nPrompt:\n{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "review.md"), []byte("configured review prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "build.md"), []byte("configured build prompt\n\nPrompt:\n{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "build.md"), []byte("configured build prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "verify.md"), []byte("configured verify prompt\n\nPrompt:\n{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "verify.md"), []byte("configured verify prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	definition := filepath.Join(directory, "config.toml")
@@ -744,7 +791,7 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	worker := filepath.Join(directory, "worker.toml")
 	defaultCommand := "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + "]\n"
 	if mode == "model" {
-		defaultCommand = "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + ", \"--model={{factory.model}}\"]\n" +
+		defaultCommand = "command = [\"/bin/sh\", \"-c\", " + strconv.Quote(script) + ", \"--model={{machinist.model}}\"]\n" +
 			"models = { luna = \"gpt-test-luna\" }\n"
 	}
 	workerBody := "data_directory = \"" + filepath.ToSlash(filepath.Join(directory, "data")) + "\"\n" +

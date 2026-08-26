@@ -4,10 +4,10 @@ Status: Implemented
 
 ## 1. Outcome
 
-Factory can run immediately from the CLI or receive work from one local control plane.
+Machinist can run immediately from the CLI or receive work from one local control plane.
 The control plane stores jobs and runs in SQLite, owns agent templates and pipelines,
 and shows process state in a small React application. Vite bundles the frontend at build
-time and Go embeds the static output, so Factory still deploys as one binary with no Node
+time and Go embeds the static output, so Machinist still deploys as one binary with no Node
 runtime. A worker polls outbound, executes one run at a time with the existing runner,
 and reports the terminal result.
 
@@ -19,33 +19,33 @@ GitHub labels, Linear state, or whether the requested product outcome is correct
 Direct mode remains immediate and independent:
 
 ```sh
-factory run --agent=foreman --prompt="Complete a GitHub issue URL"
-factory run --pipeline=quality --prompt="Check the current repository"
+machinist run --agent=foreman --prompt="Complete a GitHub issue URL"
+machinist run --pipeline=quality --prompt="Check the current repository"
 ```
 
-`quality` illustrates a user-defined pipeline. Factory does not ship a default pipeline.
+`quality` illustrates a user-defined pipeline. Machinist does not ship a default pipeline.
 
 Managed mode uses two long-running commands:
 
 ```sh
-factory start --config=/path/to/config.toml
-factory worker start --config=/path/to/worker.toml
+machinist start --config=/path/to/config.toml
+machinist worker start --config=/path/to/worker.toml
 ```
 
-`factory start` listens on `127.0.0.1:7331` so it does not interfere with the existing
+`machinist start` listens on `127.0.0.1:7331` so it does not interfere with the existing
 application on port 8080. This local phase rejects non-loopback listeners. Remote VM and
 Kubernetes deployment remains a target, but requires a separate authenticated human web
-surface and TLS boundary before Factory exposes the server beyond the host.
+surface and TLS boundary before Machinist exposes the server beyond the host.
 
 ## 3. Configuration ownership
 
-The shared Factory configuration owns the server, portable prompts, and pipelines:
+The shared Machinist configuration owns the server, portable prompts, and pipelines:
 
 ```toml
 [server]
 listen = "127.0.0.1:7331"
-database = "~/.factory/server/factory.db"
-worker_token_file = "~/.factory/server/worker.token"
+database = "~/.machinist/server/machinist.db"
+worker_token_file = "~/.machinist/server/worker.token"
 
 [agents.foreman]
 executor = "codex"
@@ -67,18 +67,18 @@ paths. Provider credentials come from executor configuration or the worker
 process environment:
 
 ```toml
-data_directory = "~/.factory/worker"
+data_directory = "~/.machinist/worker"
 
 [control_plane]
 url = "http://127.0.0.1:7331"
-token_file = "~/.factory/server/worker.token"
+token_file = "~/.machinist/server/worker.token"
 
 [executors.codex]
-command = ["codex", "exec", "--model={{factory.model}}", "--sandbox", "danger-full-access", "-"]
+command = ["codex", "exec", "--model={{machinist.model}}", "--sandbox", "danger-full-access", "-"]
 models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 
-[repositories.factory]
-path = "/workspace/factory"
+[repositories.machinist]
+path = "/workspace/machinist"
 ```
 
 Direct mode reads `config.toml` and resolves its named executor through `worker.toml`.
@@ -210,7 +210,7 @@ HTTPS so bearer tokens and prompts are never sent across a network in cleartext.
 
 ## 8. Invariants
 
-- INV-1: `factory run` never requires or contacts a control plane.
+- INV-1: `machinist run` never requires or contacts a control plane.
 - INV-2: a managed run uses the server-rendered prompt but only worker-owned executors,
   repositories, environment, and credentials.
 - INV-3: the runner receives a final rendered prompt and knows nothing about templates,

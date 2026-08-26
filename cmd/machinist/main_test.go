@@ -45,7 +45,7 @@ func TestBinaryHandlesClosedOutputPipe(t *testing.T) {
 
 func TestBinaryTimeoutInterruptsOpenUnreadOutputPipe(t *testing.T) {
 	directory := t.TempDir()
-	script := "cat >/dev/null; yes factory"
+	script := "cat >/dev/null; yes machinist"
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{"/bin/sh", "-c", script}, "200ms")
 	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	stdout, err := command.StdoutPipe()
@@ -70,13 +70,13 @@ func TestBinaryTimeoutInterruptsOpenUnreadOutputPipe(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = stdout.Close()
 		<-done
-		t.Fatal("Factory did not time out with an open unread stdout pipe")
+		t.Fatal("Machinist did not time out with an open unread stdout pipe")
 	}
 }
 
 func TestBinaryTimeoutInterruptsOpenUnreadErrorPipe(t *testing.T) {
 	directory := t.TempDir()
-	script := "cat >/dev/null; yes factory >&2"
+	script := "cat >/dev/null; yes machinist >&2"
 	binary, repository, workerPath := setupBinaryRun(t, directory, []string{"/bin/sh", "-c", script}, "200ms")
 	command := exec.Command(binary, "worker", "run", "--agent=plan", "--prompt=run the configured agent", "--repo="+repository, "--config="+workerPath)
 	stderr, err := command.StderrPipe()
@@ -100,7 +100,7 @@ func TestBinaryTimeoutInterruptsOpenUnreadErrorPipe(t *testing.T) {
 		_ = command.Process.Kill()
 		_ = stderr.Close()
 		<-done
-		t.Fatal("Factory did not time out with an open unread stderr pipe")
+		t.Fatal("Machinist did not time out with an open unread stderr pipe")
 	}
 }
 
@@ -133,16 +133,16 @@ func TestAgentGetsDefaultSIGPIPEDisposition(t *testing.T) {
 
 func setupBinaryRun(t *testing.T, directory string, agentCommand []string, timeout string) (string, string, string) {
 	t.Helper()
-	binary := filepath.Join(directory, "factory")
+	binary := filepath.Join(directory, "machinist")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build factory: %v: %s", err, output)
+		t.Fatalf("build machinist: %v: %s", err, output)
 	}
 	repository := filepath.Join(directory, "repository")
 	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{factory.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "plan.md"), []byte("{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	quotedCommand := make([]string, len(agentCommand))

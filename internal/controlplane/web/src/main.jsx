@@ -26,7 +26,7 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [expanded, setExpanded] = useState(new Set());
-  const [dark, setDark] = useState(() => localStorage.getItem("factory-theme") !== "light");
+  const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [view, setView] = useState(() => viewFromHash(window.location.hash));
 
   async function refresh() {
@@ -45,7 +45,7 @@ function App() {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
-    localStorage.setItem("factory-theme", dark ? "dark" : "light");
+    localStorage.setItem("machinist-theme", dark ? "dark" : "light");
   }, [dark]);
 
   useEffect(() => {
@@ -105,7 +105,7 @@ function App() {
     try {
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Factory-CSRF": status.csrf_token },
+        headers: { "Content-Type": "application/json", "X-Machinist-CSRF": status.csrf_token },
         body: JSON.stringify({ prompt, repository, model: model.trim(), [kind]: name }),
       });
       if (!response.ok) {
@@ -135,8 +135,7 @@ function App() {
       <aside className="sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-52 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-3 md:py-4">
         <div className="flex h-10 items-center gap-2.5 px-2 text-sm font-semibold tracking-tight">
           <span className="grid size-7 place-items-center rounded-md border border-border bg-surface text-primary shadow-xs"><Workflow className="size-4" /></span>
-          <span>Factory</span>
-          <span className="ml-auto hidden font-mono text-xs font-normal text-muted-foreground md:inline">v0.1</span>
+          <span>Machinist</span>
         </div>
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-6 md:block md:overflow-visible" aria-label="Primary">
           <a href="#/runs" aria-current={view === "runs" ? "page" : undefined} className={cn("nav-item", view === "runs" && "nav-item-active")}><Activity className="size-4" /><span>Runs</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
@@ -203,7 +202,7 @@ function RunComposer({ choices, repositories, selection, setSelection, repositor
       </div>
       <label><span className="field-label">Model <span className="font-normal normal-case tracking-normal text-muted-foreground">optional</span></span><input className="field-control font-mono" value={model} onChange={(event) => setModel(event.target.value)} placeholder="luna" maxLength={128} /></label>
       <label><span className="field-label">Prompt</span><textarea className="field-control min-h-28 resize-y" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Work on ticket https://github.com/acme/repo/issues/123" required /></label>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Factory adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection || !repository}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-muted-foreground">Machinist adds the selected agent template before dispatch.</p><Button disabled={submitting || !selection || !repository}>{submitting ? "Submitting…" : "Submit run"}<Play className="size-3.5" /></Button></div>
     </form>
   </Card>;
 }

@@ -1,6 +1,6 @@
 # Examples
 
-The files at this level are the small default installed by `factory init`:
+The files at this level are the small default installed by `machinist init`:
 
 - `config.toml` defines the shipped `foreman` and `audit` agents.
 - `worker.toml` shows local Codex and Claude Code executors.

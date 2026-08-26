@@ -7,7 +7,7 @@ not edit it.
 # Input
 
 <work-request>
-{{factory.prompt}}
+{{machinist.prompt}}
 </work-request>
 
 The request must identify exactly one open pull request in the repository for the current

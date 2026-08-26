@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/owainlewis/factory-v2/internal/cli"
+	"github.com/owainlewis/machinist-v2/internal/cli"
 )
 
 var version = "dev"
@@ -26,13 +26,13 @@ func run() int {
 	defer stop()
 	stdout, closeStdout, err := interruptibleOutput(os.Stdout)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "factory: prepare stdout: %s\n", err)
+		fmt.Fprintf(os.Stderr, "machinist: prepare stdout: %s\n", err)
 		return 1
 	}
 	defer closeStdout()
 	stderr, closeStderr, err := interruptibleOutput(os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "factory: prepare stderr: %s\n", err)
+		fmt.Fprintf(os.Stderr, "machinist: prepare stderr: %s\n", err)
 		return 1
 	}
 	defer closeStderr()

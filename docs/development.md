@@ -8,13 +8,13 @@
 
 ## Build
 
-Build the React application, embed it, and compile Factory:
+Build the React application, embed it, and compile Machinist:
 
 ```sh
 just build
 ```
 
-The binary is written to `bin/factory`.
+The binary is written to `bin/machinist`.
 
 For backend-only changes that do not touch the frontend, the tracked production
 assets allow a direct Go build:
@@ -32,7 +32,7 @@ just check
 ```
 
 This installs the locked frontend dependencies, runs frontend tests, rebuilds
-the embedded assets, formats and vets the Go code, runs Go tests with the race
+the embedded assets, checks and vets the Go code, runs Go tests with the race
 detector, and builds all Go packages.
 
 Focused commands are also available:
@@ -46,7 +46,7 @@ go test ./internal/runner
 ## Project layout
 
 ```text
-cmd/factory/                  CLI entry point
+cmd/machinist/                CLI entry point
 examples/                     embedded default configuration and prompts
 internal/cli/                 command behavior
 internal/config/              strict TOML loading and template resolution
