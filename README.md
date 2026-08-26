@@ -49,9 +49,8 @@ flowchart TB
         direction LR
         REVIEW[Independent agent review] -->|approved| CHECKS[Pull request<br/>CI and automated review]
         CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
-        REVIEW -->|findings| REPAIR[Bounded repair]
-        CHECKS -->|failure or finding| REPAIR
-        REPAIR --> REVIEW
+        REVIEW -.->|findings: bounded repair| REVIEW
+        CHECKS -.->|failure or finding: bounded repair| REVIEW
     end
 
     BUILD_PHASE -->|ready for review| VERIFY_PHASE
@@ -59,11 +58,9 @@ flowchart TB
     classDef input fill:#f2a23a,stroke:#b95b16,color:#211408,stroke-width:2px
     classDef station fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
     classDef decision fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:2px
-    classDef repair fill:#fed7aa,stroke:#b95b16,color:#211408,stroke-width:1.5px
     class ISSUE input
     class PLAN,BUILD,REVIEW,CHECKS station
     class HUMAN decision
-    class REPAIR repair
     style BUILD_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
     style VERIFY_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
     linkStyle default stroke:#b95b16,stroke-width:2px
