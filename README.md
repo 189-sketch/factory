@@ -241,6 +241,10 @@ just build
 just check
 ```
 
+The opt-in Python eval under [`evals/`](evals/) runs the complete default workflow against
+a dedicated scratch repository and verifies its issue-label lifecycle. It is separate
+from `just check` because it creates real GitHub issues and pull requests.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
