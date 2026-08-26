@@ -142,8 +142,8 @@ worker-namespaced direct path for a single agent.
   and invariants
 - [Warp Factories product review](docs/product-direction/warp-factories-review.md):
   lessons, readiness gates, and recommended product order
-- [Worker skills design](docs/worker-skills/design.md): a proposed shared and
-  agent-scoped skill model
+- [Runner-managed skills](docs/worker-skills/design.md): why coding-agent skills
+  stay native to the configured runner
 
 ## Project status
 

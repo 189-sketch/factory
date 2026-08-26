@@ -15,5 +15,5 @@
   protocol, invariants, and acceptance criteria
 - [Warp Factories product review](product-direction/warp-factories-review.md):
   compare the products and review Factory's readiness and priorities
-- [Worker skills design](worker-skills/design.md): review the proposed shared
-  and agent-scoped skill model
+- [Runner-managed skills](worker-skills/design.md): understand why coding-agent
+  skills stay native to the configured runner
