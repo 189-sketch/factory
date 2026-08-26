@@ -1,0 +1,4 @@
+[agents.code-audit]
+executor = "codex"
+prompt_file = "agents/code-audit.md"
+timeout = "60m"

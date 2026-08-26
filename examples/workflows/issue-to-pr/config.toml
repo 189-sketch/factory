@@ -1,0 +1,4 @@
+[agents.issue-to-pr]
+executor = "codex"
+prompt_file = "agents/issue-to-pr.md"
+timeout = "120m"
