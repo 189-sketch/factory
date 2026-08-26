@@ -39,16 +39,37 @@ result.
 
 ```mermaid
 flowchart TB
-    ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
-    PLAN --> BUILD[Build in an isolated worktree]
-    BUILD --> REVIEW[Independent agent review]
-    REVIEW -->|findings| REPAIR[Bounded repair]
-    REPAIR --> REVIEW
-    REVIEW -->|approved| PR[Open or update pull request]
-    PR --> CHECKS[Repository CI and automated review]
-    CHECKS -->|failure or finding| REPAIR
-    CHECKS -->|green| HANDOFF([Ready for human review])
-    HANDOFF --> DECIDE{You decide whether to merge}
+    subgraph BUILD_PHASE[1 · Build]
+        direction LR
+        ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
+        PLAN --> BUILD[Build in an isolated worktree]
+    end
+
+    subgraph VERIFY_PHASE[2 · Verify and hand off]
+        direction LR
+        REPAIR[Bounded repair] --> REVIEW
+        REVIEW[Independent agent review] -->|approved| CHECKS[Pull request<br/>CI and automated review]
+        CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
+        REVIEW -.->|findings| REPAIR
+        CHECKS -.->|failure or finding| REPAIR
+    end
+
+    BUILD_PHASE -->|ready for review| VERIFY_PHASE
+    VERIFY_PHASE ~~~ CONTROL_SPACE(( ))
+
+    classDef input fill:#f2a23a,stroke:#b95b16,color:#211408,stroke-width:2px
+    classDef station fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef decision fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:2px
+    classDef repair fill:#fed7aa,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef spacer fill:transparent,stroke:transparent,color:transparent
+    class ISSUE input
+    class PLAN,BUILD,REVIEW,CHECKS station
+    class HUMAN decision
+    class REPAIR repair
+    class CONTROL_SPACE spacer
+    style BUILD_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    style VERIFY_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    linkStyle 0,1,2,3,4,5,6,7 stroke:#b95b16,stroke-width:2px
 ```
 
 The loop is deliberately bounded. If the work cannot be made safe after the
@@ -74,37 +95,29 @@ prove.
 ## Inside the factory
 
 Machinist separates portable workflow intent from machine-local authority. The
-control plane can queue work and track it, but only a worker can resolve an
-executor command, repository path, process environment, and credentials.
+control plane can queue and track work, but it does not execute it. In direct
+mode the CLI process resolves the executor command, repository path, process
+environment, and credentials; in managed mode the worker does.
 
 ```mermaid
-flowchart LR
-    OP([Operator or script]) --> CLI
-    OP --> UI
-
-    subgraph ENTRY[Entrypoints]
-        direction TB
-        CLI[Machinist CLI]
-        UI[Local browser UI]
-    end
-
-    subgraph CONTROL[Managed coordination]
-        direction TB
-        CP[Local control plane] <--> DB[(SQLite queue and history)]
-        CP <-->|leases and results| WORKER[Managed worker]
-    end
-
-    subgraph EXECUTION[Machine-local execution]
-        direction TB
-        RUNNER[Supervised runner] --> EXEC[Configured coding-agent executor]
-        RUNNER --> ART[(Local run artifacts)]
-    end
-
-    UI --> CP
-    CLI -->|managed| CP
+flowchart TB
+    UI[Local browser UI] --> CP
+    CLI[Machinist CLI] -->|managed| CP[Control plane<br/>SQLite queue and history]
+    CP <-->|leases and results| WORKER[Managed worker]
     CLI -->|direct| RUNNER
     WORKER --> RUNNER
-    EXEC --> REPO[(Existing Git worktree)]
+    RUNNER[Supervised runner<br/>Configured coding-agent executor] --> REPO[(Existing Git worktree)]
+    RUNNER --> ART[(Local run artifacts)]
+
+    classDef entry fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef managed fill:#ffedd5,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef execution fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    classDef data fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    class CLI,UI entry
+    class CP,WORKER managed
+    class RUNNER execution
+    class ART,REPO data
+    linkStyle default stroke:#b95b16,stroke-width:2px
 ```
 
 The shared `config.toml` supplies portable agents, prompts, and pipelines to the
