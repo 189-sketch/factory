@@ -48,7 +48,12 @@ flowchart TB
     subgraph VERIFY_PHASE[2 · Verify and hand off]
         direction LR
         REVIEW[Independent agent review] -->|approved| CHECKS[Pull request<br/>CI and automated review]
-        CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
+        subgraph HANDOFF[ ]
+            direction TB
+            HUMAN([Human review<br/>You decide whether to merge])
+            HUMAN ~~~ CONTROL_SPACE[ ]
+        end
+        CHECKS -->|green| HUMAN
         REVIEW -.->|findings: bounded repair| REVIEW
         CHECKS -.->|failure or finding: bounded repair| REVIEW
     end
@@ -58,11 +63,14 @@ flowchart TB
     classDef input fill:#f2a23a,stroke:#b95b16,color:#211408,stroke-width:2px
     classDef station fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
     classDef decision fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:2px
+    classDef spacer fill:transparent,stroke:transparent,color:transparent
     class ISSUE input
     class PLAN,BUILD,REVIEW,CHECKS station
     class HUMAN decision
+    class CONTROL_SPACE spacer
     style BUILD_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
     style VERIFY_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    style HANDOFF fill:transparent,stroke:transparent
     linkStyle default stroke:#b95b16,stroke-width:2px
 ```
 
