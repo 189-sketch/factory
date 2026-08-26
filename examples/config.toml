@@ -3,25 +3,12 @@ listen = "127.0.0.1:7331"
 database = "~/.factory/server/factory.db"
 worker_token_file = "~/.factory/server/worker.token"
 
-[agents.plan]
-executor = "codex"
-prompt_file = "agents/plan.md"
-timeout = "20m"
-
-[agents.build]
-executor = "codex"
-prompt_file = "agents/build.md"
-timeout = "60m"
-
-[agents.verify]
-executor = "codex"
-prompt_file = "agents/verify.md"
-timeout = "30m"
-
 [agents.foreman]
 executor = "codex"
 prompt_file = "agents/foreman.md"
 timeout = "120m"
 
-[pipelines.code]
-agents = ["plan", "build", "verify"]
+[agents.audit]
+executor = "codex"
+prompt_file = "agents/audit.md"
+timeout = "60m"

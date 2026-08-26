@@ -387,7 +387,24 @@ func TestLoadPipelineRejectsMissingEmptyAndUndefinedAgents(t *testing.T) {
 
 func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	definition := filepath.Join("..", "..", "examples", "config.toml")
-	for _, name := range []string{"plan", "build", "verify", "foreman"} {
+	definitions, err := LoadDefinitions(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions.Agents) != 2 {
+		t.Fatalf("example agents = %#v, want only foreman and audit", definitions.Agents)
+	}
+	if _, ok := definitions.Agents["foreman"]; !ok {
+		t.Fatal("example foreman agent is missing")
+	}
+	if _, ok := definitions.Agents["audit"]; !ok {
+		t.Fatal("example audit agent is missing")
+	}
+	if len(definitions.Pipelines) != 0 {
+		t.Fatalf("example pipelines = %#v, want none", definitions.Pipelines)
+	}
+
+	for _, name := range []string{"foreman", "audit"} {
 		t.Run(name, func(t *testing.T) {
 			agent, err := LoadAgent(definition, name)
 			if err != nil {
@@ -401,12 +418,8 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 			}
 		})
 	}
-	agents, err := LoadPipeline(definition, "code")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(agents) != 3 {
-		t.Fatalf("example pipeline agents = %d, want 3", len(agents))
+	if _, err := LoadPipeline(definition, "code"); err == nil || !strings.Contains(err.Error(), `pipeline "code" is not defined`) {
+		t.Fatalf("default code pipeline unexpectedly loads: %v", err)
 	}
 	foreman, err := LoadAgent(definition, "foreman")
 	if err != nil {
@@ -417,6 +430,14 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"Use at most two repair attempts",
 		"Use attempt `0` for planning",
 		"attempts `1` and `2` for the first and second repairs",
+		"Every planning, build, review, and repair subagent prompt",
+		"SUBAGENT role=<role> outcome=<outcome> issue=<issue-url> evidence=<short factual evidence>",
+		"print or paste a complete diff",
+		"replace it with a fresh subagent on the same immutable head",
+		"issue URL, acceptance criteria, worktree, branch, base SHA, head SHA",
+		"Never inline or print the diff",
+		"open one non-draft pull request",
+		"Keep the issue labeled `factory:verifying`",
 		"poll no more often than every 30 seconds",
 		"at most 20 minutes",
 		"set `factory:blocked`",
@@ -426,6 +447,34 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	} {
 		if !strings.Contains(foreman.Prompt, rule) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
+		}
+	}
+	for _, forbidden := range []string{"open one draft pull request", "mark the pull request ready for human review", "branch, complete diff"} {
+		if strings.Contains(foreman.Prompt, forbidden) {
+			t.Fatalf("foreman prompt still contains %q", forbidden)
+		}
+	}
+
+	audit, err := LoadAgent(definition, "audit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{
+		"fresh general-purpose subagents",
+		"For every candidate",
+		"separate fresh general-purpose",
+		"Do not combine candidates in one verification task",
+		"verifier does not confirm as a correctness bug",
+		"current open GitHub issues",
+		"no more than three issues",
+		"affected files and",
+		"observed behavior, expected",
+		"Never edit, create, delete, move, or format",
+		"Never create or switch branches, commit, push, or open a pull request",
+		"Never fix a bug, create a",
+	} {
+		if !strings.Contains(audit.Prompt, rule) {
+			t.Fatalf("audit prompt does not contain %q", rule)
 		}
 	}
 }

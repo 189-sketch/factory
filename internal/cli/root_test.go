@@ -25,6 +25,16 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
 	directory := filepath.Join(home, ".factory")
+	wantFiles := []string{
+		"agents/audit.md",
+		"agents/foreman.md",
+		"config.toml",
+		"server/worker.token",
+		"worker.toml",
+	}
+	if got := regularFiles(t, directory); strings.Join(got, "\n") != strings.Join(wantFiles, "\n") {
+		t.Fatalf("installed files = %#v, want %#v", got, wantFiles)
+	}
 	for _, name := range initialFiles {
 		want, err := factoryexamples.Files.ReadFile(name)
 		if err != nil {
@@ -36,17 +46,6 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 		}
 		if !bytes.Equal(got, want) {
 			t.Fatalf("installed %s does not match its default", name)
-		}
-	}
-	for _, name := range []string{"plan", "build", "verify", "foreman"} {
-		prompt, err := os.ReadFile(filepath.Join(directory, "agents", name+".md"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, label := range []string{"factory:planning", "factory:building", "factory:verifying", "factory:ready-for-review", "factory:needs-human", "factory:blocked"} {
-			if !bytes.Contains(prompt, []byte(label)) {
-				t.Fatalf("installed %s prompt does not define %s", name, label)
-			}
 		}
 	}
 	tokenPath := filepath.Join(directory, "server", "worker.token")
@@ -69,19 +68,22 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	}
 
 	definition := filepath.Join(directory, "config.toml")
-	for _, name := range []string{"plan", "build", "verify", "foreman"} {
+	definitions, err := config.LoadDefinitions(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions.Agents) != 2 || len(definitions.Pipelines) != 0 {
+		t.Fatalf("installed definitions = agents %#v, pipelines %#v", definitions.Agents, definitions.Pipelines)
+	}
+	for _, name := range []string{"foreman", "audit"} {
 		if _, err := config.LoadAgent(definition, name); err != nil {
 			t.Fatalf("load installed agent %s: %v", name, err)
 		}
 	}
-	agents, err := config.LoadPipeline(definition, "code")
-	if err != nil || len(agents) != 3 {
-		t.Fatalf("load installed pipeline: agents = %d, error = %v", len(agents), err)
-	}
 	if _, err := config.LoadWorker(filepath.Join(directory, "worker.toml")); err != nil {
 		t.Fatalf("load installed worker: %v", err)
 	}
-	if !strings.Contains(stdout.String(), "created agents/plan.md") || !strings.Contains(stdout.String(), "Add repositories to worker.toml") {
+	if !strings.Contains(stdout.String(), "created agents/audit.md") || !strings.Contains(stdout.String(), "Add repositories to worker.toml") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
 }
@@ -93,37 +95,89 @@ func TestInitKeepsExistingFilesAndRestoresMissingDefaults(t *testing.T) {
 		t.Fatalf("first init exit code = %d", exitCode)
 	}
 	directory := filepath.Join(home, ".factory")
-	planPath := filepath.Join(directory, "agents", "plan.md")
-	tokenPath := filepath.Join(directory, "server", "worker.token")
-	verifyPath := filepath.Join(directory, "agents", "verify.md")
-	if err := os.WriteFile(planPath, []byte("custom plan\n"), 0o600); err != nil {
+	for name, body := range map[string]string{
+		"config.toml":         "custom config\n",
+		"worker.toml":         "custom worker\n",
+		"agents/foreman.md":   "custom foreman\n",
+		"agents/plan.md":      "old plan\n",
+		"agents/build.md":     "old build\n",
+		"agents/verify.md":    "old verify\n",
+		"agents/custom.md":    "custom agent\n",
+		"server/worker.token": "custom token\n",
+	} {
+		if err := os.WriteFile(filepath.Join(directory, filepath.FromSlash(name)), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	auditPath := filepath.Join(directory, "agents", "audit.md")
+	if err := os.Remove(auditPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(tokenPath, []byte("custom token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(verifyPath); err != nil {
-		t.Fatal(err)
-	}
+	preserved := regularFileContents(t, directory)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	if exitCode := Execute(t.Context(), []string{"init"}, strings.NewReader(""), &stdout, &stderr, "test"); exitCode != 0 {
 		t.Fatalf("second init exit code = %d, stderr = %q", exitCode, stderr.String())
 	}
-	plan, _ := os.ReadFile(planPath)
-	token, _ := os.ReadFile(tokenPath)
-	verify, err := os.ReadFile(verifyPath)
+	for name, want := range preserved {
+		got, err := os.ReadFile(filepath.Join(directory, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatalf("read preserved %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("init changed existing file %s", name)
+		}
+	}
+	audit, err := os.ReadFile(auditPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantVerify, _ := factoryexamples.Files.ReadFile("agents/verify.md")
-	if string(plan) != "custom plan\n" || string(token) != "custom token\n" || !bytes.Equal(verify, wantVerify) {
-		t.Fatalf("init overwrote an existing file or failed to restore a missing default")
+	wantAudit, err := factoryexamples.Files.ReadFile("agents/audit.md")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), "kept agents/plan.md") || !strings.Contains(stdout.String(), "created agents/verify.md") || !strings.Contains(stdout.String(), "kept server/worker.token") {
+	if !bytes.Equal(audit, wantAudit) {
+		t.Fatal("init failed to restore the missing audit default")
+	}
+	if !strings.Contains(stdout.String(), "kept agents/foreman.md") || !strings.Contains(stdout.String(), "created agents/audit.md") || !strings.Contains(stdout.String(), "kept server/worker.token") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
+}
+
+func regularFiles(t *testing.T, root string) []string {
+	t.Helper()
+	files := []string{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(relative))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func regularFileContents(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	contents := make(map[string][]byte)
+	for _, name := range regularFiles(t, root) {
+		body, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[name] = body
+	}
+	return contents
 }
 
 func TestInitRejectsExistingNonFile(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -42,17 +43,19 @@ type Job struct {
 }
 
 type Run struct {
-	ID          string    `json:"id"`
-	Step        int       `json:"step"`
-	Agent       string    `json:"agent"`
-	Executor    string    `json:"executor"`
-	Model       string    `json:"model,omitempty"`
-	State       string    `json:"state"`
-	WorkerName  string    `json:"worker_name,omitempty"`
-	ExitCode    *int      `json:"exit_code,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	ID             string    `json:"id"`
+	Step           int       `json:"step"`
+	Agent          string    `json:"agent"`
+	Executor       string    `json:"executor"`
+	Model          string    `json:"model,omitempty"`
+	State          string    `json:"state"`
+	WorkerName     string    `json:"worker_name,omitempty"`
+	ExitCode       *int      `json:"exit_code,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	StartedAt      time.Time `json:"started_at,omitempty"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
+	DurationMillis *int64    `json:"duration_millis,omitempty"`
+	TokenUsage     *int64    `json:"token_usage,omitempty,string"`
 }
 
 type Worker struct {
@@ -127,6 +130,8 @@ CREATE TABLE IF NOT EXISTS runs (
   events TEXT,
   started_at TEXT,
   completed_at TEXT,
+  duration_millis INTEGER,
+  token_usage INTEGER,
   UNIQUE(job_id, step)
 );
 CREATE INDEX IF NOT EXISTS runs_dispatch ON runs(state, job_id, step);
@@ -149,7 +154,13 @@ CREATE TABLE IF NOT EXISTS worker_repositories (
 	if err := s.addColumnIfMissing(ctx, "runs", "model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	return nil
+	if err := s.addColumnIfMissing(ctx, "runs", "duration_millis", "INTEGER"); err != nil {
+		return err
+	}
+	if err := s.addColumnIfMissing(ctx, "runs", "token_usage", "INTEGER"); err != nil {
+		return err
+	}
+	return s.migrateRunMetrics(ctx)
 }
 
 func (s *Store) addColumnIfMissing(ctx context.Context, table, column, definition string) error {
@@ -182,6 +193,44 @@ func (s *Store) addColumnIfMissing(ctx context.Context, table, column, definitio
 	}
 	if _, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition); err != nil {
 		return fmt.Errorf("migrate %s schema: %w", table, err)
+	}
+	return nil
+}
+
+func (s *Store) migrateRunMetrics(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,COALESCE(result,''),COALESCE(started_at,''),COALESCE(completed_at,'') FROM runs WHERE (duration_millis IS NULL AND completed_at IS NOT NULL) OR (token_usage IS NULL AND result LIKE '%"token_usage"%')`)
+	if err != nil {
+		return fmt.Errorf("read persisted run metrics: %w", err)
+	}
+	type persistedResult struct {
+		id        string
+		result    string
+		startedAt string
+		endedAt   string
+	}
+	var results []persistedResult
+	for rows.Next() {
+		var result persistedResult
+		if err := rows.Scan(&result.id, &result.result, &result.startedAt, &result.endedAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("read persisted run metrics: %w", err)
+		}
+		results = append(results, result)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("read persisted run metrics: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read persisted run metrics: %w", err)
+	}
+	for _, result := range results {
+		duration, tokenUsage := resultMetrics([]byte(result.result))
+		if duration == nil {
+			duration = elapsedMillis(result.startedAt, result.endedAt)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE runs SET duration_millis=COALESCE(duration_millis,?),token_usage=COALESCE(token_usage,?) WHERE id=?`, duration, tokenUsage, result.id); err != nil {
+			return fmt.Errorf("migrate persisted run metrics: %w", err)
+		}
 	}
 	return nil
 }
@@ -310,10 +359,10 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		return err
 	}
 	defer tx.Rollback()
-	var jobID, state, instanceID, leaseToken string
+	var jobID, state, instanceID, leaseToken, startedAt string
 	var leaseExpiresAt sql.NullInt64
 	var step int
-	if err := tx.QueryRowContext(ctx, `SELECT job_id,step,state,COALESCE(worker_instance,''),COALESCE(lease_token,''),lease_expires_at FROM runs WHERE id=?`, runID).Scan(&jobID, &step, &state, &instanceID, &leaseToken, &leaseExpiresAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT job_id,step,state,COALESCE(worker_instance,''),COALESCE(lease_token,''),lease_expires_at,COALESCE(started_at,'') FROM runs WHERE id=?`, runID).Scan(&jobID, &step, &state, &instanceID, &leaseToken, &leaseExpiresAt, &startedAt); err != nil {
 		return err
 	}
 	if subtle.ConstantTimeCompare([]byte(instanceID), []byte(completion.InstanceID)) != 1 || subtle.ConstantTimeCompare([]byte(leaseToken), []byte(completion.LeaseToken)) != 1 {
@@ -334,8 +383,13 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if err := validateOutcome(completion.State, completion.ExitCode); err != nil {
 		return err
 	}
-	now := s.now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, runID); err != nil {
+	durationMillis, tokenUsage := resultMetrics(completion.Result)
+	completedAt := s.now().UTC()
+	now := completedAt.Format(time.RFC3339Nano)
+	if durationMillis == nil {
+		durationMillis = elapsedMillis(startedAt, now)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
 	if completion.State == "succeeded" {
@@ -470,7 +524,7 @@ func (s *Store) listJobs(ctx context.Context) ([]Job, error) {
 }
 
 func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.step,r.agent,r.executor,r.model,r.state,COALESCE(w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,'') FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance WHERE r.job_id=? ORDER BY r.step`, jobID)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.step,r.agent,r.executor,r.model,r.state,COALESCE(w.name,''),r.exit_code,COALESCE(r.error,''),COALESCE(r.started_at,''),COALESCE(r.completed_at,''),r.duration_millis,r.token_usage FROM runs r LEFT JOIN workers w ON w.instance_id=r.worker_instance WHERE r.job_id=? ORDER BY r.step`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +533,7 @@ func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
 	for rows.Next() {
 		var run Run
 		var started, completed string
-		if err := rows.Scan(&run.ID, &run.Step, &run.Agent, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed); err != nil {
+		if err := rows.Scan(&run.ID, &run.Step, &run.Agent, &run.Executor, &run.Model, &run.State, &run.WorkerName, &run.ExitCode, &run.Error, &started, &completed, &run.DurationMillis, &run.TokenUsage); err != nil {
 			return nil, err
 		}
 		run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
@@ -487,6 +541,35 @@ func (s *Store) listRuns(ctx context.Context, jobID string) ([]Run, error) {
 		runs = append(runs, run)
 	}
 	return runs, rows.Err()
+}
+
+func resultMetrics(result []byte) (*int64, *int64) {
+	var fields map[string]json.RawMessage
+	if len(result) == 0 || json.Unmarshal(result, &fields) != nil {
+		return nil, nil
+	}
+	return nonNegativeInteger(fields["duration_millis"]), nonNegativeInteger(fields["token_usage"])
+}
+
+func nonNegativeInteger(raw json.RawMessage) *int64 {
+	var value int64
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value < 0 {
+		return nil
+	}
+	return &value
+}
+
+func elapsedMillis(startedAt, completedAt string) *int64 {
+	started, startErr := time.Parse(time.RFC3339Nano, startedAt)
+	completed, completionErr := time.Parse(time.RFC3339Nano, completedAt)
+	if startErr != nil || completionErr != nil {
+		return nil
+	}
+	duration := completed.Sub(started).Milliseconds()
+	if duration < 0 {
+		duration = 0
+	}
+	return &duration
 }
 
 func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
