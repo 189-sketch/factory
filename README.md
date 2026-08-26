@@ -48,12 +48,8 @@ flowchart TB
     subgraph VERIFY_PHASE[2 · Verify and hand off]
         direction LR
         REVIEW[Independent agent review] -->|approved| CHECKS[Pull request<br/>CI and automated review]
-        subgraph HANDOFF[ ]
-            direction TB
-            HUMAN([Human review<br/>You decide whether to merge])
-            HUMAN ~~~ CONTROL_SPACE[ ]
-        end
-        CHECKS -->|green| HUMAN
+        CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
+        HUMAN ~~~ CONTROL_SPACE(( ))
         REVIEW -.->|findings: bounded repair| REVIEW
         CHECKS -.->|failure or finding: bounded repair| REVIEW
     end
@@ -70,8 +66,7 @@ flowchart TB
     class CONTROL_SPACE spacer
     style BUILD_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
     style VERIFY_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
-    style HANDOFF fill:transparent,stroke:transparent
-    linkStyle default stroke:#b95b16,stroke-width:2px
+    linkStyle 0,1,2,3,5,6,7 stroke:#b95b16,stroke-width:2px
 ```
 
 The loop is deliberately bounded. If the work cannot be made safe after the
