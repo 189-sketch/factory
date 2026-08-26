@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Go 1.26 or newer
+- Go 1.26.6 or newer
 - Node.js and npm for the control-plane frontend
 - `just` to use the repository shortcuts
 
