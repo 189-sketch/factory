@@ -447,14 +447,16 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"**Completed planning:**",
 		"**New issue:**",
 		"a verified branch without an open pull request",
+		"any dirty or incomplete work",
 		"at most two total",
 		"Existing work must reuse its branch, worktree, and pull request",
 		"create a second pull request for the issue",
 		"`machinist:ready-for-review` or a verified ready/completed state",
 		"stale remote",
-		"create one deterministic isolated worktree",
+		"Repair or create its deterministic isolated worktree",
 		"each recorded head is an ancestor of",
-		"exact remote pull request head",
+		"Never overwrite",
+		"Create a missing local",
 		"clean worktree and equality between the local branch head",
 		"Every subagent prompt must require a concise Markdown handoff",
 		"## Planning handoff",
@@ -462,11 +464,20 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"## Review handoff",
 		"## Repair handoff",
 		"complete diff",
-		"inspect the branch, HEAD, worktree, and commits",
+		"inspect the branch, HEAD, worktree",
+		"return a valid handoff, whether it exits or remains active",
 		"read-only reviewer",
 		"Never inline the diff",
 		"non-draft pull request linked",
+		"For both paths, confirm the base, exact head, issue link",
 		"Use this one loop for local review, CI",
+		"Resolve linked pull requests before",
+		"Reuse exactly one open pull request and ignore historical closed requests",
+		"If multiple are open or any is merged",
+		"Only when none is open, reopen and verify one uniquely safe",
+		"multiple candidates or any selection, reopening, or verification",
+		"For any existing or reopened",
+		"open pull request without a usable worktree",
 		"After every code change",
 		"Approval applies only to the reviewed SHA",
 		"push `<approved-sha>:refs/heads/<branch>`",
@@ -483,10 +494,13 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 		"`<!-- machinist:foreman-pr -->`",
 		"persist its head, approval, checks",
 		"If none remain, return to the originating stage",
+		"Persist the increment",
+		"failure keeps the",
 		"If no",
 		"pull request exists, continue to Create or reuse the pull request",
 		"Never merge",
 		"Keep the open-pull-request worktree",
+		"Before any terminal stop or handoff",
 	} {
 		if !strings.Contains(foreman.Prompt, rule) {
 			t.Fatalf("foreman prompt does not contain %q", rule)
@@ -515,8 +529,11 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 	if existing, open := strings.Index(foreman.Prompt, "**Existing implementation:**"), strings.Index(foreman.Prompt, "**Open pull request:**"); existing < 0 || open < 0 || existing > open {
 		t.Fatalf("foreman prompt must classify unpublished implementation before open pull request: existing=%d open=%d", existing, open)
 	}
-	if words := len(strings.Fields(foreman.Prompt)); words > 2100 {
-		t.Fatalf("foreman prompt has %d words, want no more than 2100", words)
+	if reopen, recover := strings.Index(foreman.Prompt, "Only when none is open, reopen and verify"), strings.Index(foreman.Prompt, "For any existing or reopened"); reopen < 0 || recover < 0 || reopen > recover {
+		t.Fatalf("foreman prompt must reopen a unique safe pull request before worktree recovery: reopen=%d recover=%d", reopen, recover)
+	}
+	if words := len(strings.Fields(foreman.Prompt)); words > 2150 {
+		t.Fatalf("foreman prompt has %d words, want no more than 2150", words)
 	}
 
 	audit, err := LoadAgent(definition, "audit")
