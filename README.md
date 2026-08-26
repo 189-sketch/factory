@@ -38,21 +38,34 @@ CI form a supervised production line. The shipped foreman never merges the
 result.
 
 ```mermaid
-flowchart LR
-    ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
-    PLAN --> BUILD[Build in an<br/>isolated worktree]
-    BUILD --> REVIEW[Independent<br/>agent review]
-    REVIEW -->|approved| CHECKS[Pull request<br/>CI and automated review]
-    CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
-    REVIEW -->|findings: repair| BUILD
-    CHECKS -->|failure or finding: repair| BUILD
+flowchart TB
+    subgraph BUILD_PHASE[1 · Build]
+        direction LR
+        ISSUE([GitHub issue]) --> PLAN[Plan and clarify]
+        PLAN --> BUILD[Build in an isolated worktree]
+    end
+
+    subgraph VERIFY_PHASE[2 · Verify and hand off]
+        direction LR
+        REVIEW[Independent agent review] -->|approved| CHECKS[Pull request<br/>CI and automated review]
+        CHECKS -->|green| HUMAN([Human review<br/>You decide whether to merge])
+        REVIEW -->|findings| REPAIR[Bounded repair]
+        CHECKS -->|failure or finding| REPAIR
+        REPAIR --> REVIEW
+    end
+
+    BUILD_PHASE -->|ready for review| VERIFY_PHASE
 
     classDef input fill:#f2a23a,stroke:#b95b16,color:#211408,stroke-width:2px
     classDef station fill:#f4efe6,stroke:#b95b16,color:#211408,stroke-width:1.5px
     classDef decision fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:2px
+    classDef repair fill:#fed7aa,stroke:#b95b16,color:#211408,stroke-width:1.5px
     class ISSUE input
     class PLAN,BUILD,REVIEW,CHECKS station
     class HUMAN decision
+    class REPAIR repair
+    style BUILD_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
+    style VERIFY_PHASE fill:#fff7ed,stroke:#b95b16,color:#211408,stroke-width:1.5px
     linkStyle default stroke:#b95b16,stroke-width:2px
 ```
 
