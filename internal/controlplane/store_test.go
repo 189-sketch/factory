@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -75,6 +76,50 @@ func TestStoreLeasesPipelineInOrderAndPersistsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFailedPipeline(t, snapshot, jobID)
+}
+
+func TestStorePersistsRunMetricsWithAndWithoutTokenUsage(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "factory.db")
+	store := openTestStore(t, database)
+	jobID, err := store.CreateJob(t.Context(), "request", "factory", "pipeline", "metrics", []config.ResolvedAgent{
+		testAgent("reported", "Report usage"),
+		testAgent("missing", "Do not report usage"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(t.Context(), first.ID, protocol.Completion{
+		InstanceID: "worker-a", LeaseToken: first.LeaseToken, State: "succeeded", ExitCode: 0,
+		Result: json.RawMessage(`{"duration_millis":1250,"token_usage":987}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"factory"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(t.Context(), second.ID, protocol.Completion{
+		InstanceID: "worker-a", LeaseToken: second.LeaseToken, State: "succeeded", ExitCode: 0,
+		Result: json.RawMessage(`{"duration_millis":2500}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertStoredMetrics(t, store, jobID)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	assertStoredMetrics(t, reopened, jobID)
 }
 
 func TestStoreRejectsContradictoryOutcomes(t *testing.T) {
@@ -274,7 +319,7 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 	clock := newTestClock(time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC))
 	store.now = clock.Now
 
-	var expiryColumn int
+	columns := map[string]int{}
 	rows, err := store.db.QueryContext(t.Context(), `PRAGMA table_info(runs)`)
 	if err != nil {
 		t.Fatal(err)
@@ -286,23 +331,27 @@ func TestOpenStoreMigratesExistingDatabaseAndRecoversRunningLease(t *testing.T) 
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			t.Fatal(err)
 		}
-		if name == "lease_expires_at" {
-			expiryColumn++
-		}
+		columns[name]++
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if expiryColumn != 1 {
-		t.Fatalf("lease_expires_at columns = %d", expiryColumn)
+	for _, name := range []string{"lease_expires_at", "duration_millis", "token_usage"} {
+		if columns[name] != 1 {
+			t.Fatalf("%s columns = %d", name, columns[name])
+		}
 	}
 	output, err := store.RunOutput(t.Context(), "run-completed")
-	if err != nil || output.Result != `{"answer":42}` || output.Events != "completed event\n" {
+	if err != nil || output.Result != `{"answer":42,"duration_millis":60000,"token_usage":1234}` || output.Events != "completed event\n" {
 		t.Fatalf("preserved output = %#v, %v", output, err)
 	}
 	snapshot, err := store.Snapshot(t.Context())
 	if err != nil || len(snapshot.Jobs) != 2 || len(snapshot.Workers) != 1 {
 		t.Fatalf("preserved snapshot = %#v, %v", snapshot, err)
+	}
+	migrated := findRun(t, snapshot, "run-completed")
+	if migrated.DurationMillis == nil || *migrated.DurationMillis != 60000 || migrated.TokenUsage == nil || *migrated.TokenUsage != 1234 {
+		t.Fatalf("migrated metrics = %#v", migrated)
 	}
 
 	run, err := store.Poll(t.Context(), pollRequest("worker-new", []string{"codex"}, []string{"factory"}))
@@ -407,6 +456,40 @@ func assertFailedPipeline(t *testing.T, snapshot Snapshot, jobID string) {
 	if runs[1].Error != "build failed" {
 		t.Fatalf("run payloads = %#v", runs)
 	}
+	if runs[0].DurationMillis == nil || runs[1].DurationMillis == nil || runs[0].TokenUsage != nil || runs[1].TokenUsage != nil {
+		t.Fatalf("completed run metrics = %#v", runs)
+	}
+}
+
+func assertStoredMetrics(t *testing.T, store *Store, jobID string) {
+	t.Helper()
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].ID != jobID || len(snapshot.Jobs[0].Runs) != 2 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	reported, missing := snapshot.Jobs[0].Runs[0], snapshot.Jobs[0].Runs[1]
+	if reported.DurationMillis == nil || *reported.DurationMillis != 1250 || reported.TokenUsage == nil || *reported.TokenUsage != 987 {
+		t.Fatalf("reported metrics = %#v", reported)
+	}
+	if missing.DurationMillis == nil || *missing.DurationMillis != 2500 || missing.TokenUsage != nil {
+		t.Fatalf("missing token metrics = %#v", missing)
+	}
+}
+
+func findRun(t *testing.T, snapshot Snapshot, runID string) Run {
+	t.Helper()
+	for _, job := range snapshot.Jobs {
+		for _, run := range job.Runs {
+			if run.ID == runID {
+				return run
+			}
+		}
+	}
+	t.Fatalf("run %q not found", runID)
+	return Run{}
 }
 
 type testClock struct {
@@ -487,7 +570,7 @@ CREATE TABLE workers (
 INSERT INTO jobs VALUES ('job-completed','done','factory','agent','plan','succeeded','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
 INSERT INTO jobs VALUES ('job-running','active','factory','agent','plan','running','2026-08-24T13:00:00Z','2026-08-24T13:01:00Z');
 INSERT INTO workers VALUES ('worker-old','old worker','2026-08-24T13:01:00Z');
-INSERT INTO runs VALUES ('run-completed','job-completed',0,'plan','plan-hash','codex','factory','Done',60000,'succeeded','worker-old','completed-token',0,'','{"answer":42}','completed event
+INSERT INTO runs VALUES ('run-completed','job-completed',0,'plan','plan-hash','codex','factory','Done',60000,'succeeded','worker-old','completed-token',0,'','{"answer":42,"duration_millis":60000,"token_usage":1234}','completed event
 ','2026-08-24T12:00:00Z','2026-08-24T12:01:00Z');
 INSERT INTO runs VALUES ('run-running','job-running',0,'plan','plan-hash','codex','factory','Active',60000,'running','worker-old','old-token',NULL,'',NULL,NULL,'2026-08-24T13:01:00Z',NULL);
 `

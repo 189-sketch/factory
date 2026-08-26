@@ -64,7 +64,7 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 		Name:          "local-test",
 		DataDirectory: filepath.Join(directory, "worker-data"),
 		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
-		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "cat >/dev/null; printf managed-output"}}},
+		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", `cat >/dev/null; printf managed-output; printf 2468 > "$FACTORY_TOKEN_USAGE_PATH"`}}},
 		Repositories:  map[string]config.Repository{"factory": {Path: repository}},
 	}, os.Stdout, os.Stderr)
 	if err != nil {
@@ -83,7 +83,7 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 		if len(snapshot.Jobs) == 1 && snapshot.Jobs[0].State == "succeeded" {
 			run := snapshot.Jobs[0].Runs[0]
 			output, outputErr := store.RunOutput(t.Context(), run.ID)
-			if run.State != "succeeded" || outputErr != nil || output.Events == "" || output.Result == "" || run.WorkerName != "local-test" {
+			if run.State != "succeeded" || outputErr != nil || output.Events == "" || output.Result == "" || run.WorkerName != "local-test" || run.DurationMillis == nil || run.TokenUsage == nil || *run.TokenUsage != 2468 {
 				t.Fatalf("completed run = %#v", run)
 			}
 			break

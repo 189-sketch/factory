@@ -92,6 +92,12 @@ func TestExecuteStreamsPromptAndPersistsOrderedResult(t *testing.T) {
 	if persisted.ID != result.ID || persisted.State != StateSucceeded || persisted.AgentHash != "test-hash" {
 		t.Fatalf("persisted result = %#v", persisted)
 	}
+	if result.DurationMillis < 0 || persisted.DurationMillis != result.DurationMillis || result.TokenUsage != nil || persisted.TokenUsage != nil {
+		t.Fatalf("persisted metrics = result %#v, persisted %#v", result, persisted)
+	}
+	if bytes.Contains(resultBody, []byte(`"token_usage"`)) {
+		t.Fatalf("missing token usage was serialized: %s", resultBody)
+	}
 
 	events := readEvents(t, result.EventsPath)
 	if len(events) != 5 {
@@ -107,6 +113,49 @@ func TestExecuteStreamsPromptAndPersistsOrderedResult(t *testing.T) {
 	}
 	if events[len(events)-1].Type != "run.completed" {
 		t.Fatalf("last event = %#v", events[len(events)-1])
+	}
+}
+
+func TestExecutePersistsOnlyExplicitValidTokenUsage(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		mode string
+		want *int64
+	}{
+		{name: "reported", mode: "tokens", want: int64Pointer(4321)},
+		{name: "reported zero", mode: "zero-tokens", want: int64Pointer(0)},
+		{name: "invalid", mode: "invalid-tokens"},
+		{name: "missing", mode: "echo"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := Execute(t.Context(), Options{
+				Agent:         helperAgent(test.mode, time.Second),
+				Repository:    newGitRepository(t),
+				DataDirectory: t.TempDir(),
+				Stdout:        io.Discard,
+				Stderr:        io.Discard,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equalInt64Pointers(result.TokenUsage, test.want) {
+				t.Fatalf("token usage = %v, want %v", result.TokenUsage, test.want)
+			}
+			body, err := os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted Result
+			if err := json.Unmarshal(body, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if !equalInt64Pointers(persisted.TokenUsage, test.want) {
+				t.Fatalf("persisted token usage = %v, want %v", persisted.TokenUsage, test.want)
+			}
+			if test.want == nil && bytes.Contains(body, []byte(`"token_usage"`)) {
+				t.Fatalf("unreported token usage was serialized: %s", body)
+			}
+		})
 	}
 }
 
@@ -581,6 +630,12 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedAgent {
 		script = "cat >/dev/null; yes factory"
 	case "exact-prompt":
 		script = "dd bs=16 count=1 of=/dev/null 2>/dev/null"
+	case "tokens":
+		script = `cat >/dev/null; printf 4321 > "$FACTORY_TOKEN_USAGE_PATH"`
+	case "zero-tokens":
+		script = `cat >/dev/null; printf 0 > "$FACTORY_TOKEN_USAGE_PATH"`
+	case "invalid-tokens":
+		script = `cat >/dev/null; printf unknown > "$FACTORY_TOKEN_USAGE_PATH"`
 	default:
 		panic("unknown helper mode")
 	}
@@ -592,6 +647,12 @@ func helperAgent(mode string, timeout time.Duration) config.ResolvedAgent {
 		Definition: "/definition/config.toml",
 		Hash:       "test-hash",
 	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
+
+func equalInt64Pointers(left, right *int64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func assertBlockedOutputStops(t *testing.T, ctx context.Context, timeout time.Duration, wantState State, wantExitCode int) {
