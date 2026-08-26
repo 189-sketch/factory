@@ -506,6 +506,9 @@ func TestExampleAgentDefinitionsLoad(t *testing.T) {
 			t.Fatalf("foreman prompt contains %q %d times, want once", heading, count)
 		}
 	}
+	if existing, open := strings.Index(foreman.Prompt, "- **Existing implementation:**"), strings.Index(foreman.Prompt, "- **Open pull request:**"); existing < 0 || open < 0 || existing > open {
+		t.Fatalf("foreman prompt must classify unpublished implementation before open pull request: existing=%d open=%d", existing, open)
+	}
 
 	audit, err := LoadAgent(definition, "audit")
 	if err != nil {

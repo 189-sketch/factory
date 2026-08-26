@@ -179,9 +179,9 @@ Perform this discovery at the start of every run, before choosing a phase:
    - **CI failure:** the current pull request head has a terminal failing check.
    - **Review feedback:** a local review, pull request review, current review thread, or
      bot comment contains an unresolved finding that still applies to the current head.
-   - **Open pull request:** the issue has one open pull request but no current defect.
    - **Existing implementation:** an associated branch or worktree has unpublished or
      unfinished local work, whether or not an open pull request exists.
+   - **Open pull request:** the issue has one open pull request but no current defect.
    - **Completed planning:** the state and refined issue prove planning finished, but no
      implementation exists.
    - **New issue:** no associated implementation or pull request exists.
