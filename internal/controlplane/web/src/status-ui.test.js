@@ -3,7 +3,7 @@ import test from "node:test";
 import { analyticsState } from "./analytics-state.js";
 import { createStatusLoader } from "./status-loader.js";
 
-const measuredJob = { runs: [{
+const measuredJob = { created_at: "2026-08-25T10:00:00Z", state: "succeeded", runs: [{
   id: "run_latest",
   agent: "build",
   completed_at: "2026-08-25T12:00:00Z",
@@ -37,7 +37,10 @@ test("analytics presents measured runs from successful status data", () => {
 });
 
 test("analytics presents the empty state only after a successful status response", () => {
-  assert.deepEqual(analyticsState({ jobs: [], days: "30", loaded: true, error: "", now }), { kind: "empty" });
+  const state = analyticsState({ jobs: [], days: "30", loaded: true, error: "", now });
+  assert.equal(state.kind, "empty");
+  assert.equal(state.metrics.totalTasks, 0);
+  assert.deepEqual(state.runs, []);
 });
 
 test("an older success cannot replace a newer request failure", async () => {
