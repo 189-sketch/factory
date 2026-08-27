@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -438,6 +439,275 @@ func TestAvailableRepositoriesIncludesWorkerWithRunningExecution(t *testing.T) {
 	}
 	if len(repositories) != 1 || repositories[0] != "machinist" {
 		t.Fatalf("repositories = %#v", repositories)
+	}
+}
+
+func TestStoreSchedulesOneNonOverlappingShepherdRunPerRepository(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	clock := newTestClock(time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC))
+	store.now = clock.Now
+	schedule := config.ResolvedShepherdSchedule{
+		Name: "api", Repository: "api", Every: 15 * time.Minute, MaxActions: 3,
+		Agent: testAgent("shepherd", "Inspect every pull request; at most 3 actions."),
+	}
+
+	jobID, created, err := store.CreateScheduledJob(t.Context(), schedule)
+	if err != nil || !created || jobID == "" {
+		t.Fatalf("first schedule = %q, %t, %v", jobID, created, err)
+	}
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || created {
+		t.Fatalf("duplicate schedule created = %t, %v", created, err)
+	}
+	if _, err := store.CreateJob(t.Context(), "manual", "api", "agent", "shepherd", []config.ResolvedAgent{schedule.Agent}); err == nil {
+		t.Fatal("manual Shepherd overlapped the scheduled run")
+	}
+	pipeline := []config.ResolvedAgent{testAgent("plan", "Plan"), schedule.Agent}
+	if _, err := store.CreateJob(t.Context(), "pipeline", "api", "pipeline", "merge", pipeline); err == nil {
+		t.Fatal("pipeline containing Shepherd overlapped the scheduled run")
+	}
+	other := schedule
+	other.Name = "api-second"
+	if _, created, err := store.CreateScheduledJob(t.Context(), other); err != nil || created {
+		t.Fatalf("overlapping repository schedule created = %t, %v", created, err)
+	}
+
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"api"}))
+	if err != nil || run == nil || run.Agent != "shepherd" || run.RenderedPrompt != schedule.Agent.Prompt {
+		t.Fatalf("scheduled lease = %#v, %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "succeeded", ExitCode: 0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || created {
+		t.Fatalf("schedule repeated before due = %t, %v", created, err)
+	}
+
+	clock.Advance(15 * time.Minute)
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("due schedule created = %t, %v", created, err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 2 || snapshot.Jobs[0].ScheduleName != "api" || snapshot.Jobs[1].ScheduleName != "api" {
+		t.Fatalf("scheduled jobs = %#v", snapshot.Jobs)
+	}
+}
+
+func TestStoreScheduleDoesNotOverlapActivePipelineContainingShepherd(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+	clock := newTestClock(time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC))
+	store.now = clock.Now
+	shepherd := testAgent("shepherd", "Inspect every pull request")
+	pipeline := []config.ResolvedAgent{testAgent("plan", "Plan"), shepherd}
+	if _, err := store.CreateJob(t.Context(), "pipeline", "api", "pipeline", "merge", pipeline); err != nil {
+		t.Fatal(err)
+	}
+	schedule := config.ResolvedShepherdSchedule{
+		Name: "api", Repository: "api", Every: 15 * time.Minute, MaxActions: 3, Agent: shepherd,
+	}
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || created {
+		t.Fatalf("schedule overlapped pipeline = %t, %v", created, err)
+	}
+	if _, err := store.CreateJob(t.Context(), "ordinary", "api", "pipeline", "checks", []config.ResolvedAgent{testAgent("review", "Review")}); err != nil {
+		t.Fatalf("ordinary pipeline was blocked: %v", err)
+	}
+}
+
+func TestStoreReconcilesDuplicateActiveShepherdJobsBeforeAddingOverlapGuard(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "machinist.db")
+	store, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(t.Context(), `DROP INDEX jobs_active_shepherd_repository_v3`); err != nil {
+		t.Fatal(err)
+	}
+	shepherd := testAgent("shepherd", "Inspect every pull request")
+	keptJob, err := store.CreateJob(t.Context(), "first", "api", "agent", "shepherd", []config.ResolvedAgent{shepherd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"api"})); err != nil || run == nil {
+		t.Fatalf("lease first Shepherd = %#v, %v", run, err)
+	}
+	failedJob, err := store.CreateJob(t.Context(), "second", "api", "agent", "shepherd", []config.ResolvedAgent{shepherd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE jobs SET has_shepherd=0 WHERE id IN (?,?)`, keptJob, failedJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var keptState, failedState, failedRunState, failedRunError string
+	if err := reopened.db.QueryRowContext(t.Context(), `SELECT state FROM jobs WHERE id=?`, keptJob).Scan(&keptState); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.db.QueryRowContext(t.Context(), `SELECT jobs.state,runs.state,runs.error FROM jobs JOIN runs ON runs.job_id=jobs.id WHERE jobs.id=?`, failedJob).Scan(&failedState, &failedRunState, &failedRunError); err != nil {
+		t.Fatal(err)
+	}
+	if keptState != "running" || failedState != "failed" || failedRunState != "failed" || !strings.Contains(failedRunError, "superseded duplicate Shepherd job") {
+		t.Fatalf("reconciled states = kept %q, duplicate job %q, run %q, error %q", keptState, failedState, failedRunState, failedRunError)
+	}
+	if _, err := reopened.CreateJob(t.Context(), "third", "api", "agent", "shepherd", []config.ResolvedAgent{shepherd}); err == nil {
+		t.Fatal("recreated overlapping Shepherd job after migration")
+	}
+}
+
+func TestStoreReschedulesWhenScheduleConfigurationChanges(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "machinist.db")
+	store, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	clock := newTestClock(time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC))
+	store.now = clock.Now
+	schedule := config.ResolvedShepherdSchedule{
+		Name: "queue", Repository: "api", Every: time.Hour, MaxActions: 1,
+		Agent: testAgent("shepherd", "Inspect every pull request"),
+	}
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("initial schedule created = %t, %v", created, err)
+	}
+	run, err := store.Poll(t.Context(), pollRequest("worker-a", []string{"codex"}, []string{"api"}))
+	if err != nil || run == nil {
+		t.Fatalf("lease initial schedule = %#v, %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-a", LeaseToken: run.LeaseToken, State: "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = clock.Now
+
+	schedule.Repository = "web"
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("repository change rescheduled = %t, %v", created, err)
+	}
+	run, err = store.Poll(t.Context(), pollRequest("worker-b", []string{"codex"}, []string{"web"}))
+	if err != nil || run == nil {
+		t.Fatalf("lease changed repository schedule = %#v, %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-b", LeaseToken: run.LeaseToken, State: "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = clock.Now
+
+	schedule.Every = 10 * time.Minute
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("interval change rescheduled = %t, %v", created, err)
+	}
+	run, err = store.Poll(t.Context(), pollRequest("worker-c", []string{"codex"}, []string{"web"}))
+	if err != nil || run == nil {
+		t.Fatalf("lease interval-changed schedule = %#v, %v", run, err)
+	}
+	if err := store.Complete(t.Context(), run.ID, protocol.Completion{InstanceID: "worker-c", LeaseToken: run.LeaseToken, State: "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = clock.Now
+
+	schedule.MaxActions = 4
+	schedule.Prompt = "Run Shepherd with max_actions=4"
+	schedule.Agent = testAgent("shepherd", "Updated policy; at most 4 actions")
+	schedule.Agent.Timeout = 2 * time.Minute
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("execution settings change rescheduled = %t, %v", created, err)
+	}
+	run, err = store.Poll(t.Context(), pollRequest("worker-d", []string{"codex"}, []string{"web"}))
+	if err != nil || run == nil || run.RenderedPrompt != schedule.Agent.Prompt || run.TimeoutMillis != schedule.Agent.Timeout.Milliseconds() {
+		t.Fatalf("lease execution-settings schedule = %#v, %v", run, err)
+	}
+}
+
+func TestStorePersistsShepherdScheduleAcrossRestart(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "machinist.db")
+	clock := newTestClock(time.Date(2026, 8, 27, 8, 0, 0, 0, time.UTC))
+	schedule := config.ResolvedShepherdSchedule{
+		Name: "api", Repository: "api", Every: time.Hour, MaxActions: 1,
+		Agent: testAgent("shepherd", "Inspect every pull request; at most 1 action."),
+	}
+	store, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.now = clock.Now
+	if _, created, err := store.CreateScheduledJob(t.Context(), schedule); err != nil || !created {
+		t.Fatalf("initial schedule created = %t, %v", created, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenStore(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	reopened.now = clock.Now
+	if _, created, err := reopened.CreateScheduledJob(t.Context(), schedule); err != nil || created {
+		t.Fatalf("restart repeated schedule = %t, %v", created, err)
+	}
+}
+
+func TestShepherdScheduleSignatureCoversExecutionSettings(t *testing.T) {
+	base := config.ResolvedShepherdSchedule{
+		Name: "api", Repository: "api", Every: time.Hour, MaxActions: 1,
+		Prompt: "Run with max_actions=1",
+		Agent:  testAgent("shepherd", "Inspect every pull request; at most 1 action."),
+	}
+	want, err := shepherdScheduleSignature(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variants := map[string]func(*config.ResolvedShepherdSchedule){
+		"max actions":     func(schedule *config.ResolvedShepherdSchedule) { schedule.MaxActions = 2 },
+		"schedule prompt": func(schedule *config.ResolvedShepherdSchedule) { schedule.Prompt = "Run with max_actions=2" },
+		"agent prompt":    func(schedule *config.ResolvedShepherdSchedule) { schedule.Agent.Prompt = "Updated queue policy" },
+		"executor":        func(schedule *config.ResolvedShepherdSchedule) { schedule.Agent.Executor = "claude" },
+		"model":           func(schedule *config.ResolvedShepherdSchedule) { schedule.Agent.Model = "sol" },
+		"timeout":         func(schedule *config.ResolvedShepherdSchedule) { schedule.Agent.Timeout = 2 * time.Hour },
+	}
+	for name, change := range variants {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			change(&changed)
+			got, err := shepherdScheduleSignature(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == want {
+				t.Fatal("execution setting did not change schedule signature")
+			}
+		})
 	}
 }
 

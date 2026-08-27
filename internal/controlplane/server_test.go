@@ -291,6 +291,48 @@ func TestServerServeDoesNotReportListeningWhenAddressIsInUse(t *testing.T) {
 	}
 }
 
+func TestServerDoesNotAdmitShepherdScheduleWhenBindFails(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "shepherd.md"), []byte("Queue policy:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	definition := `[agents.shepherd]
+executor = "test"
+prompt_file = "shepherd.md"
+timeout = "1m"
+
+[shepherd.machinist]
+repository = "machinist"
+every = "10m"
+max_actions = 2
+`
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	occupied, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	if err := server.Serve(t.Context(), occupied.Addr().String(), nil); err == nil {
+		t.Fatal("Serve succeeded on an occupied address")
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 0 {
+		t.Fatalf("failed server start admitted scheduled jobs: %#v", snapshot.Jobs)
+	}
+}
+
 func TestServerExposesReadOnlyDefinitions(t *testing.T) {
 	_, webServer := newTestHTTPServer(t)
 	defer webServer.Close()
@@ -501,6 +543,243 @@ func TestHeartbeatEndpointAuthenticatesAndRejectsInvalidLeases(t *testing.T) {
 		t.Fatalf("non-running heartbeat status = %d", nonRunning.StatusCode)
 	}
 	nonRunning.Body.Close()
+}
+
+func TestServerEnqueuesConfiguredShepherdSchedule(t *testing.T) {
+	directory := t.TempDir()
+	promptPath := filepath.Join(directory, "shepherd.md")
+	if err := os.WriteFile(promptPath, []byte("Queue policy:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	definition := `[agents.shepherd]
+executor = "test"
+prompt_file = "shepherd.md"
+timeout = "1m"
+
+[shepherd.machinist]
+repository = "machinist"
+every = "10m"
+max_actions = 2
+`
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.enqueueScheduledRuns(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.enqueueScheduledRuns(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].ScheduleName != "machinist" || snapshot.Jobs[0].Prompt == "" {
+		t.Fatalf("scheduled jobs = %#v", snapshot.Jobs)
+	}
+	if len(snapshot.Jobs[0].Runs) != 1 || !strings.Contains(snapshot.Jobs[0].Runs[0].Agent, "shepherd") {
+		t.Fatalf("scheduled runs = %#v", snapshot.Jobs[0].Runs)
+	}
+}
+
+func TestServerCancellationAlwaysStopsHTTPServer(t *testing.T) {
+	for range 32 {
+		directory := t.TempDir()
+		promptPath := filepath.Join(directory, "plan.md")
+		if err := os.WriteFile(promptPath, []byte("Plan this request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		definitionPath := filepath.Join(directory, "config.toml")
+		if err := os.WriteFile(definitionPath, []byte("[agents.plan]\nexecutor = \"test\"\nprompt_file = \"plan.md\"\ntimeout = \"1m\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+		server, err := NewServer(store, definitionPath, "secret")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		probe, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		address := probe.Addr().String()
+		if err := probe.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		serveDone := make(chan error, 1)
+		go func() { serveDone <- server.Serve(ctx, address, nil) }()
+		waitForServer(t, address)
+		cancel()
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Fatalf("Serve returned %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Serve did not return after cancellation")
+		}
+		dialCtx, cancelDial := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		connection, err := new(net.Dialer).DialContext(dialCtx, "tcp", address)
+		cancelDial()
+		if err == nil {
+			connection.Close()
+			t.Fatalf("HTTP server at %s still accepts connections after Serve returned", address)
+		}
+	}
+}
+
+func TestServerForcesCloseWhenGracefulShutdownTimesOut(t *testing.T) {
+	server, webServer := newTestHTTPServer(t)
+	defer webServer.Close()
+	server.shutdownTimeout = 20 * time.Millisecond
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	server.handler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(handlerStarted)
+		<-releaseHandler
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	listening := make(chan net.Addr, 1)
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.Serve(ctx, "127.0.0.1:0", func(address net.Addr) {
+			listening <- address
+		})
+	}()
+	address := <-listening
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get("http://" + address.String())
+		if response != nil {
+			response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	<-handlerStarted
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("Serve error = %v, want graceful shutdown timeout", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve hung after graceful shutdown timed out")
+	}
+	close(releaseHandler)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("stalled request did not finish after forced close")
+	}
+}
+
+func TestScheduledAdmissionFailureDoesNotStopServer(t *testing.T) {
+	directory := t.TempDir()
+	promptPath := filepath.Join(directory, "shepherd.md")
+	if err := os.WriteFile(promptPath, []byte("Queue policy:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	definitionPath := filepath.Join(directory, "config.toml")
+	definition := `[agents.shepherd]
+executor = "test"
+prompt_file = "shepherd.md"
+timeout = "1m"
+
+[shepherd.machinist]
+repository = "machinist"
+every = "10m"
+max_actions = 2
+
+[shepherd.other]
+repository = "other"
+every = "10m"
+max_actions = 2
+`
+	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := openTestStore(t, filepath.Join(directory, "machinist.db"))
+	server, err := NewServer(store, definitionPath, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.schedulerEvery = time.Millisecond
+	schedulerErrors := make(chan error, 1)
+	server.schedulerError = func(err error) {
+		select {
+		case schedulerErrors <- err:
+		default:
+		}
+	}
+	probe, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(ctx, address, nil) }()
+	waitForServer(t, address)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-schedulerErrors:
+		if !strings.Contains(err.Error(), "queue shepherd schedule") {
+			t.Fatalf("scheduler admission failure was not identified: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scheduler admission failure was not reported")
+	}
+	allFailures := server.enqueueScheduledRuns(t.Context())
+	if allFailures == nil || !strings.Contains(allFailures.Error(), `schedule "machinist"`) || !strings.Contains(allFailures.Error(), `schedule "other"`) {
+		t.Fatalf("scheduler did not continue after the first admission failure: %v", allFailures)
+	}
+	dialCtx, cancelDial := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	connection, err := new(net.Dialer).DialContext(dialCtx, "tcp", address)
+	cancelDial()
+	if err != nil {
+		t.Fatalf("HTTP server stopped after scheduled admission failure: %v", err)
+	}
+	connection.Close()
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after cancellation")
+	}
+}
+
+func waitForServer(t *testing.T, address string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		dialCtx, cancelDial := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		connection, err := new(net.Dialer).DialContext(dialCtx, "tcp", address)
+		cancelDial()
+		if err == nil {
+			connection.Close()
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("HTTP server at %s did not start", address)
 }
 
 func newTestHTTPServer(t *testing.T) (*Server, *httptest.Server) {

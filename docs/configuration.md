@@ -27,6 +27,11 @@ timeout = "120m"
 executor = "codex"
 prompt_file = "agents/audit.md"
 timeout = "60m"
+
+[agents.shepherd]
+executor = "codex"
+prompt_file = "agents/shepherd.md"
+timeout = "120m"
 ```
 
 Prompt paths are resolved relative to the Machinist definition. Every prompt must
@@ -39,6 +44,47 @@ contain the supported work-request parameter:
 Machinist replaces every occurrence byte-for-byte with the `--prompt` value. It
 does not recursively expand parameters in user input. The final rendered prompt
 is limited to 512 KiB.
+
+## Schedule Shepherd
+
+Shepherd is a separate, managed agent for an opt-in pull request merge queue. Add one
+schedule per worker repository name:
+
+```toml
+[shepherd.api]
+repository = "api"
+every = "30m"
+max_actions = 3
+```
+
+`every` must be at least one minute and `max_actions` must be positive. The limit counts
+every GitHub mutation, including creating the repository label definition, creating or
+editing comments, updating a branch or pull request, pushing a repair, resolving a thread,
+and merging. The control plane queues the first run when it starts, then persists the next
+due time in SQLite. It never overlaps two Shepherd runs for one repository. If a run reaches
+its action limit, the next run inventories GitHub again and continues from live pull request
+state and audit comments. Before a stacked parent merge, Shepherd records the child's
+pending retarget so a later run cannot mistake the child for independent work. With
+`max_actions = 1`, recording the transition, merging the parent, retargeting the child, and
+marking the transition complete happen in separate runs.
+
+Schedules use the `agents.shepherd` definition and managed workers, because repository
+paths and GitHub credentials remain machine-local. Restart the control plane after changing
+a schedule.
+
+Shepherd treats the pull request label `machinist:auto-merge` as its sole permission to
+update, repair, comment on, or merge a pull request. At the start of each run, Shepherd
+checks that the repository defines this label and creates the definition when it is absent,
+using one action from that run. It never applies the label itself. Apply it only to pull
+requests you want Shepherd to change:
+
+```sh
+gh pr edit <number> --add-label "machinist:auto-merge"
+```
+
+An unlabelled pull request remains inventory-only. A repository policy may apply the label
+to Dependabot patch and minor updates. Keep major updates unlabelled unless a person opts in
+that specific pull request.
 
 ## Configure an executor
 

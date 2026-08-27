@@ -33,6 +33,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	wantFiles := []string{
 		"agents/audit.md",
 		"agents/foreman.md",
+		"agents/shepherd.md",
 		"config.toml",
 		"server/worker.token",
 		"worker.toml",
@@ -87,10 +88,10 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions.Agents) != 2 || len(definitions.Pipelines) != 0 {
+	if len(definitions.Agents) != 3 || len(definitions.Pipelines) != 0 {
 		t.Fatalf("installed definitions = agents %#v, pipelines %#v", definitions.Agents, definitions.Pipelines)
 	}
-	for _, name := range []string{"foreman", "audit"} {
+	for _, name := range []string{"foreman", "audit", "shepherd"} {
 		if _, err := config.LoadAgent(definition, name); err != nil {
 			t.Fatalf("load installed agent %s: %v", name, err)
 		}
@@ -344,6 +345,53 @@ func TestRunExecutesOneAgent(t *testing.T) {
 		"--config=" + writeCLIConfig(t, "success"),
 	}, strings.NewReader(""), &stdout, &stderr, "test")
 	if exitCode != 0 || stdout.String() != "configured plan prompt\n\nPrompt:\nissue 42\n" {
+		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunRejectsScheduleOnlyShepherd(t *testing.T) {
+	workerConfig := writeCLIConfig(t, "success")
+	for _, selection := range [][]string{{"--agent=shepherd"}, {"--pipeline=unsafe"}} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		args := append([]string{"run"}, selection...)
+		args = append(args,
+			"--prompt=clear the queue",
+			"--repo="+newCLIRepository(t),
+			"--config="+workerConfig,
+		)
+		exitCode := Execute(t.Context(), args, strings.NewReader(""), &stdout, &stderr, "test")
+		if exitCode != 2 || !strings.Contains(stderr.String(), "scheduled Shepherd cannot run directly") {
+			t.Fatalf("selection = %v, exit code = %d, stdout = %q, stderr = %q", selection, exitCode, stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("selection = %v executed before rejection: %q", selection, stdout.String())
+		}
+	}
+}
+
+func TestRunAllowsDisposableShepherdWithoutSchedule(t *testing.T) {
+	workerConfig := writeCLIConfig(t, "success")
+	definitionPath := filepath.Join(filepath.Dir(workerConfig), "config.toml")
+	body, err := os.ReadFile(definitionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.ReplaceAll(body, []byte("\n[shepherd.test]\nrepository = \"test\"\nevery = \"15m\"\nmax_actions = 1\n"), nil)
+	if err := os.WriteFile(definitionPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"run",
+		"--agent=shepherd",
+		"--prompt=exercise a disposable queue",
+		"--repo=" + newCLIRepository(t),
+		"--config=" + workerConfig,
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 || !strings.Contains(stdout.String(), "configured shepherd prompt") {
 		t.Fatalf("exit code = %d, stdout = %q, stderr = %q", exitCode, stdout.String(), stderr.String())
 	}
 }
@@ -834,6 +882,9 @@ func writeCLIConfig(t *testing.T, mode string) string {
 	if err := os.WriteFile(filepath.Join(directory, "verify.md"), []byte("configured verify prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(directory, "shepherd.md"), []byte("configured shepherd prompt\n\nPrompt:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	definition := filepath.Join(directory, "config.toml")
 	script := "cat"
 	if mode == "fail" {
@@ -862,8 +913,18 @@ func writeCLIConfig(t *testing.T, mode string) string {
 		"executor = \"default\"\n" +
 		"prompt_file = \"verify.md\"\n" +
 		"timeout = \"5s\"\n\n" +
+		"[agents.shepherd]\n" +
+		"executor = \"default\"\n" +
+		"prompt_file = \"shepherd.md\"\n" +
+		"timeout = \"5s\"\n\n" +
 		"[pipelines.code]\n" +
-		"agents = [\"plan\", \"build\", \"verify\"]\n"
+		"agents = [\"plan\", \"build\", \"verify\"]\n\n" +
+		"[pipelines.unsafe]\n" +
+		"agents = [\"plan\", \"shepherd\"]\n\n" +
+		"[shepherd.test]\n" +
+		"repository = \"test\"\n" +
+		"every = \"15m\"\n" +
+		"max_actions = 1\n"
 	if err := os.WriteFile(definition, []byte(definitionBody), 0o600); err != nil {
 		t.Fatal(err)
 	}

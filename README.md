@@ -141,6 +141,12 @@ coding agent in an existing Git worktree and saves the run files locally.
 Shared settings live in `~/.machinist/config.toml`. Machine-specific executor,
 model, path, and worker settings live in `~/.machinist/worker.toml`.
 
+To enable the optional scheduled merge queue, add a `[shepherd.<name>]` entry to
+`config.toml`. Shepherd ensures the repository defines the `machinist:auto-merge`
+label and advances only pull requests carrying it. See
+[Configuration](docs/configuration.md#schedule-shepherd). Foreman remains unable
+to merge, and Shepherd leaves every unlabelled pull request unchanged.
+
 ## Run the local control plane
 
 Add a repository to `~/.machinist/worker.toml`:

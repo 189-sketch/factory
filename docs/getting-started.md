@@ -50,7 +50,8 @@ Machinist creates these files:
 ├── worker.toml
 ├── agents/
 │   ├── audit.md
-│   └── foreman.md
+│   ├── foreman.md
+│   └── shepherd.md
 └── server/
     └── worker.token
 ```
@@ -100,6 +101,14 @@ for duplicates, and may open up to three issues for bugs it can prove.
 ```
 
 Creating no issue is a valid result when nothing meets the evidence bar.
+
+## Opt in to scheduled merges
+
+Foreman still stops at a verified pull request. To run a separate merge queue, add a
+`[shepherd.<name>]` schedule to `config.toml`, then run the control plane and managed worker.
+Shepherd creates the `machinist:auto-merge` label definition when it is missing, but only a
+person or repository policy applies the label to pull requests Shepherd may change. See
+[Configuration](configuration.md#schedule-shepherd) for the schedule and opt-in command.
 
 ## Choose a model
 
