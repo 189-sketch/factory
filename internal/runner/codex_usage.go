@@ -45,7 +45,7 @@ func newStructuredUsageCollector(resultType string, cache bool) *structuredUsage
 	return &structuredUsageCollector{resultType: resultType, cache: cache}
 }
 
-func structuredAgentCommand(executor string, command []string) []string {
+func structuredCommand(executor string, command []string) []string {
 	if codexCommand := structuredCodexCommand(executor, command); !slices.Equal(codexCommand, command) {
 		return codexCommand
 	}

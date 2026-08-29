@@ -309,7 +309,7 @@ Then run the shipped read-only audit agent against a narrow area:
 
 ```sh
 machinist run \
-  --agent=audit \
+  --command=audit \
   --repo=~/Code/github/owainlewis/machinist \
   --prompt="Inspect one narrow package and report only proven bugs"
 exit
