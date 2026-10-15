@@ -109,7 +109,8 @@ func TestClearInboxPersistsWithoutDeletingTaskAndResurfacesOnChange(t *testing.T
 	id := submitRecipe(t, s, "single", "inbox-clear")
 	run := factoryPoll(t, s)
 	factoryFinish(t, s, run, protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: strings.Repeat("a", 40), Branch: "codex/task"})
-	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/clear_inbox", map[string]any{}, 200)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/clear_inbox", map[string]any{"expected_updated_at": "2020-01-01T00:00:00Z"}, 409)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/clear_inbox", map[string]any{"expected_updated_at": factoryJob(t, s, id).UpdatedAt.Format(time.RFC3339Nano)}, 200)
 	s = restartFactoryTestServer(t, s, client)
 	job := factoryJob(t, s, id)
 	if !job.InboxCleared || job.State != "awaiting_merge" || job.Workflow.Factory.PRURL == "" {

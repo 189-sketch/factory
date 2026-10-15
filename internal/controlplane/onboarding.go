@@ -674,7 +674,7 @@ func (o *onboarding) checkRemote(ctx context.Context, selection setupSelection) 
 	o.mu.Lock()
 	if o.health != nil {
 		o.mu.Unlock()
-		return setupCheck{"failed", "A VM check is already running."}
+		return setupCheck{"failed", "A runner check is already running."}
 	}
 	o.health = h
 	o.mu.Unlock()
@@ -690,7 +690,7 @@ func (o *onboarding) checkRemote(ctx context.Context, selection setupSelection) 
 	case <-h.done:
 		return h.result
 	case <-ctx.Done():
-		return setupCheck{"failed", "The VM connection check timed out. Check worker GitHub and agent authentication, then retry."}
+		return setupCheck{"failed", "The runner connection check timed out. Check the selected target and its agent authentication, then retry."}
 	}
 }
 func (o *onboarding) claimHealth(p protocol.PollRequest) *protocol.RunSpec {

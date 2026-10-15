@@ -35,7 +35,9 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   const githubJob = { ...detailJob, id: "github-issue", state_backend: "github", task: { title: "GitHub journal task", source_url: "https://github.com/example/repo/issues/1", spec: "Build it" }, runs: [{ id: "github-report", command: "triage", outcome: "complete", state: "succeeded", summary: "Researched the request. Read the stage on GitHub.", report: "Full researched handoff stored on GitHub", github_url: "https://github.com/example/repo/issues/1#issuecomment-2" }] };
   let cancelled = false;
   let savedPrompt;
+  let finishClear;
   globalThis.fetch = async (url, options) => {
+    if(url.endsWith("/clear_inbox")) return new Promise(resolve=>{finishClear=()=>{otherInterruptedJob.inbox_cleared=true;resolve({ok:true,json:async()=>({})});};});
     if (url === "/api/v1/definitions") return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
     if (url === "/api/v1/factory/agents/triage" && options?.method === "PUT") { savedPrompt = JSON.parse(options.body); return { ok: true, json: async () => ({ hash: "new-hash" }) }; }
 
@@ -163,10 +165,23 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Updated triage prompt");
   textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
   await eventually(() => assert.equal(button("Save prompt").disabled, false));
+  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Spec")).click();
+  await eventually(()=>assert.equal(document.querySelector("textarea").value,"spec original prompt"));
+  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Triage")).click();
+  await eventually(()=>assert.equal(document.querySelector("textarea").value,"Updated triage prompt"));
   button("Save prompt").click();
   await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
   await eventually(() => assert.match(document.body.textContent, /Saved. Future attempts use this version/));
 
+  window.location.hash = "#/inbox";
+  await eventually(()=>assert.ok(document.querySelector(".inbox-list")));
+  [...document.querySelectorAll(".inbox-row")].find(el=>el.textContent.startsWith("Other interrupted task")).click();
+  await eventually(()=>assert.ok(document.querySelector(".inbox-has-selection")));
+  button("Clear from inbox").click();
+  await eventually(()=>assert.equal(button("Clearing…").disabled,true));
+  finishClear();
+  await eventually(()=>assert.ok(!document.querySelector(".inbox-has-selection")));
+  assert.equal([...document.querySelectorAll(".inbox-row")].some(el=>el.textContent.startsWith("Other interrupted task")),false);
   window.location.hash = "#/runs";
   await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "New run")));
   const submissions = [];

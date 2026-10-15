@@ -36,6 +36,7 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [inboxID, setInboxID] = useState("");
+  const [clearingInbox,setClearingInbox]=useState("");
   const [filter, setFilter] = useState("all");
   const [recipe, setRecipe] = useState("factory");
   const submission = useRef(null);
@@ -143,11 +144,18 @@ function App() {
     try {
       const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/${action}`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": status.csrf_token },
-        body: JSON.stringify({ run_id: job.runs.at(-1)?.id, previous_process_stopped: stopped, feedback, hold_version: job.hold_version || 0 }),
+        body: JSON.stringify({ run_id: job.runs.at(-1)?.id, previous_process_stopped: stopped, feedback, hold_version: job.hold_version || 0, expected_updated_at: job.updated_at }),
       });
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to update job"); }
       await statusLoader.current.refresh();
-    } catch (error) { setTaskActionError(error.message); }
+      return true;
+    } catch (error) { setTaskActionError(error.message); return false; }
+  }
+
+  async function clearInbox(job) {
+    setClearingInbox(job.id);
+    try {if (await workflowAction(job,"clear_inbox")) setInboxID("");}
+    finally {setClearingInbox("");}
   }
 
   async function deleteJob(job) {
@@ -199,7 +207,7 @@ function App() {
 
       <main className="workshop min-w-0 flex-1">
         <div className="runtime-bar" role="status"><span><i className={connectedWorkers ? "runtime-online" : ""} />{statusError ? "Connection lost" : connectedWorkers ? "Connected" : "No runner online"}</span><span>{status.jobs.filter(job => job.state === "running").length} running</span><span>{status.jobs.filter(job => job.state === "queued").length} queued</span><span className="runtime-location">{({remote:"VM",kubernetes:"Kubernetes",local:"Local"}[status.onboarding?.selection?.host] || "Local")}</span></div>
-        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><div className="inbox-actions"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><Button variant="outline" onClick={() => workflowAction(inboxJob, "clear_inbox")}>Clear from inbox</Button></div><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
+        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} <State value={job.state} compact /></span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><div className="inbox-actions"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><Button variant="outline" disabled={clearingInbox === inboxJob.id} onClick={() => clearInbox(inboxJob)}>{clearingInbox === inboxJob.id ? "Clearing…" : "Clear from inbox"}</Button></div><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
           <PageHeading title="Runs" description="Agent jobs across your repositories.">
             <div className="flex items-center gap-2">
               {!composerOpen && <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>}
@@ -237,15 +245,15 @@ function RunComposer({ recipe,setRecipe,stateBackend,choices,repositories,select
   const hintID=React.useId();
   const taskMode=["local", "github"].includes(stateBackend);
   return <Card className="run-composer">
-    <header className="composer-heading"><h2>New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></header>
+    <header className="composer-heading"><h2>New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new run form"><X className="size-4" /></Button></header>
     <form onSubmit={submit} className="composer-form">
       <label><span className="field-label">What do you want done?</span><textarea autoFocus aria-describedby={hintID} className="field-control composer-prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a task or paste a GitHub issue link…" required /></label>
       <div className="composer-options"><label><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
       {taskMode && <label><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="factory">Standard pipeline</option><option value="single">Single agent</option></select></label>}
       {!taskMode && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}</div>
-      <p id={hintID} className="composer-hint">{recipe === "single" ? "One agent completes the task. No separate review." : "Triage → optional Spec → Build → Review. You decide when to merge."}</p>
+      <p id={hintID} className="composer-hint">{!taskMode ? "Uses the configured agent and execution target." : recipe === "single" ? "One agent completes the task. No separate review." : "Triage → optional Spec → Build → Review. You decide when to merge."}</p>
       {!choices.length && <p role="alert" className="text-sm text-danger">Complete setup before starting a run.</p>}
-      <footer><Button variant="ghost" type="button" onClick={close}>Cancel</Button><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></footer>
+      <footer><Button variant="ghost" type="button" onClick={close}>Cancel</Button><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start run"}<Play className="size-3.5" /></Button></footer>
     </form>
   </Card>;
 }
@@ -273,7 +281,7 @@ function RepositoriesPage({ status }) {
 }
 
 function EmptyRuns({ filtered, openComposer }) {
-  return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching tasks" : "No tasks yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New task</Button>}</div>;
+  return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching tasks" : "No tasks yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New run</Button>}</div>;
 }
 
 function MachinistMark() {

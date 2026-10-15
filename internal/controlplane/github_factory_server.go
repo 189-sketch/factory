@@ -633,10 +633,11 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		RunID       string `json:"run_id"`
-		Feedback    string `json:"feedback"`
-		Stopped     bool   `json:"previous_process_stopped"`
-		HoldVersion int64  `json:"hold_version"`
+		RunID             string `json:"run_id"`
+		Feedback          string `json:"feedback"`
+		Stopped           bool   `json:"previous_process_stopped"`
+		HoldVersion       int64  `json:"hold_version"`
+		ExpectedUpdatedAt string `json:"expected_updated_at"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
@@ -657,6 +658,11 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 	}
 	action := r.PathValue("action")
 	if action == "clear_inbox" {
+		seen, err := time.Parse(time.RFC3339Nano, input.ExpectedUpdatedAt)
+		if err != nil || !seen.Equal(task.state.Job.UpdatedAt) {
+			writeError(w, 409, errors.New("task changed; review its latest update before clearing the inbox"))
+			return
+		}
 		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: "clear_inbox"}); err != nil {
 			writeError(w, 409, err)
 			return

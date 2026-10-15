@@ -55,7 +55,7 @@ export function Onboarding({ csrfToken, onReady }) {
   const step = stage ?? automatic;
   const steps = ["GitHub", "Repository", "Agent", "Ready"];
   return <div className="onboarding-page">
-    <header><h1>Set up Machinist</h1><p>Connect your repository. Bring your own agent. Keep execution on your machine.</p></header>
+    <header><h1>Set up Machinist</h1><p>Connect your repository. Bring your own agent. Run on infrastructure you control.</p></header>
     <ol className="onboarding-steps" aria-label="Setup progress">{steps.map((name, index) => <li key={name} aria-current={step === index ? "step" : undefined}><span>{index < automatic ? <Check size={14} /> : index + 1}</span>{name}</li>)}</ol>
     {error && <div className="onboarding-error" role="alert">{error}{!data && <Button variant="outline" onClick={() => run(load)}>Try again</Button>}</div>}
     {!data ? <p role="status">Loading connection settings…</p> : <section className="onboarding-content" aria-label={steps[step]}>
