@@ -3,15 +3,20 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
-	SharedOutputs bool                `json:"shared_outputs,omitempty"`
-	Reviews       bool                `json:"reviews,omitempty"`
-	Artifacts     bool                `json:"artifacts,omitempty"`
-	Workflows     bool                `json:"workflows,omitempty"`
-	InstanceID    string              `json:"instance_id"`
-	Name          string              `json:"name"`
-	Executors     []string            `json:"executors"`
-	Repositories  []string            `json:"repositories"`
-	Models        map[string][]string `json:"models,omitempty"`
+	Runtime           string              `json:"runtime,omitempty"`
+	SingleAgent       bool                `json:"single_agent,omitempty"`
+	HealthChecks      bool                `json:"health_checks,omitempty"`
+	Factory           bool                `json:"factory,omitempty"`
+	ReadOnlyExecutors []string            `json:"read_only_executors,omitempty"`
+	SharedOutputs     bool                `json:"shared_outputs,omitempty"`
+	Reviews           bool                `json:"reviews,omitempty"`
+	Artifacts         bool                `json:"artifacts,omitempty"`
+	Workflows         bool                `json:"workflows,omitempty"`
+	InstanceID        string              `json:"instance_id"`
+	Name              string              `json:"name"`
+	Executors         []string            `json:"executors"`
+	Repositories      []string            `json:"repositories"`
+	Models            map[string][]string `json:"models,omitempty"`
 }
 
 type PollResponse struct {
@@ -19,25 +24,29 @@ type PollResponse struct {
 }
 
 type RunSpec struct {
-	Revision        *Revision           `json:"revision,omitempty"`
-	Task            *Task               `json:"task,omitempty"`
-	Inputs          map[string]Artifact `json:"inputs,omitempty"`
-	RequiredOutputs []string            `json:"required_outputs,omitempty"`
-	ArtifactLimits  *ArtifactLimits     `json:"artifact_limits,omitempty"`
-	Workflow        bool                `json:"workflow,omitempty"`
-	ID              string              `json:"id"`
-	JobID           string              `json:"job_id"`
-	Command         string              `json:"command"`
-	CommandHash     string              `json:"command_hash"`
-	Executor        string              `json:"executor"`
-	Model           string              `json:"model,omitempty"`
-	Repository      string              `json:"repository"`
-	RenderedPrompt  string              `json:"rendered_prompt"`
-	TimeoutMillis   int64               `json:"timeout_millis"`
-	LeaseToken      string              `json:"lease_token"`
+	HealthCheck      bool                `json:"health_check,omitempty"`
+	GitHubRepository string              `json:"github_repository,omitempty"`
+	Factory          *FactoryContext     `json:"factory,omitempty"`
+	Revision         *Revision           `json:"revision,omitempty"`
+	Task             *Task               `json:"task,omitempty"`
+	Inputs           map[string]Artifact `json:"inputs,omitempty"`
+	RequiredOutputs  []string            `json:"required_outputs,omitempty"`
+	ArtifactLimits   *ArtifactLimits     `json:"artifact_limits,omitempty"`
+	Workflow         bool                `json:"workflow,omitempty"`
+	ID               string              `json:"id"`
+	JobID            string              `json:"job_id"`
+	Command          string              `json:"command"`
+	CommandHash      string              `json:"command_hash"`
+	Executor         string              `json:"executor"`
+	Model            string              `json:"model,omitempty"`
+	Repository       string              `json:"repository"`
+	RenderedPrompt   string              `json:"rendered_prompt"`
+	TimeoutMillis    int64               `json:"timeout_millis"`
+	LeaseToken       string              `json:"lease_token"`
 }
 
 type Heartbeat struct {
+	Phase      string `json:"phase,omitempty"`
 	InstanceID string `json:"instance_id"`
 	LeaseToken string `json:"lease_token"`
 }

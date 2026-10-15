@@ -1,3 +1,5 @@
+export const dashboardAttention = job => !job.inbox_cleared && ["awaiting_approval", "blocked", "interrupted", "failed", "timed_out"].includes(job.state);
+
 export const boardColumns = [
   { id: "queued", title: "Queued", description: "Waiting to start" },
   { id: "running", title: "In progress", description: "Work underway" },
@@ -11,7 +13,7 @@ const failedStates = new Set(["failed", "timed_out"]);
 export function boardColumnForState(state) {
   if (state === "queued") return "queued";
   if (state === "running") return "running";
-  if (["blocked", "awaiting_approval", "interrupted"].includes(state)) return "attention";
+  if (["blocked", "awaiting_approval", "awaiting_merge", "interrupted"].includes(state)) return "attention";
   return "finished";
 }
 
@@ -21,6 +23,8 @@ export function needsAttention(state) {
 
 export function filterJobs(jobs, filter) {
   return jobs.filter((job) => {
+    if (filter === "pr_ready") return job.state === "awaiting_merge";
+    if (filter === "attention") return dashboardAttention(job);
     if (filter === "active") return activeStates.has(job.state);
     if (filter === "failed") return failedStates.has(job.state);
     if (filter === "succeeded") return job.state === "succeeded";
@@ -37,11 +41,13 @@ export function groupJobsByBoardColumn(jobs) {
 export function jobCounts(jobs) {
   return jobs.reduce((result, job) => {
     result.all += 1;
+    if (job.state === "awaiting_merge") result.pr_ready += 1;
+    if (dashboardAttention(job)) result.attention += 1;
     if (activeStates.has(job.state)) result.active += 1;
     if (failedStates.has(job.state)) result.failed += 1;
     if (job.state === "succeeded") result.succeeded += 1;
     return result;
-  }, { all: 0, active: 0, failed: 0, succeeded: 0 });
+  }, { all: 0, active: 0, failed: 0, succeeded: 0, pr_ready: 0, attention: 0 });
 }
 
 export function currentRun(job) {
@@ -51,7 +57,8 @@ export function currentRun(job) {
 
 export function jobDisplayTitle(job) {
   const title = typeof job.github_issue_title === "string" ? job.github_issue_title.trim() : "";
-  return job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  const value = job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  return String(value).split("\n")[0].slice(0, 120);
 }
 
 export function githubIssueReference(job) {

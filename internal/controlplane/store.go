@@ -44,6 +44,11 @@ type Store struct {
 }
 
 type Job struct {
+	Recipe           string            `json:"recipe,omitempty"`
+	PublicationHold  string            `json:"publication_hold,omitempty"`
+	InboxCleared     bool              `json:"inbox_cleared,omitempty"`
+	HoldVersion      int64             `json:"hold_version,omitempty"`
+	StateBackend     string            `json:"state_backend,omitempty"`
 	Task             *protocol.Task    `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
 	ID               string            `json:"id"`
@@ -61,6 +66,12 @@ type Job struct {
 }
 
 type Run struct {
+	Prompt         string             `json:"prompt,omitempty"`
+	CommandHash    string             `json:"command_hash,omitempty"`
+	Phase          string             `json:"phase,omitempty"`
+	HeartbeatAt    *time.Time         `json:"heartbeat_at,omitempty"`
+	Report         string             `json:"report,omitempty"`
+	GitHubURL      string             `json:"github_url,omitempty"`
 	Revision       *protocol.Revision `json:"revision,omitempty"`
 	ReviewedRunID  string             `json:"reviewed_run_id,omitempty"`
 	Step           *int               `json:"step,omitempty"`
@@ -81,11 +92,13 @@ type Run struct {
 }
 
 type Worker struct {
-	InstanceID   string    `json:"instance_id"`
-	Name         string    `json:"name"`
-	LastSeenAt   time.Time `json:"last_seen_at"`
-	Repositories []string  `json:"repositories"`
-	Connected    bool      `json:"connected"`
+	Executors         []string  `json:"executors,omitempty"`
+	ReadOnlyExecutors []string  `json:"read_only_executors,omitempty"`
+	InstanceID        string    `json:"instance_id"`
+	Name              string    `json:"name"`
+	LastSeenAt        time.Time `json:"last_seen_at"`
+	Repositories      []string  `json:"repositories"`
+	Connected         bool      `json:"connected"`
 }
 
 type Snapshot struct {

@@ -58,14 +58,16 @@ type statusResponse struct {
 }
 
 type submitRequest struct {
-	Title      string `json:"title"`
-	SourceURL  string `json:"source_url"`
-	Spec       string `json:"spec"`
-	Workflow   string `json:"workflow"`
-	Prompt     string `json:"prompt"`
-	Repository string `json:"repository"`
-	Command    string `json:"command"`
-	Model      string `json:"model"`
+	Recipe          string `json:"recipe"`
+	ClientRequestID string `json:"client_request_id"`
+	Title           string `json:"title"`
+	SourceURL       string `json:"source_url"`
+	Spec            string `json:"spec"`
+	Workflow        string `json:"workflow"`
+	Prompt          string `json:"prompt"`
+	Repository      string `json:"repository"`
+	Command         string `json:"command"`
+	Model           string `json:"model"`
 }
 
 type commandDefinitionResponse struct {
@@ -422,6 +424,10 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
+		if definition.Workflows[input.Workflow].Mode == "factory" {
+			writeError(response, 400, errors.New("factory workflows require server.state = factory"))
+			return
+		}
 		steps, err := definition.ResolveTaskWorkflow(input.Workflow, input.Model)
 		if err != nil {
 			writeError(response, http.StatusBadRequest, err)
@@ -453,7 +459,9 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
-	command.Model = input.Model
+	if input.Model != "" {
+		command.Model = input.Model
+	}
 	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)

@@ -33,6 +33,7 @@ const (
 )
 
 type Worker struct {
+	Kubernetes    *Kubernetes           `toml:"kubernetes"`
 	Name          string                `toml:"name"`
 	DataDirectory string                `toml:"data_directory"`
 	ControlPlane  ControlPlane          `toml:"control_plane"`
@@ -47,8 +48,9 @@ type ControlPlane struct {
 }
 
 type Executor struct {
-	Command []string          `toml:"command"`
-	Models  map[string]string `toml:"models"`
+	ReadOnly bool              `toml:"read_only"`
+	Command  []string          `toml:"command"`
+	Models   map[string]string `toml:"models"`
 }
 
 func (e Executor) supportsModel() bool {
@@ -60,10 +62,12 @@ type Repository struct {
 }
 
 type Server struct {
-	Listen            string `toml:"listen"`
-	Database          string `toml:"database"`
-	WorkerTokenFile   string `toml:"worker_token_file"`
-	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
+	Kubernetes        *Kubernetes `toml:"kubernetes"`
+	State             string      `toml:"state"`
+	Listen            string      `toml:"listen"`
+	Database          string      `toml:"database"`
+	WorkerTokenFile   string      `toml:"worker_token_file"`
+	MaxConcurrentJobs *int        `toml:"max_concurrent_jobs"`
 	configDir         string
 }
 
@@ -133,6 +137,7 @@ type ResolvedTrigger struct {
 }
 
 type Command struct {
+	Model      string `toml:"model"`
 	Executor   string `toml:"executor"`
 	PromptFile string `toml:"prompt_file"`
 	Timeout    string `toml:"timeout"`
@@ -401,6 +406,7 @@ func resolveCommand(definitionPath, name string, command Command) (ResolvedComma
 	resolved := ResolvedCommand{
 		Name:       name,
 		Executor:   command.Executor,
+		Model:      command.Model,
 		Prompt:     prompt,
 		Timeout:    timeout,
 		Definition: definitionPath,
@@ -430,6 +436,11 @@ func RenderPrompt(command ResolvedCommand, prompt string) (ResolvedCommand, erro
 	}
 	command.Prompt = strings.ReplaceAll(command.Prompt, promptParameter, prompt)
 	return command, nil
+}
+
+// ValidatePromptParameters validates editable command templates using the definition rules.
+func ValidatePromptParameters(commandName, prompt string) error {
+	return validatePromptParameters(commandName, prompt)
 }
 
 func validatePromptParameters(commandName, prompt string) error {
@@ -520,14 +531,25 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 			return Worker{}, fmt.Errorf("executor %q defines models but its command does not contain %s", name, modelParameter)
 		}
 	}
+	if worker.Kubernetes != nil && worker.Kubernetes.Kubeconfig != "" {
+		worker.Kubernetes.Kubeconfig, err = resolveConfigPath(worker.Kubernetes.Kubeconfig, worker.configDir)
+		if err != nil {
+			return Worker{}, err
+		}
+	}
 	return worker, nil
 }
 
 func applyServerDefaults(server Server) (Server, error) {
+	if server.State != "" && server.State != "sqlite" && server.State != "github" && server.State != "factory" {
+		return Server{}, errors.New("server state must be factory or sqlite (github is a legacy alias)")
+	}
 	if server.Listen == "" {
 		server.Listen = "127.0.0.1:7331"
 	}
-	if server.Database == "" {
+	if server.State == "github" || server.State == "factory" {
+		server.Database = ""
+	} else if server.Database == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return Server{}, fmt.Errorf("find user home directory: %w", err)
@@ -549,6 +571,12 @@ func applyServerDefaults(server Server) (Server, error) {
 	tokenPath, err := resolveConfigPath(server.WorkerTokenFile, server.configDir)
 	if err != nil {
 		return Server{}, fmt.Errorf("resolve worker token file: %w", err)
+	}
+	if server.Kubernetes != nil && server.Kubernetes.Kubeconfig != "" {
+		server.Kubernetes.Kubeconfig, err = resolveConfigPath(server.Kubernetes.Kubeconfig, server.configDir)
+		if err != nil {
+			return Server{}, err
+		}
 	}
 	server.WorkerTokenFile = tokenPath
 	return server, nil

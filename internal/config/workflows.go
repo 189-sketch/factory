@@ -10,11 +10,13 @@ import (
 
 // Workflow deliberately describes a sequence, not a general dependency graph.
 type Workflow struct {
-	Steps []any `toml:"steps"`
+	Mode  string `toml:"mode"`
+	Steps []any  `toml:"steps"`
 }
 type WorkflowStep struct {
 	SharedOutputs   bool     `json:"shared_outputs,omitempty"`
 	ID              string   `json:"id,omitempty"`
+	Role            string   `json:"role,omitempty"`
 	RequiredOutputs []string `json:"required_outputs,omitempty"`
 	// Inputs is read only for workflow plans saved before shared task files.
 	Inputs   map[string]string `json:"inputs,omitempty"`
@@ -27,6 +29,13 @@ func (c Config) ResolveTaskWorkflow(name, model string) ([]WorkflowStep, error) 
 	workflow, ok := c.Workflows[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown workflow %q", name)
+	}
+	if workflow.Mode != "" && workflow.Mode != "factory" {
+		return nil, fmt.Errorf("workflow %q: mode must be factory or omitted", name)
+	}
+	roles := []string{"triage", "spec", "implement", "review"}
+	if workflow.Mode == "factory" && len(workflow.Steps) != len(roles) {
+		return nil, fmt.Errorf("factory workflow %q requires triage, spec, implement, review steps", name)
 	}
 	if len(workflow.Steps) == 0 || len(workflow.Steps) > 32 {
 		return nil, fmt.Errorf("workflow %q must have 1 to 32 steps", name)
@@ -86,9 +95,20 @@ func (c Config) ResolveTaskWorkflow(name, model string) ([]WorkflowStep, error) 
 		if err != nil {
 			return nil, err
 		}
-		command.Model = model
+		if model != "" {
+			command.Model = model
+		}
 		if step.ID == "" {
 			step.ID = commandName
+		}
+		if workflow.Mode == "factory" {
+			if step.ID != roles[i] {
+				return nil, fmt.Errorf("factory workflow %q step %d must have id %q", name, i+1, roles[i])
+			}
+			if approval {
+				return nil, fmt.Errorf("factory workflow %q uses result-based approvals, not approval=before", name)
+			}
+			step.Role = roles[i]
 		}
 		if seen[step.ID] {
 			return nil, fmt.Errorf("duplicate step ID %q; set an explicit id", step.ID)

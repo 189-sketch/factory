@@ -69,6 +69,8 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newSubmitCommand(options))
 	root.AddCommand(newStartCommand(options))
 	root.AddCommand(newUpdateCommand(options))
+	root.AddCommand(newKubernetesCommand(options))
+	root.AddCommand(newSandboxCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
 	worker.AddCommand(newRunCommand(options))
@@ -244,6 +246,18 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 			token, err := serverConfig.WorkerToken()
 			if err != nil {
 				return err
+			}
+			if serverConfig.State == "factory" || serverConfig.State == "github" {
+				server, err := controlplane.NewGitHubFactoryServer(machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit())
+				if err != nil {
+					return err
+				}
+				server.SetLocalWorkerFactory(func(cfg config.Worker) (controlplane.LocalWorker, error) {
+					return managedworker.New(cfg, options.stdout, options.stderr)
+				})
+				return server.Serve(command.Context(), serverConfig.Listen, func(address net.Addr) {
+					fmt.Fprintf(options.stderr, "machinist: local factory listening on http://%s\n", address)
+				})
 			}
 			store, err := controlplane.OpenStore(serverConfig.Database)
 			if err != nil {

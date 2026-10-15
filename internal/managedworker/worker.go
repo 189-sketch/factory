@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,18 +15,20 @@ import (
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/kuberunner"
 	"github.com/owainlewis/machinist/internal/protocol"
 	"github.com/owainlewis/machinist/internal/runner"
 )
 
 type Worker struct {
-	config         config.Worker
-	instanceID     string
-	client         *Client
-	stdout         io.Writer
-	stderr         io.Writer
-	heartbeatTicks <-chan time.Time
-	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
+	githubTokenProvider func(context.Context, string) (string, error)
+	config              config.Worker
+	instanceID          string
+	client              *Client
+	stdout              io.Writer
+	stderr              io.Writer
+	heartbeatTicks      <-chan time.Time
+	executeRun          func(context.Context, protocol.RunSpec) protocol.Completion
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -36,6 +39,21 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	}
 	if len(workerConfig.Executors) == 0 || len(workerConfig.Repositories) == 0 {
 		return nil, errors.New("managed worker requires at least one executor and repository")
+	}
+	if workerConfig.Kubernetes != nil {
+		if err := workerConfig.Kubernetes.Validate(); err != nil {
+			return nil, err
+		}
+		for name := range workerConfig.Executors {
+			if name != "codex" && name != "codex-review" {
+				return nil, errors.New("Kubernetes currently supports Codex subscription profiles only")
+			}
+		}
+	}
+	for _, executor := range workerConfig.Executors {
+		if err := runner.CheckRestrictedClaude(context.Background(), executor.Command); err != nil {
+			return nil, err
+		}
 	}
 	client, err := NewClient(workerConfig)
 	if err != nil {
@@ -88,6 +106,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	ctx = withRunProgress(ctx)
 	execute := w.executeRun
 	if execute == nil {
 		execute = w.execute
@@ -133,16 +152,25 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 }
 
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
+	runtime := "host"
+	if w.config.Kubernetes != nil {
+		runtime = "kubernetes"
+	}
 	request := protocol.PollRequest{
-		SharedOutputs: true,
-		Reviews:       true,
-		Workflows:     true,
-		Artifacts:     true,
-		InstanceID:    w.instanceID,
-		Name:          w.config.Name,
-		Executors:     w.config.ExecutorNames(),
-		Repositories:  w.config.RepositoryNames(),
-		Models:        w.config.ModelCapabilities(),
+		Runtime:           runtime,
+		SingleAgent:       true,
+		Factory:           true,
+		HealthChecks:      true,
+		ReadOnlyExecutors: w.readOnlyExecutors(),
+		SharedOutputs:     true,
+		Reviews:           true,
+		Workflows:         true,
+		Artifacts:         true,
+		InstanceID:        w.instanceID,
+		Name:              w.config.Name,
+		Executors:         w.config.ExecutorNames(),
+		Repositories:      w.config.RepositoryNames(),
+		Models:            w.config.ModelCapabilities(),
 	}
 	var response protocol.PollResponse
 	if err := w.client.Post(ctx, "/api/v1/workers/poll", request, &response); err != nil {
@@ -158,6 +186,73 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
+	if spec.Factory != nil || spec.HealthCheck {
+		if w.githubTokenProvider != nil {
+			_, remoteRepository, remoteErr := factoryRemote(repositoryCommand(ctx, repository))
+			if remoteErr != nil {
+				completion.Error = remoteErr.Error()
+				return completion
+			}
+			if spec.GitHubRepository != "" && !strings.EqualFold(remoteRepository, spec.GitHubRepository) {
+				completion.Error = "registered checkout no longer matches the selected GitHub repository"
+				return completion
+			}
+			token, tokenErr := w.githubTokenProvider(ctx, spec.Repository)
+			if tokenErr != nil {
+				completion.Error = "GitHub App connection unavailable"
+				return completion
+			}
+			environment, environmentErr := GitHubEnvironment(token, remoteRepository)
+			if environmentErr != nil {
+				completion.Error = environmentErr.Error()
+				return completion
+			}
+			ctx = context.WithValue(ctx, commandEnvironmentKey{}, environment)
+		}
+	}
+	if spec.HealthCheck {
+		if err := validateGitHubConnection(repositoryCommand(ctx, repository), spec.GitHubRepository); err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+	}
+	if w.config.Kubernetes != nil {
+		env, _ := ctx.Value(commandEnvironmentKey{}).([]string)
+		env = append(append([]string{}, env...), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		ctx = context.WithValue(ctx, commandEnvironmentKey{}, env)
+	}
+	if spec.Factory != nil {
+		if spec.Task != nil && spec.Task.SourceURL != "" {
+			if err := validateSourceRepository(repositoryCommand(ctx, repository), spec.Task.SourceURL); err != nil {
+				completion.Error = err.Error()
+				return completion
+			}
+		}
+		if (spec.Factory.Role == "review" || spec.Factory.Role == "triage" || spec.Factory.Recipe == "answer") && !w.config.Executors[spec.Executor].ReadOnly {
+			completion.Error = "factory review requires a read-only executor"
+			return completion
+		}
+		if w.config.Kubernetes != nil && (spec.Factory.Role == "spec" || spec.Factory.Role == "implement") {
+			if recovered, found := w.resumePublication(ctx, repository, spec); found {
+				return recovered
+			}
+		}
+		registeredRepository := repository
+		repository, err = w.factoryWorkspace(ctx, repository, spec)
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+		if spec.Factory.Role == "review" {
+			defer func() {
+				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+				if _, err := repositoryCommand(cleanup, registeredRepository)("git", "worktree", "remove", repository); err != nil {
+					fmt.Fprintf(w.stderr, "machinist: review workspace retained: %v\n", err)
+				}
+			}()
+		}
+	}
 	command, err := w.config.ResolveCommandModel(config.ResolvedCommand{
 		Name:       spec.Command,
 		Executor:   spec.Executor,
@@ -170,10 +265,39 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
-	result, runErr := runner.Execute(ctx, runner.Options{
-		Revision: spec.Revision,
-		Workflow: spec.Workflow, JobID: spec.JobID,
-		Task: spec.Task, PrepareInputs: w.prepareInputs(spec),
+	var reviewEvidence string
+	if spec.Factory != nil && spec.Factory.Role == "review" {
+		setRunProgress(ctx, "checking_pr")
+		evidence, err := collectReviewEvidence(repositoryCommand(ctx, repository), spec.Factory)
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+		reviewEvidence = evidence
+	}
+	prepareInputs := w.prepareInputs(spec)
+	if spec.Factory != nil {
+		prepareInputs = nil
+	}
+	answerHead := ""
+	if spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+		answerHead, err = answerWorkspaceState(repositoryCommand(ctx, repository))
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+	}
+	agentEnvironment := commandEnvironment(ctx)
+	if spec.Factory != nil && (spec.Factory.Role == "triage" || spec.Factory.Role == "review") {
+		agentEnvironment = []string{"GH_TOKEN=", "GITHUB_TOKEN=", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0="}
+	}
+	options := runner.Options{
+		Factory:        spec.Factory,
+		Environment:    agentEnvironment,
+		ReviewEvidence: reviewEvidence,
+		Revision:       spec.Revision,
+		Workflow:       spec.Workflow, JobID: spec.JobID,
+		Task: spec.Task, PrepareInputs: prepareInputs,
 		RunID:         spec.ID,
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
@@ -181,16 +305,69 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,
-	})
+	}
+	var result runner.Result
+	var runErr error
+	if w.config.Kubernetes == nil {
+		setRunProgress(ctx, "running_agent")
+		result, runErr = runner.Execute(ctx, options)
+	} else {
+		if spec.Factory == nil && !spec.HealthCheck {
+			completion.Error = "Kubernetes supports factory tasks and connection checks only"
+			return completion
+		}
+		if spec.Factory != nil {
+			copy := *spec.Factory
+			copy.CommitOnly = true
+			copy.SpecPath = "docs/specs/" + spec.JobID + ".md"
+			options.Factory = &copy
+			spec.Factory = &copy
+		}
+		options.Environment = nil
+		var bundle string
+		result, bundle, runErr = (kuberunner.Connector{Config: *w.config.Kubernetes, Progress: func(phase string) { setRunProgress(ctx, phase) }}).Execute(ctx, options, w.config.Executors[spec.Executor].ReadOnly)
+		if runErr == nil && spec.Factory != nil && (spec.Factory.Role == "spec" || spec.Factory.Role == "implement") {
+			setRunProgress(ctx, "publishing")
+			runErr = w.publishCandidate(ctx, repository, bundle, spec, &result)
+		}
+		if result.ID != "" {
+			body, _ := json.Marshal(result)
+			_ = os.WriteFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"), body, 0600)
+		}
+		if runErr != nil {
+			result.State = runner.StateFailed
+			result.ExitCode = 1
+		}
+	}
+	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
+		if (stateErr != nil || after != answerHead) && (spec.Factory.Recipe != "single" || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
+			completion.State = "succeeded"
+			completion.ExitCode = 0
+			blocked := protocol.StepResult{Outcome: "blocked", Summary: "The task changed files without valid PR delivery; preserve the work and deliver the requested changes through the assigned PR", Factory: &protocol.FactoryResult{Version: 1, Role: spec.Factory.Role, Report: "Workspace/delivery validation failed"}}
+			completion.Result, _ = json.Marshal(map[string]any{"step_result": blocked})
+			return completion
+		}
+	}
+	if w.config.Kubernetes == nil && runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec") && result.StepResult != nil && result.StepResult.Outcome == "complete" && (spec.Factory.Recipe != "single" || (result.StepResult.Factory != nil && result.StepResult.Factory.PRURL != "")) {
+		if err := validateImplementationEvidence(repositoryCommand(ctx, repository), result.StepResult.Factory); err != nil {
+			runErr = err
+			result.State = runner.StateFailed
+			result.ExitCode = 1
+		}
+	}
 	if result.ID != "" {
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
+		if runErr != nil && spec.Factory != nil {
+			completion.Result, _ = json.Marshal(result)
+		}
 		if events, readErr := os.ReadFile(result.EventsPath); readErr == nil {
 			completion.Events = string(events)
 		}
 	}
-	if spec.Task != nil && result.EventsPath != "" {
+	if spec.Factory == nil && spec.Task != nil && result.EventsPath != "" {
 		ids, err := w.publishOutputs(ctx, spec, filepath.Join(filepath.Dir(result.EventsPath), "outputs"))
 		completion.Artifacts = ids
 		if err != nil {
@@ -224,6 +401,7 @@ func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.
 
 func (w *Worker) heartbeat(ctx context.Context, spec protocol.RunSpec) error {
 	return w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(spec.ID)+"/heartbeat", protocol.Heartbeat{
+		Phase:      runProgress(ctx),
 		InstanceID: w.instanceID,
 		LeaseToken: spec.LeaseToken,
 	}, nil)
@@ -246,4 +424,14 @@ func randomID(prefix string, byteCount int) (string, error) {
 		return "", err
 	}
 	return prefix + "_" + hex.EncodeToString(body), nil
+}
+
+func (w *Worker) readOnlyExecutors() []string {
+	var names []string
+	for _, name := range w.config.ExecutorNames() {
+		if w.config.Executors[name].ReadOnly {
+			names = append(names, name)
+		}
+	}
+	return names
 }

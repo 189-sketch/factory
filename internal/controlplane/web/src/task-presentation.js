@@ -10,10 +10,19 @@ export function taskPresentation(job) {
   return {
     result,
     history: runs.filter(run => run.id !== result?.id && run.id !== latest?.id),
-    stages: (job.workflow?.steps || []).map((name, index) => ({
-      name,
-      current: index === current && job.state !== "succeeded",
-      complete: index < current || job.state === "succeeded",
-    })),
+    stages: (job.workflow?.steps || []).map((name, index) => {
+      if (!job.workflow?.factory) return {
+        name,
+        current: index === current && job.state !== "succeeded",
+        complete: index < current || job.state === "succeeded",
+      };
+      const attempts = runs.filter(run => run.command === name);
+      const active = index === current && !["succeeded", "awaiting_merge"].includes(job.state);
+      const skipped = !attempts.length && (index < current || job.state === "succeeded");
+      const complete = name === "review"
+        ? job.workflow.factory.verdict === "accepted" && ["awaiting_merge", "succeeded"].includes(job.state)
+        : !active && attempts.some(run => run.outcome === "complete");
+      return { name, current: active, complete, skipped };
+    }),
   };
 }

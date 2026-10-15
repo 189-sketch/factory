@@ -1,6 +1,7 @@
 package triggers
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +157,26 @@ func TestParseCronAllowsImpossibleDayOfMonthWhenRestrictedWeekdayCanMatch(t *tes
 	}
 	if got, want := schedule.Next(time.Date(2026, time.February, 1, 0, 0, 0, 0, time.UTC)), time.Date(2026, time.February, 2, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
 		t.Fatalf("next = %s, want %s", got, want)
+	}
+}
+
+func TestCronLargeStepsDoNotOverflow(t *testing.T) {
+	step := strconv.Itoa(int(^uint(0) >> 1))
+	for _, expression := range []string{
+		"1/" + step + " * * * *",
+		"0 1/" + step + " * * *",
+		"0 0 1/" + step + " * *",
+		"0 0 1 1/" + step + " *",
+		"0 0 * * 1/" + step,
+	} {
+		t.Run(expression, func(t *testing.T) {
+			cron, err := ParseCron(expression, "UTC")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next := cron.Next(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)); next.IsZero() {
+				t.Fatal("large step lost its first occurrence")
+			}
+		})
 	}
 }

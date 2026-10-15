@@ -5,10 +5,11 @@ import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { triggerHealthTone, triggerView } from "@/trigger-state";
 
-export function TriggersPage({ triggers = [], loaded, error }) {
-  return <Page title="Triggers">
+export function TriggersPage({ triggers = [], loaded, error, stateBackend }) {
+  return <Page title="Automations">
+    {["github", "local"].includes(stateBackend) && <p className="max-w-2xl text-sm leading-6 text-muted-foreground">Connect GitHub issues and schedules to your local or remote agents. Specs and pull requests stay on GitHub. Internal execution state stays on the execution host.</p>}
     {error && <Failure value={error} />}
-    {!loaded && !error ? <Loading /> : loaded && (triggers.length ? <div className="grid gap-4 xl:grid-cols-2">{triggers.map((trigger) => <TriggerCard key={trigger.identity} trigger={trigger} />)}</div> : <Empty />)}
+    {!loaded && !error ? <Loading /> : loaded && (triggers.length ? <div className="grid gap-3">{triggers.map((trigger) => <TriggerCard key={trigger.identity} trigger={trigger} />)}</div> : <Empty />)}
   </Page>;
 }
 
@@ -42,7 +43,7 @@ function formatDate(value) {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 }
 
-function Page({ title, children }) { return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8"><PageHeading title={title} description="Scheduled and managed ways work enters the shop." />{children}</div>; }
+function Page({ title, children }) { return <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8"><PageHeading title={title} description="GitHub events and schedules that start work on your connected workers." />{children}</div>; }
 function Loading() { return <Card><QuietState title="Checking the schedule" description="Loading managed trigger state." role="status" /></Card>; }
 function Failure({ value }) { return <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{value}</div>; }
-function Empty() { return <Card><QuietState title="No managed triggers" description="Configured schedules and event sources will appear here." /></Card>; }
+function Empty() { return <Card><QuietState title="No automations configured" description="Add GitHub issue intake or a schedule in your configuration. Its scope and latest result will appear here." /></Card>; }

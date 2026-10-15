@@ -21,3 +21,15 @@ models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 # Register each repository that managed workers may run in.
 # [repositories.my-project]
 # path = "/absolute/path/to/my-project"
+
+# Review is an explicit machine capability. Keep these CLI sandbox settings:
+# read_only declares operator trust in the command, it does not add a sandbox.
+[executors.codex-review]
+read_only = true
+command = ["codex", "exec", "--json", "--model={{machinist.model}}", "--sandbox", "read-only", "-"]
+models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
+
+[executors.claude-review]
+read_only = true
+command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model={{machinist.model}}", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"]
+models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }

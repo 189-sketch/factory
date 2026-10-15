@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -64,6 +65,80 @@ func TestRiskDeliveryExampleUsesSharedFolder(t *testing.T) {
 	for _, step := range steps {
 		if !step.SharedOutputs || len(step.Inputs) != 0 {
 			t.Fatalf("not shared: %+v", step)
+		}
+	}
+}
+
+func TestFactoryWorkflowRolesAndModels(t *testing.T) {
+	cfg := Config{Commands: map[string]Command{}, Workflows: map[string]Workflow{}}
+	roles := []string{"triage", "spec", "implement", "review"}
+	var steps []any
+	for _, role := range roles {
+		name := "custom-" + role
+		cfg.Commands[name] = Command{Executor: "codex", Model: "stage-model"}
+		steps = append(steps, map[string]any{"id": role, "command": name})
+	}
+	cfg.Workflows["factory"] = Workflow{Mode: "factory", Steps: steps}
+	for _, model := range []string{"", "override"} {
+		resolved, err := cfg.ResolveTaskWorkflow("factory", model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, step := range resolved {
+			want := model
+			if want == "" {
+				want = "stage-model"
+			}
+			if step.Role != roles[i] || step.Command.Model != want || step.Approval {
+				t.Fatalf("step %d: %+v", i, step)
+			}
+		}
+	}
+	cfg.Workflows["sequence"] = Workflow{Steps: []any{"custom-triage"}}
+	sequence, err := cfg.ResolveTaskWorkflow("sequence", "")
+	if err != nil || sequence[0].Role != "" || sequence[0].Command.Model != "stage-model" {
+		t.Fatalf("legacy sequence: %+v, %v", sequence, err)
+	}
+	for _, tc := range []struct {
+		name     string
+		workflow Workflow
+	}{
+		{"unknown mode", Workflow{Mode: "graph", Steps: steps}},
+		{"missing stage", Workflow{Mode: "factory", Steps: steps[:3]}},
+		{"wrong order", Workflow{Mode: "factory", Steps: []any{steps[1], steps[0], steps[2], steps[3]}}},
+		{"implicit command role", Workflow{Mode: "factory", Steps: []any{"custom-triage", steps[1], steps[2], steps[3]}}},
+		{"fixed approval", Workflow{Mode: "factory", Steps: []any{map[string]any{"id": "triage", "command": "custom-triage", "approval": "before"}, steps[1], steps[2], steps[3]}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.Workflows["invalid"] = tc.workflow
+			if _, err := cfg.ResolveTaskWorkflow("invalid", ""); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestFactoryLeavesHandoffStorageToGitHub(t *testing.T) {
+	cfg := Config{Commands: map[string]Command{}, Workflows: map[string]Workflow{}}
+	roles := []string{"triage", "spec", "implement", "review"}
+	steps := []any{}
+	for _, role := range roles {
+		cfg.Commands[role] = Command{Executor: "codex"}
+		step := map[string]any{"id": role, "command": role}
+		if role == "spec" {
+			step["required_outputs"] = []any{"spec.md", "decisions.md"}
+		}
+		steps = append(steps, step)
+	}
+	cfg.Workflows["factory"] = Workflow{Mode: "factory", Steps: steps}
+	resolved, err := cfg.ResolveTaskWorkflow("factory", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := [][]string{nil, {"spec.md", "decisions.md"}, nil, nil}
+	for i, step := range resolved {
+		if !reflect.DeepEqual(step.RequiredOutputs, expected[i]) {
+			t.Fatalf("%s outputs = %v, want %v", step.Role, step.RequiredOutputs, expected[i])
 		}
 	}
 }

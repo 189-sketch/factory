@@ -3,10 +3,14 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 const zeroTime = "0001-01-01T00:00:00Z";
 
-export function State({ value }) {
+export function State({ value, compact = false }) {
   const tones = {
-    running: "border-warning/25 bg-warning/10 text-warning",
-    queued: "border-warning/25 bg-warning/10 text-warning",
+    running: "border-primary/25 bg-primary/10 text-primary",
+    queued: "border-border bg-muted text-muted-foreground",
+    blocked: "border-warning/25 bg-warning/10 text-warning",
+    awaiting_approval: "border-warning/25 bg-warning/10 text-warning",
+    awaiting_merge: "border-info/25 bg-info/10 text-info",
+    interrupted: "border-warning/25 bg-warning/10 text-warning",
     succeeded: "border-success/25 bg-success/10 text-success",
     failed: "border-danger/25 bg-danger/10 text-danger",
     timed_out: "border-danger/25 bg-danger/10 text-danger",
@@ -15,7 +19,7 @@ export function State({ value }) {
   return (
     <Badge className={cn("gap-1.5", tones[value] || tones.queued)}>
       <span className="size-1.5 rounded-full bg-current" />
-      {stateLabel(value)}
+      {compact ? ({awaiting_approval:"Approval",awaiting_merge:"PR ready"}[value] || stateLabel(value)) : stateLabel(value)}
     </Badge>
   );
 }
@@ -46,5 +50,5 @@ export function formatTimestamp(value) {
     : new Date(value).toLocaleString();
 }
 export function stateLabel(value) {
-  return String(value || "unknown").replaceAll("_", " ");
+  return friendlyName(value || "unknown");
 }

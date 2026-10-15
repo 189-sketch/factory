@@ -38,18 +38,21 @@ const (
 )
 
 type Options struct {
-	Revision      *protocol.Revision
-	Task          *protocol.Task
-	PrepareInputs func(context.Context, string) (map[string]string, error)
-	Workflow      bool
-	JobID         string
-	RunID         string
-	ArtifactKey   string
-	Command       config.ResolvedCommand
-	Repository    string
-	DataDirectory string
-	Stdout        io.Writer
-	Stderr        io.Writer
+	Environment    []string
+	ReviewEvidence string
+	Factory        *protocol.FactoryContext
+	Revision       *protocol.Revision
+	Task           *protocol.Task
+	PrepareInputs  func(context.Context, string) (map[string]string, error)
+	Workflow       bool
+	JobID          string
+	RunID          string
+	ArtifactKey    string
+	Command        config.ResolvedCommand
+	Repository     string
+	DataDirectory  string
+	Stdout         io.Writer
+	Stderr         io.Writer
 }
 
 type Result struct {
@@ -99,6 +102,9 @@ type processWait struct {
 func Execute(ctx context.Context, options Options) (result Result, returnErr error) {
 	if options.Stdout == nil || options.Stderr == nil {
 		return Result{}, errors.New("stdout and stderr are required")
+	}
+	if err := CheckRestrictedClaude(ctx, options.Command.Command); err != nil {
+		return Result{}, err
 	}
 	repository, err := ResolveRepository(options.Repository)
 	if err != nil {
@@ -152,9 +158,12 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
 	_, claudeAgent := claudeCommandInfo(options.Command.Executor, executorCommand)
 	agentExecutor := codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
+	if options.Factory != nil && newUsageCollector(options.Command.Executor, executorCommand) == nil {
+		return completeFailure(&result, log, runDirectory, fmt.Errorf("factory stages require a structured Codex or Claude Code executor"))
+	}
 	outputDirectory := ""
 	scratchDirectory := ""
-	if options.Task != nil {
+	if options.Task != nil && options.Factory == nil {
 		outputDirectory = filepath.Join(runDirectory, "outputs")
 		scratchDirectory = filepath.Join(runDirectory, "scratch")
 		if err := os.Mkdir(scratchDirectory, 0700); err != nil {
@@ -164,7 +173,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 			return completeFailure(&result, log, runDirectory, err)
 		}
 		inputs := map[string]string{}
-		if options.PrepareInputs != nil {
+		if options.PrepareInputs != nil && options.Factory == nil {
 			var err error
 			inputs, err = options.PrepareInputs(ctx, filepath.Join(runDirectory, "inputs"))
 			if err != nil {
@@ -198,7 +207,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
-	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	command.Env = append(mergeEnvironment(sanitizedEnvironment(os.Environ()), options.Environment), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
 		body, err := json.Marshal(options.Revision)
@@ -216,9 +225,18 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if options.Workflow {
 		resultPath := filepath.Join(runDirectory, "step-result.json")
 		command.Env = append(command.Env, "MACHINIST_STEP_RESULT_PATH="+resultPath, "MACHINIST_JOB_ID="+options.JobID)
-		if agentExecutor {
+		if agentExecutor && options.Factory == nil {
 			options.Command.Prompt += "\n\nMachinist workflow contract: perform the work above, then write a JSON object to the file named by the MACHINIST_STEP_RESULT_PATH environment variable. Use exactly the fields outcome (complete, blocked, or failed) and summary (a nonempty explanation). MACHINIST_OUTPUT_DIR is the published task folder: save only requested deliverables and files needed by later stages there. Every file there is uploaded and shown to the user. Use MACHINIST_SCRATCH_DIR for temporary clones, helper scripts, caches, raw command logs, and other working files; scratch files are not published or carried forward. Summarize verification in the final report; publish raw logs only when requested or needed to explain a failure. Do not report complete if work remains blocked. The next step starts only after complete. Reconcile existing issue/PR work before repeating side effects; this may be a retry.\n"
 		}
+	}
+	if options.Factory != nil {
+		body, err := json.Marshal(map[string]string{"role": options.Factory.Role, "pr_url": options.Factory.PRURL, "head_sha": options.Factory.HeadSHA, "branch": options.Factory.Branch})
+		if err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
+		command.Env = append(command.Env, "MACHINIST_FACTORY_CONTEXT="+string(body))
+		options.Command.Prompt += options.ReviewEvidence
+		options.Command.Prompt += factoryPrompt(options.Factory, repository)
 	}
 	configureProcess(command)
 
@@ -263,12 +281,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	var streams sync.WaitGroup
 	streams.Add(2)
 	usageCollector := newUsageCollector(options.Command.Executor, executorCommand)
+	diagnostics := &startupDiagnostics{}
 	stdoutDestination := options.Stdout
 	if usageCollector != nil {
+		usageCollector.diagnostics = diagnostics
 		stdoutDestination = io.MultiWriter(options.Stdout, usageCollector)
 	}
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	go pumpStream(&streams, stderrReader, io.MultiWriter(options.Stderr, diagnostics), "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
@@ -283,8 +303,21 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
 	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
+	if usageCollector != nil {
+		usageCollector.flush()
+	}
+	if state == StateFailed && outcome != nil && agentExecutor {
+		if hint := diagnostics.message(); hint != "" {
+			outcome = fmt.Errorf("%s (%w)", hint, outcome)
+		}
+	}
 	if options.Workflow && state == StateSucceeded {
 		step, err := readStepResult(filepath.Join(runDirectory, "step-result.json"))
+		// Factory stages return their contract as the final agent message;
+		// the host reads it without granting the agent filesystem write access.
+		if options.Factory != nil && usageCollector != nil {
+			step, err = parseFactoryMessage(usageCollector.lastMessage())
+		}
 		if err != nil {
 			state, exitCode, outcome = StateFailed, 1, err
 		} else {
@@ -756,4 +789,37 @@ func randomID(prefix string, bytes int) (string, error) {
 		return "", fmt.Errorf("generate %s ID: %w", prefix, err)
 	}
 	return prefix + "_" + hex.EncodeToString(buffer), nil
+}
+
+// mergeEnvironment applies only supported process credential settings, once per key.
+func mergeEnvironment(base, overrides []string) []string {
+	allowed := func(name string) bool {
+		switch name {
+		case "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "MACHINIST_GITHUB_REPOSITORY", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT":
+			return true
+		}
+		return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
+	}
+	values := map[string]string{}
+	order := []string{}
+	for index, list := range [][]string{base, overrides} {
+		for _, entry := range list {
+			name, _, ok := strings.Cut(entry, "=")
+			if !ok {
+				continue
+			}
+			if index == 1 && !allowed(name) {
+				continue
+			}
+			if _, exists := values[name]; !exists {
+				order = append(order, name)
+			}
+			values[name] = entry
+		}
+	}
+	result := make([]string, 0, len(order))
+	for _, name := range order {
+		result = append(result, values[name])
+	}
+	return result
 }

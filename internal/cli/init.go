@@ -19,6 +19,10 @@ var initialFiles = []string{
 	"worker.toml",
 	"prompts/task-to-pr.md",
 	"prompts/audit.md",
+	"prompts/triage.md",
+	"prompts/spec.md",
+	"prompts/implement.md",
+	"prompts/review.md",
 }
 
 func newInitCommand(options *commandOptions) *cobra.Command {

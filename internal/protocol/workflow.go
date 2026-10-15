@@ -9,9 +9,10 @@ import (
 )
 
 type StepResult struct {
-	ApprovalRequired bool   `json:"approval_required,omitempty"`
-	Outcome          string `json:"outcome"`
-	Summary          string `json:"summary"`
+	Factory          *FactoryResult `json:"factory,omitempty"`
+	ApprovalRequired bool           `json:"approval_required,omitempty"`
+	Outcome          string         `json:"outcome"`
+	Summary          string         `json:"summary"`
 }
 
 func ParseStepResult(body []byte) (*StepResult, error) {
@@ -32,6 +33,11 @@ func ParseStepResult(body []byte) (*StepResult, error) {
 	}
 	if strings.TrimSpace(result.Summary) == "" {
 		return nil, errors.New("step summary is required")
+	}
+	if result.Factory != nil {
+		if err := result.Factory.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	return &result, nil
 }
