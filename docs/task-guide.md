@@ -1,4 +1,11 @@
-# Your first task workflow
+# Legacy sequence workflows
+
+This guide covers the legacy sequence interface. For the current app and its
+Standard pipeline or Single-agent mode, use the [factory setup guide](local-factory/README.md).
+The custom workflow selector, task board, and Workflows page described below
+are no longer in the app. Sequence workflows remain supported through the API
+and CLI when `[server] state = "sqlite"` is configured. Treat the UI walkthrough
+as historical; use [workflow API endpoints](workflows.md) to submit and approve legacy tasks.
 
 A **task** is the work you want done. A **workflow** is its ordered list of steps.
 A step runs a configured agent prompt or script. A **run** is one attempt at a

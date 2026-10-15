@@ -1,6 +1,6 @@
 # Set up the local factory
 
-Machinist connects GitHub to Codex or Claude Code running on your computer or VM.
+Machinist connects GitHub to Codex or Claude Code running on your computer, a VM, or Kubernetes.
 There is no Machinist cloud account and no hosted agent execution.
 
 ## First run
@@ -17,7 +17,8 @@ Open the printed local URL. Setup guides you through four steps:
    repositories you choose. No token paste or client secret is needed.
 2. **Repository:** choose an accessible repository. Machinist can clone it or
    verify an existing checkout. It checks the App permissions and your write access.
-3. **Agent:** choose Codex or Claude Code and this computer or a remote VM.
+3. **Agent:** choose Codex or Claude Code on this computer or a remote VM. A configured
+   Kubernetes target runs Codex in isolated gVisor Jobs.
 4. **Verify:** run a real PING with no GitHub issue, commit, or PR. Setup completes
    only after it returns PONG. Local workers start automatically after setup.
 
@@ -31,6 +32,10 @@ Settings lets you return to setup. Changed repository/agent selections invalidat
 the earlier check. Agent prompt edits stay in Machinist and never become issue
 comments or commits just because you pressed Save.
 
+After setup, add more repositories from **Projects → Add project**. Grant access
+through **Manage GitHub access** and refresh if another repository is missing.
+Adding a project preserves the existing projects and shared agent settings.
+
 ## GitHub App ownership
 
 The default public App is [Machinist Local](https://github.com/apps/machinist-local).
@@ -40,7 +45,7 @@ not receive the App owner's private key or a shared client secret.
 GitHub requires the App owner to generate a private key once before its first
 installation. That is an owner administration step, not a key that ordinary users
 supply to Machinist. Keep it private and outside repositories. To use a different
-App, expand **Use your own GitHub App**, enter its public client ID and installation
+App, use **Use your own GitHub App**, enter its public client ID and installation
 URL, and enable Device Flow in GitHub's App settings.
 
 Required repository permissions are Contents, Issues, and Pull requests read/write,

@@ -140,6 +140,11 @@ func parseCronField(input, fieldName string, min, max int, named map[string]int,
 				normalized = 0
 			}
 			field.values[normalized-min] = true
+			// Stop before adding a step outside the field, including MaxInt.
+			// This keeps large valid steps from overflowing the loop counter.
+			if step > end-value {
+				break
+			}
 		}
 	}
 	return field, nil

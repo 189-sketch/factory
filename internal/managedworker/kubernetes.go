@@ -126,8 +126,7 @@ func (w *Worker) publishCandidate(ctx context.Context, workspace, bundle string,
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	intent, _ := json.Marshal(map[string]string{"repository": repository, "branch": branch, "base": baseSHA, "head": f.HeadSHA})
-	if err = os.WriteFile(filepath.Join(directory, "publication.json"), intent, 0600); err != nil {
+	if err = w.savePublication(spec, repository, workspace, baseSHA, bundle, *result); err != nil {
 		return err
 	}
 	if bundle != "" {

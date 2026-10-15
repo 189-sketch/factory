@@ -1,6 +1,10 @@
 # Workflows
 
-For a complete setup and a walkthrough of the UI, start with [your first task workflow](task-guide.md).
+For the current app, start with the [factory setup guide](local-factory/README.md).
+This reference covers lower-level CLI and legacy sequence workflows. The app
+offers Standard pipeline and Single-agent modes instead of custom workflows.
+For a legacy sequence setup with `server.state = "sqlite"`, see the
+[sequence guide](task-guide.md).
 
 A workflow is an ordered list of existing commands. One agent can deliver an
 entire change, including its own subagents, or separate commands can perform

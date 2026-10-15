@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -248,5 +249,13 @@ func TestAutomationAdmissionAndCursorRollbackTogether(t *testing.T) {
 	stored, _ = s.local.automation(ctx, a.ID)
 	if stored.LastJob == "" {
 		t.Fatal("failed occurrence did not recover")
+	}
+}
+
+func TestAutomationLargeCronStep(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	a := createAutomation(t, s, "1/"+strconv.Itoa(int(^uint(0)>>1))+" * * * *")
+	if a.NextDue == nil || a.NextDue.Minute() != 1 {
+		t.Fatal("large cron step lost its first valid occurrence")
 	}
 }

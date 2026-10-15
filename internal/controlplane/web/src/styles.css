@@ -222,9 +222,6 @@ a { text-underline-offset: 3px; }
 .run-duration { font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
 .run-delivery { font-size: 11px; }
 .run-delivery a { color: var(--primary); text-decoration: underline; }
-.repository-list { border-top: 1px solid var(--border); }
-.repository-list article { display: flex; gap: 12px; align-items: center; padding: 18px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
-.repository-list article span { margin-left: auto; color: var(--success); }
 .settings-links { display: grid; gap: 18px; margin: 32px; font-size: 14px; }
 .settings-links a { color: var(--primary); }
 .publication-hold { padding: 18px 0; border-block: 1px solid var(--border); margin-block: 18px; }

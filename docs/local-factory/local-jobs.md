@@ -1,8 +1,9 @@
 # Reliable local jobs
 
-This is the first implementation slice of the agent infrastructure plan. The
-control plane remains one service. It uses the existing trusted host worker and
-GitHub App, not Kubernetes or a second orchestration framework.
+The control plane remains one service. Jobs use a local or VM worker, or a
+configured Kubernetes target. Each target follows the same job and PR delivery
+model. Kubernetes runs agent attempts in gVisor Jobs while the trusted connector
+publishes changes through GitHub.
 
 ## Two built-in modes
 
@@ -62,10 +63,11 @@ an external write already issued by the compatibility worker.
 
 ## Scope and checks
 
-The first slice adds the two built-in modes, duplicate-safe submission, private holds and the
-compact sidebar/table. It retains per-run GitHub credentials on the trusted host.
-Versioned custom roles, durable remote leases, the trusted credential-free
-publisher, Foreman chat, PostgreSQL and Kubernetes are subsequent slices.
+The app provides two built-in modes, duplicate-safe submission, private holds,
+and a compact sidebar and table. Local agents use per-run GitHub App credentials.
+Kubernetes pods receive no GitHub credentials; the trusted connector publishes
+their changes. See [Kubernetes setup and recovery](kubernetes.md).
+Foreman chat and PostgreSQL remain future work.
 
 Proof covers Standard routing and bounded repairs, Single-agent completion without Review, file/PR evidence checks, replay
 after restart, legacy store migration with receipts, a second-owner rejection,

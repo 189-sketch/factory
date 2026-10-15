@@ -227,6 +227,11 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			completion.Error = "factory review requires a read-only executor"
 			return completion
 		}
+		if w.config.Kubernetes != nil && (spec.Factory.Role == "spec" || spec.Factory.Role == "implement") {
+			if recovered, found := w.resumePublication(ctx, repository, spec); found {
+				return recovered
+			}
+		}
 		repository, err = w.factoryWorkspace(ctx, repository, spec)
 		if err != nil {
 			completion.Error = err.Error()

@@ -1,77 +1,53 @@
-# Deliver work with your local agent
+# Deliver work with your own coding agent
 
-Machinist runs your own coding agent on a computer you control and turns a task
-into one pull request. This guide explains where the agent runs, how it reaches
-GitHub, what stays private, and how the shipped `task-to-pr` command delivers
-work.
+Machinist runs coding agents on your computer, a VM, or a configured Kubernetes
+cluster. Start with the [setup guide](local-factory/README.md), then submit a
+request through **New run** or the API.
 
-## Your agent runs on your host or VM
+## Connect projects and GitHub
 
-Machinist runs on your machine. A command maps to a fixed executable on the
-worker, such as Codex or Claude Code. Machinist sends the rendered prompt on
-standard input and runs it in the repository's directory.
+Sign in through the GitHub App and grant access to the repositories you want to
+use. Add more repositories from **Projects → Add project**. Each project has its
+own checkout and uses the shared agent and execution target.
 
-- **This computer.** Build Machinist, run `machinist init`, and run a command
-  with `machinist run`. See the [quick start](../README.md#quick-start).
-- **A remote VM.** Run the control plane and worker as services on a VM you own.
-  See [VM deployment](vm-deployment.md).
+Local agents receive a refreshed GitHub App token scoped by the Git credential
+helper to their selected repository. On a VM, the worker uses the GitHub login
+configured on that host. Kubernetes agent pods receive no GitHub credentials;
+the trusted connector publishes their changes. See
+[Kubernetes setup](local-factory/kubernetes.md).
 
-Sign in to the coding CLI on the host where it runs. Do not copy credential
-files from another computer.
+## Choose the run mode
 
-## GitHub access uses the host's own logins
+**Standard pipeline** starts with Triage, adds Spec and human approval when
+needed, then runs Build and independent Review. Each stage uses a fresh agent.
+Review findings return to Build on the same branch and pull request, for up to
+three repair rounds.
 
-Machinist does not hold GitHub credentials for you. The agent uses the GitHub
-CLI and Git credentials on the host:
+**Single agent** completes a task end to end without a separate reviewer. Saved
+[automations](local-factory/automations.md) use this mode from the repository root.
 
-- GitHub CLI authentication (`gh auth login`) for issues, pull requests,
-  comments, and checks.
-- A Git credential, such as a GitHub SSH key created on that host, for clone,
-  fetch, and push.
+Requested files, including reports and documents, are committed on the task
+branch and delivered through one pull request. A question or health check that
+requests no file changes can return its answer directly.
 
-Use a GitHub identity with access to only the repositories the worker needs.
-Managed tasks can use only the repositories named in the worker configuration,
-such as `[repositories.my_repo]` in `~/.machinist/worker.toml`.
+## Keep internal work private
 
-## Prompts and run history stay local
+The control plane keeps job state, prompt snapshots, approvals, feedback, and
+receipts in its private SQLite database. Factory jobs use `jobs.db` beside the
+worker token, normally under `~/.machinist/server`. Back up the whole runtime
+directory, including worker outputs.
 
-The control plane stores jobs, rendered prompts, runs, and workflow attempts in
-a local SQLite database. By default it is `~/.machinist/server/machinist.db`.
-Saved task files are kept on the same server's disk. See
-[configuration](configuration.md#artifact-storage-directory).
+GitHub holds linked issues, published specifications, code, and pull requests.
+Linked issues receive a concise status comment updated in place. Internal
+prompts, logs, and handoffs are never posted to issues or committed as requested
+deliverables.
 
-Machinist does not post prompts or run logs to GitHub. What reaches GitHub is
-what your command's agent pushes or posts.
+## Review and merge
 
-## One pull request per task
+Inspect the pull request, agent review, and CI checks on GitHub. You decide when
+to merge. **Check merge status** verifies that the reviewed head was merged before
+completing the task. Machinist does not merge factory tasks automatically.
 
-`machinist init` writes `~/.machinist/config.toml` with a `task-to-pr` command.
-Its prompt, [`examples/prompts/task-to-pr.md`](../examples/prompts/task-to-pr.md),
-tells the agent to:
-
-1. Read the issue or plain request and the repository instructions.
-2. Work on an isolated branch, or reuse the existing branch and pull request for
-   the task.
-3. Commit the change, push the branch, and create or update one pull request.
-   For an issue, the body includes `Fixes #<issue-number>`.
-
-A requested document is part of the change, so it is committed on the branch
-and delivered in the same pull request as code would be.
-
-## Independent review and human merge
-
-Before pushing, `task-to-pr` asks a fresh read-only subagent to review the
-change and repeats until the change is approved. After pushing, it waits for CI
-and automated reviews, fixes valid findings, and stops after three repair rounds.
-
-The prompt says never to merge. You review the pull request and merge it on
-GitHub yourself.
-
-Machinist runs the steps you configure. It does not add review or merging to
-every task. To split work into separate stages or add an approval before a
-step, configure a [workflow](workflows.md). Merging stays with a person unless
-you add a merge policy, such as the
-[classify-then-merge example](../examples/workflows/risk_delivery/README.md).
-
-A local factory with GitHub App sign-in is in preview in
-[PR #514](https://github.com/owainlewis/machinist/pull/514) and is not on `main`.
+Direct CLI commands remain available for scripts. `machinist run` invokes the
+configured command in a repository you supply; its prompt determines its work.
+See the [command reference](workflows.md) for this lower-level interface.
