@@ -8,10 +8,10 @@
 > and Review flow, and **Check merge status**, are not on `main` yet. See
 > [Current setup on main](#current-setup-on-main) for how `main` works today.
 
-In the preview, Machinist runs your own coding agent, Codex or Claude Code, on a computer you
-control. It connects the repositories you choose through a GitHub App, keeps its
-internal working notes private, and delivers each task as one pull request that is
-reviewed independently and merged by a person.
+In the preview, Machinist runs your own coding agent, Codex or Claude Code, on a
+computer you control. It connects the repositories you choose through a GitHub
+App, keeps its internal working notes private, and delivers each task as one pull
+request that is reviewed independently and merged by a person.
 
 There is no Machinist cloud account and no hosted agent execution.
 
