@@ -5,8 +5,8 @@ import { State, friendlyName, relativeTime } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/inter";
-import { Activity, Bot, Inbox, Clock3, Settings, Search, GitBranch, Moon, Play, Plus, Server, Sun, X } from "lucide-react";
-import { Analytics } from "@/analytics";
+import { Activity, LayoutDashboard, Bot, Inbox, Clock3, Settings, Search, GitBranch, Moon, Play, Plus, Server, Sun, X } from "lucide-react";
+import { Dashboard } from "@/analytics";
 import { AgentsPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,6 +43,7 @@ function App() {
   const submission = useRef(null);
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
+  const previousView = useRef(route.view);
   const view = status.onboarding?.required ? "setup" : route.view;
   const statusLoader = useRef(null);
   if (!statusLoader.current) statusLoader.current = createStatusLoader({
@@ -95,6 +96,14 @@ function App() {
       window.clearTimeout(timer);
     };
   }, []);
+
+  useEffect(() => {
+    if (route.view === "runs") {
+      setFilter(route.filter || "all");
+      if (previousView.current !== "runs") setSearch("");
+    }
+    previousView.current = route.view;
+  }, [route]);
 
   const choices = useMemo(() => selectionChoices(status), [status.commands, status.workflows]);
 
@@ -190,7 +199,7 @@ function App() {
         </div>
         <nav className="primary-nav" aria-label="Primary">
           <span className="nav-group">Work</span>
-          {[["runs", Activity, "Runs"], ["inbox", Inbox, "Inbox", attentionJobs.length], ["automations", Clock3, "Automations"]].map(([page, Icon, label, count]) => <a key={page} href={`#/${page}`} aria-current={view === page || (page === "runs" && view === "task") ? "page" : undefined} className={cn("nav-item", (view === page || (page === "runs" && view === "task")) && "nav-item-active")}><Icon className="size-4" /><span>{label}</span>{count > 0 && <span className="nav-count">{count}</span>}</a>)}
+          {[["dashboard", LayoutDashboard, "Dashboard"], ["runs", Activity, "Runs"], ["inbox", Inbox, "Inbox", attentionJobs.length], ["automations", Clock3, "Automations"]].map(([page, Icon, label, count]) => <a key={page} href={`#/${page}`} aria-current={view === page || (page === "runs" && view === "task") ? "page" : undefined} className={cn("nav-item", (view === page || (page === "runs" && view === "task")) && "nav-item-active")}><Icon className="size-4" /><span>{label}</span>{count > 0 && <span className="nav-count">{count}</span>}</a>)}
           <span className="nav-group">Infrastructure</span>
           {[["repositories", GitBranch, "Repositories"], ["agents", Bot, "Agents"], ["runners", Server, "Runners"]].map(([page,Icon,label]) => <a key={page} href={`#/${page}`} aria-current={view === page ? "page" : undefined} className={cn("nav-item", view === page && "nav-item-active")}><Icon className="size-4" /><span>{label}</span></a>)}
           <a href="#/settings" className={cn("nav-item settings-nav", ["settings", "workers"].includes(view) && "nav-item-active")} aria-current={view === "settings" ? "page" : undefined}><Settings className="size-4" /><span>Settings</span></a>
@@ -208,7 +217,7 @@ function App() {
 
       <main className="workshop min-w-0 flex-1">
         <div className="runtime-bar" role="status"><span><i className={connectedWorkers ? "runtime-online" : ""} />{statusError ? "Connection lost" : connectedWorkers ? "Connected" : "No runner online"}</span><span>{status.jobs.filter(job => job.state === "running").length} running</span><span>{status.jobs.filter(job => job.state === "queued").length} queued</span><span className="runtime-location">{({remote:"VM",kubernetes:"Kubernetes",local:"Local"}[status.onboarding?.selection?.host] || "Local")}</span></div>
-        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? (status.state_backend === "local" ? <AutomationsPage automations={status.automations || []} jobs={status.jobs} repositories={status.repositories} csrfToken={status.csrf_token} loaded={statusLoaded} error={statusError} onRefresh={() => statusLoader.current.refresh()} /> : <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} />) : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} <State value={job.state} compact /></span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><div className="inbox-actions"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><Button variant="outline" disabled={clearingInbox === inboxJob.id} onClick={() => clearInbox(inboxJob)}>{clearingInbox === inboxJob.id ? "Clearing…" : "Clear from inbox"}</Button></div><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
+        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "dashboard" ? <Dashboard jobs={status.jobs} workers={status.workers} automations={status.automations} loaded={statusLoaded} error={statusError} onNewRun={() => { setComposerOpen(true); window.location.hash = "/runs"; }} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/repositories">Repositories</a><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? (status.state_backend === "local" ? <AutomationsPage automations={status.automations || []} jobs={status.jobs} repositories={status.repositories} csrfToken={status.csrf_token} loaded={statusLoaded} error={statusError} onRefresh={() => statusLoader.current.refresh()} /> : <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} />) : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} <State value={job.state} compact /></span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><div className="inbox-actions"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><Button variant="outline" disabled={clearingInbox === inboxJob.id} onClick={() => clearInbox(inboxJob)}>{clearingInbox === inboxJob.id ? "Clearing…" : "Clear from inbox"}</Button></div><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
           <PageHeading title="Runs" description="Agent jobs across your repositories.">
             <div className="flex items-center gap-2">
               {!composerOpen && <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>}
@@ -222,8 +231,8 @@ function App() {
             <label className="run-search"><Search className="size-4" /><input aria-label="Search runs" placeholder="Search runs…" value={search} onChange={event => setSearch(event.target.value)} /></label>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter runs">
-                {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"]].map(([value, label]) => (
-                  <Button key={value} variant="ghost" size="sm" aria-pressed={filter === value} onClick={() => setFilter(value)} className={cn("text-xs!", filter === value && "bg-muted text-foreground")}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
+                {[["all", "All"], ["active", "Active"], ["pr_ready", "PR ready"], ["attention", "Needs attention"], ["failed", "Failed"], ["succeeded", "Succeeded"]].map(([value, label]) => (
+                  <Button key={value} variant="ghost" size="sm" aria-pressed={filter === value} onClick={() => { setFilter(value); window.location.hash = value === "all" ? "/runs" : `/runs?filter=${value}`; }} className={cn("text-xs!", filter === value && "bg-muted text-foreground")}>{label}<span className="text-muted-foreground">{counts[value]}</span></Button>
                 ))}
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">

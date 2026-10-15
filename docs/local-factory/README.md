@@ -119,3 +119,9 @@ The foreman owns only `machinist:needs-spec`, `machinist:ready`, and `machinist:
 ### Deliverables use pull requests
 
 Every requested file, including reports, documents, and HTML pages, is committed on the assigned task branch and delivered through its PR. Use existing repository paths, or `docs/reports/<task-name>.<extension>` when no convention exists. Document-only work follows Implement and independent Review; it does not require a production code change. Plain questions and health checks without a requested deliverable can still finish in Triage. Internal agent handoffs stay local and are not committed as deliverables.
+
+### Dashboard
+
+Dashboard is the default page and the first navigation item. The older `#/analytics` link opens it too. Current workload spans all dates: active jobs, PRs ready for review, and uncleared approvals, blockers or failures. Counts open matching run filters; entering Runs from another page clears an unrelated search.
+
+The 7/30-day activity chart counts jobs by creation day in your browser's timezone. Outcomes, recent jobs, timed execution and reported tokens use that same creation window. Current runner availability and schedules stay independent of the time window. Missing token usage is shown as unreported, without inferred costs.

@@ -22,3 +22,14 @@ test("factory navigation routes remain addressable", () => {
 test("removed workflow configuration routes return to runs",()=>{
  for(const hash of ["#/workflows","#/commands"]) assert.deepEqual(routeFromHash(hash),{view:"runs",jobID:""});
 });
+
+test("dashboard is the default page and analytics remains a compatible alias", () => {
+  for (const hash of ["", "#/", "#/dashboard", "#/analytics"]) assert.deepEqual(routeFromHash(hash), {view:"dashboard",jobID:""});
+});
+
+test("dashboard links open the exact run filter without accepting arbitrary filters", () => {
+  for (const filter of ["active", "attention", "pr_ready", "failed", "succeeded"]) {
+    assert.deepEqual(routeFromHash(`#/runs?filter=${filter}`),{view:"runs",jobID:"",filter});
+  }
+  assert.deepEqual(routeFromHash("#/runs?filter=unknown"),{view:"runs",jobID:""});
+});
