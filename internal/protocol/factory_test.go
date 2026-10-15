@@ -4,6 +4,8 @@ import "testing"
 
 func TestFactoryResultRejectsInvalidRoutingEvidence(t *testing.T) {
 	for _, body := range []string{
+		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"implement","labels":["bug"]}}`,
+		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"triage","labels":[" bad "]}}`,
 		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"implement","resolved":true}}`,
 		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"triage","resolved":true,"needs_spec":true}}`,
 		`{"outcome":"complete","summary":"ok","factory":{"version":2,"role":"triage"}}`,

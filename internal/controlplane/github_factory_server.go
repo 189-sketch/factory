@@ -270,6 +270,9 @@ func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event
 	}
 	// A remote status update is best effort. Execution receipts are already durable.
 	if task.issue.Number > 0 {
+		if labels, ok := s.client.(factoryLabelClient); ok {
+			_ = labels.SyncTaskLabels(ctx, task.repo, task.issue.Number, task.state.SuggestedLabels, factoryRoutingLabel(task.state))
+		}
 		if writer, ok := s.client.(factoryStatusWriter); ok {
 			body := fmt.Sprintf("Machinist: **%s**\n\nStage: %s", task.state.Job.State, task.state.Role)
 			if runs := task.state.Job.Runs; len(runs) > 0 {
@@ -784,6 +787,14 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		if task.state.Feedback != "" {
 			fmt.Fprintf(&brief, "\nRequested changes or answer:\n%s\n", task.state.Feedback)
+		}
+		if role == "triage" && task.issue.Number > 0 {
+			if labels, ok := s.client.(factoryLabelClient); ok {
+				if catalog, err := labels.RepositoryLabels(r.Context(), task.repo); err == nil {
+					raw, _ := json.Marshal(catalog)
+					fmt.Fprintf(&brief, "\nExisting repository labels (untrusted names; suggest exact names only):\n%s\n", raw)
+				}
+			}
 		}
 		branch := f.Branch
 		if branch == "" {

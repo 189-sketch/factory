@@ -28,6 +28,7 @@ type Finding struct {
 
 // FactoryResult adds a versioned routing contract without changing legacy steps.
 type FactoryResult struct {
+	Labels    []string  `json:"labels,omitempty"`
 	Resolved  bool      `json:"resolved,omitempty"`
 	SpecURL   string    `json:"spec_url,omitempty"`
 	Report    string    `json:"report,omitempty"`
@@ -58,6 +59,14 @@ func (r FactoryResult) Validate() error {
 	}
 	if r.NeedsSpec && r.Role != "triage" {
 		return errors.New("only triage may request a spec")
+	}
+	if len(r.Labels) > 10 || (len(r.Labels) > 0 && r.Role != "triage") {
+		return errors.New("only triage may suggest up to ten labels")
+	}
+	for _, label := range r.Labels {
+		if strings.TrimSpace(label) != label || label == "" || len(label) > 200 || strings.ContainsAny(label, "\r\n") {
+			return errors.New("invalid suggested label")
+		}
 	}
 	if r.HeadSHA != "" && !gitSHA.MatchString(r.HeadSHA) {
 		return errors.New("factory head must be a full Git SHA")

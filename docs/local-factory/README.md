@@ -108,3 +108,9 @@ silently resuming work while migrating away from comment-based persistence.
 
 Automatic CI/review follow-ups, merge polling, webhook relays, live streaming, and
 an automation editor remain outside this slice.
+
+### Issue labels
+
+For linked issues, Triage receives the existing repository label names and may suggest up to ten exact classification labels in `factory.labels`. The foreman validates those suggestions against the current catalog and adds matching labels through the GitHub App API. It never creates classification labels or removes existing human labels. Local tasks make no label requests.
+
+The foreman owns only `machinist:needs-spec`, `machinist:ready`, and `machinist:blocked`. It creates these on demand and replaces only these three labels as the route changes. Other `machinist:*` labels are preserved. Terminal tasks and PRs awaiting merge have no routing label. Label publication is best effort after local execution state is saved; a later task transition retries reconciliation. GitHub failures do not discard agent results.

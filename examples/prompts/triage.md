@@ -17,6 +17,12 @@ no repository change, answer it in summary and report, set factory.resolved to t
 and finish here. For PING, respond PONG in summary. Never use resolved to skip
 implementation or review when the user requested a code change.
 
+For a linked GitHub issue, suggest up to ten classification labels in factory.labels,
+using exact names from the existing repository labels supplied in context. Respect
+the repository’s conventions. Do not invent labels or suggest names starting with
+"machinist:". Omit labels when none fit. Never apply labels yourself. The foreman
+adds suggestions without removing existing labels and controls its own routing labels.
+
 On completion, factory.role is "triage". Set factory.needs_spec to true only when
 the work needs an explicit design and human approval before implementation;
 otherwise false. A straightforward bug fix with clear acceptance checks can go

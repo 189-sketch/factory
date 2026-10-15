@@ -31,13 +31,14 @@ type GitHubFactoryEvent struct {
 }
 
 type GitHubFactoryState struct {
-	Job            Job
-	LastEventID    int64
-	Role           string
-	Reports        map[string]string
-	PromptSnapshot string
-	PromptHash     string
-	Feedback       string
+	Job             Job
+	LastEventID     int64
+	Role            string
+	SuggestedLabels []string
+	Reports         map[string]string
+	PromptSnapshot  string
+	PromptHash      string
+	Feedback        string
 }
 
 func GitHubFactoryRunID(issueURL string, lastEventID int64, role string, repairRound int) string {
@@ -231,6 +232,7 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 	progress := s.Job.Workflow.Factory
 	switch s.Role {
 	case "triage":
+		s.SuggestedLabels = append([]string(nil), f.Labels...)
 		if f.Resolved {
 			s.Job.State = "succeeded"
 		} else if f.NeedsSpec {
