@@ -206,6 +206,11 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 		return runner.Result{}, "", err
 	}
 	if err = c.awaitResult(ctx, pod); err != nil {
+		// The init container has no credentials. Preserve its bounded diagnostics
+		// before cleanup removes the Pod, without collecting native auth or prompts.
+		if log, e := c.command(ctx, nil, 64<<10, "logs", pod, "-c", "prepare", "--tail=100"); e == nil {
+			_ = os.WriteFile(filepath.Join(directory, "prepare.log"), log, 0600)
+		}
 		return runner.Result{}, "", err
 	}
 	// Retrieve auth separately, never in result.json, event logs or public files.
@@ -365,6 +370,7 @@ func (c Connector) manifest(name string, readOnly bool, deadline int64) map[stri
 	}
 	prepare := container("prepare", "prepare")
 	agent := container("agent", "run")
+	agent["workingDir"] = SourceDirectory
 	agent["volumeMounts"] = append(agent["volumeMounts"].([]any), map[string]any{"name": "codex-auth", "mountPath": "/credentials", "readOnly": true})
 	agent["env"] = []any{map[string]string{"name": "HTTPS_PROXY", "value": c.Config.ProxyURL}, map[string]string{"name": "HTTP_PROXY", "value": c.Config.ProxyURL}, map[string]string{"name": "HOME", "value": "/home/agent"}, map[string]string{"name": "CODEX_HOME", "value": "/home/agent/.codex"}, map[string]string{"name": "GIT_CONFIG_GLOBAL", "value": "/dev/null"}, map[string]string{"name": "GIT_CONFIG_NOSYSTEM", "value": "1"}}
 	prepare["env"] = agent["env"]

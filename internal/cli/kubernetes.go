@@ -35,10 +35,10 @@ func newSandboxCommand(options *commandOptions) *cobra.Command {
 	root := &cobra.Command{Use: "sandbox", Hidden: true}
 	root.AddCommand(&cobra.Command{Use: "receive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return kuberunner.Receive(options.stdin, "/exchange") }})
 	root.AddCommand(&cobra.Command{Use: "prepare", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return kuberunner.Prepare(cmd.Context(), "/exchange", "/source")
+		return kuberunner.Prepare(cmd.Context(), "/exchange", kuberunner.SourceDirectory)
 	}})
 	root.AddCommand(&cobra.Command{Use: "run", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		return kuberunner.Sandbox(cmd.Context(), "/exchange", "/source", "/home/agent", "/credentials")
+		return kuberunner.Sandbox(cmd.Context(), "/exchange", kuberunner.SourceDirectory, "/home/agent", "/credentials")
 	}})
 	var allowed []string
 	proxy := &cobra.Command{Use: "proxy", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {

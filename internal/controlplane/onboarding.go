@@ -727,11 +727,11 @@ func (o *onboarding) finishHealth(id string, p protocol.Completion) bool {
 	}
 	var result runner.Result
 	if p.State == "succeeded" && p.ExitCode == 0 && json.Unmarshal(p.Result, &result) == nil && strings.TrimSpace(result.FinalMessage) == "PONG" {
-		h.result = setupCheck{"passed", "PONG. The VM worker verified its repository, GitHub credentials, and agent. No issue was created."}
+		h.result = setupCheck{"passed", "PONG. The runner verified its repository, GitHub connection, and agent. No issue was created."}
 	} else {
 		message := p.Error
 		if message == "" {
-			message = "The VM agent did not return PONG. Check its CLI sign-in and permissions."
+			message = "The runner did not return PONG. Check its CLI sign-in and permissions."
 		}
 		h.result = setupCheck{"failed", message}
 	}

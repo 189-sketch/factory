@@ -83,6 +83,9 @@ func TestJobKeepsAuthorityOutsideSandbox(t *testing.T) {
 		t.Fatal("unsafe lifecycle")
 	}
 	agent := pod["containers"].([]any)[0].(map[string]any)
+	if agent["workingDir"] != SourceDirectory || filepath.Dir(SourceDirectory) != "/source" {
+		t.Fatal("agent must use an init-created checkout inside the volume, not its root-owned mount")
+	}
 	if !strings.Contains(string(mustJSON(agent["volumeMounts"])), `"mountPath":"/source","name":"source","readOnly":true`) {
 		t.Fatal("review source is writable")
 	}

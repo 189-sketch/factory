@@ -22,6 +22,10 @@ import (
 const MaxBundle = 100 << 20
 const MaxLog = 10 << 20
 
+// The emptyDir mount itself is root-owned. Clone into a child created by the
+// non-root init container so Git's ownership check also works for the agent.
+const SourceDirectory = "/source/repository"
+
 type Request struct {
 	RunID          string                   `json:"run_id"`
 	JobID          string                   `json:"job_id"`
