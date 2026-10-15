@@ -133,7 +133,7 @@ func (o *onboarding) status(ctx context.Context) (map[string]any, error) {
 	agents := []map[string]any{}
 	for _, name := range []string{"codex", "claude"} {
 		_, err := exec.LookPath(name)
-		label := name
+		label := "Codex"
 		if name == "claude" {
 			label = "Claude Code"
 		}
