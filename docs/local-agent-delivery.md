@@ -1,6 +1,14 @@
 # How Machinist delivers work with your local agent
 
-Machinist runs your own coding agent, Codex or Claude Code, on a computer you
+> **Prerelease notice.** This guide describes the local factory preview from the
+> `codex/local-factory` branch in
+> [PR #514](https://github.com/owainlewis/machinist/pull/514). Until that PR is
+> merged, these instructions apply only to that preview. The features below,
+> including GitHub App sign-in, guided setup, the built-in Triage, Spec, Implement,
+> and Review flow, and **Check merge status**, are not on `main` yet. See
+> [Current setup on main](#current-setup-on-main) for how `main` works today.
+
+In the preview, Machinist runs your own coding agent, Codex or Claude Code, on a computer you
 control. It connects the repositories you choose through a GitHub App, keeps its
 internal working notes private, and delivers each task as one pull request that is
 reviewed independently and merged by a person.
@@ -71,3 +79,19 @@ same PR, for at most three repair rounds.
 Machinist never merges. When you are satisfied with the PR and its CI, merge it on
 GitHub yourself. **Check merge status** then confirms that the reviewed commit was
 the one merged before the task is marked complete.
+
+## Current setup on main
+
+Until PR #514 is merged, `main` works differently:
+
+- You build Machinist and run `machinist init`, which writes
+  `~/.machinist/config.toml` with commands such as `task-to-pr`. You run them with
+  `machinist run` or through configured workflows. See the
+  [README](../README.md#quick-start) and [workflows](workflows.md).
+- There is no GitHub App. GitHub access uses the GitHub CLI and Git credentials
+  you set up on the host. See [VM deployment](vm-deployment.md).
+- There is no built-in Triage, Spec, Implement, and Review flow and no **Check
+  merge status** button. You define your own commands and workflow steps, such as
+  the [staged example](../examples/workflows/staged/config.toml). The example
+  `task-to-pr` prompt opens one pull request, stops after three repair rounds, and
+  never merges.
