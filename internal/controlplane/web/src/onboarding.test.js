@@ -13,9 +13,11 @@ test("onboarding loads without mutation, shows failures, and keeps credentials o
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const requests = [];
   let connected = false;
+  let emptyRepositories = false;
   globalThis.fetch = async (url, options) => {
     requests.push({ url, options });
     if (url.endsWith("/github/start")) return { ok: false, status: 403, json: async () => ({ error: "Enable Device Flow in your GitHub App, then try again." }) };
+    if (url.endsWith("/repositories") && emptyRepositories) return { ok: true, json: async () => null };
     if (url.endsWith("/repositories")) return { ok: false, status: 403, json: async () => ({ error: "Repository access was denied. Check your GitHub App installation." }) };
     if (url.endsWith("/check")) return { ok: true, json: async () => ({ state: "failed", message: "Codex authentication failed. Sign in on your execution host." }) };
     return { ok: true, json: async () => ({ github: { configured: true, connected, account: "example" }, selection: connected ? { repository: "example/repo", agent: "codex", host: "local" } : {}, repositories: [{ full_name: "example/repo" }], agents: [{ id: "codex", name: "Codex", available: true }] }) };
@@ -40,6 +42,11 @@ test("onboarding loads without mutation, shows failures, and keeps credentials o
   await act(async () => button("Back").click());
   await act(async () => button("Refresh repositories").click());
   assert.match(document.querySelector('[role="alert"]').textContent, /Repository access was denied/);
+  emptyRepositories = true;
+  await act(async () => button("Refresh repositories").click());
+  assert.match(document.body.textContent, /No repositories available/);
+  assert.equal(document.querySelectorAll("select option").length, 1);
+  assert.equal(document.querySelector('[role="alert"]'), null);
   assert.ok(!requests.some(request => request.url === "/api/v1/jobs"));
 });
 function button(text) { const found = [...document.querySelectorAll("button")].find(item => item.textContent.trim() === text); assert.ok(found, text); return found; }
