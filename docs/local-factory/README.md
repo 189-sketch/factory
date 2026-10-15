@@ -1,89 +1,110 @@
-# Run the local software factory
+# Set up the local factory
 
-Machinist runs Triage, Spec, Implement, and Review through your own Codex or
-Claude Code CLI. Workers run on your host or a remote VM. GitHub holds the task,
-approvals, stage results, specification, and pull request.
+Machinist connects GitHub to Codex or Claude Code running on your computer or VM.
+There is no Machinist cloud account and no hosted agent execution.
 
-## Setup
+## First run
 
-Run `just build` and `./bin/machinist init`. Existing configuration is preserved.
-For an existing installation, copy the factory workflow and specialist commands
-from `examples/config.toml`, then set `[server] state = "github"` and configure
-`[github.repositories]` with logical aliases mapped to `owner/repo`.
-Install the four prompt files from `examples/prompts` beside the definition.
+```sh
+just build
+./bin/machinist init
+./bin/machinist start
+```
 
-Configure matching repository aliases and paths in the worker configuration.
-Use `codex` or `claude` for writable stages and `codex-review` or `claude-review`
-for Review. See `examples/worker.toml` for executor restrictions. The worker must
-support the entire route. Both foreman and workers need working `gh` and Git
-authentication for the configured repository.
+Open the printed local URL. Setup guides you through four steps:
 
-Start the foreman with `machinist start --config=...` and workers with
-`machinist worker start --config=...`. Use one foreman per repository and a unique
-worker name on each host. The foreman listens on loopback; use the existing VM
-deployment guide for a remote worker connection.
+1. **GitHub:** sign in with the Machinist Local GitHub App and install it on the
+   repositories you choose. No token paste or client secret is needed.
+2. **Repository:** choose an accessible repository. Machinist can clone it or
+   verify an existing checkout. It checks the App permissions and your write access.
+3. **Agent:** choose Codex or Claude Code and this computer or a remote VM.
+4. **Verify:** run a real PING with no GitHub issue, commit, or PR. Setup completes
+   only after it returns PONG. Local workers start automatically after setup.
 
-## Follow a task
+Install Git, GitHub CLI, and the selected coding CLI first. Sign in to the coding
+CLI on its execution host. Leave model selection unset to use the CLI default.
+The CLI needs a writable runtime directory. If launching inside another agent's
+restricted environment, use a separate writable provider runtime or start
+Machinist from your normal terminal.
 
-New task creates a GitHub issue or adopts an existing issue URL in the selected
-repository. Adopted issues receive the `machinist:task` label. Repeating intake
-for the same issue reuses its task.
+Settings lets you return to setup. Changed repository/agent selections invalidate
+the earlier check. Agent prompt edits stay in Machinist and never become issue
+comments or commits just because you pressed Save.
 
-1. Triage researches requirements and chooses whether a specification is needed.
-   Questions and health checks needing no repository changes can finish here.
-   For example, PING returns PONG without creating an implementation PR.
-2. Spec pushes a tracked document to the task branch and opens one draft PR.
-   Approve that revision through Inbox. Open spec takes you to GitHub.
-3. Implement reuses the task branch and PR, runs checks, pushes the result, and
-   marks the PR ready. Simple tasks skip Spec.
-4. Review uses a detached snapshot of the recorded commit and host-collected
-   PR metadata, diff, checks, and statuses. Findings return to Implement on the
-   same PR, for at most three repair rounds.
+## GitHub App ownership
 
-The interface shows short summaries and GitHub links. It does not store or show
-local `triage.md`, `spec.md`, or `implementation.md` artifacts. A specification
-can exist in a temporary working checkout while being authored, but its published
-GitHub revision is canonical.
+The default public App is [Machinist Local](https://github.com/apps/machinist-local).
+Its public client ID is included in Machinist. Device Flow is enabled. Clients do
+not receive the App owner's private key or a shared client secret.
 
-An accepted review waits for human merge. Open PR shows the checks and review
-on GitHub. Check merge status completes the task only when GitHub confirms that
-the reviewed head was merged. Machinist never merges automatically.
+GitHub requires the App owner to generate a private key once before its first
+installation. That is an owner administration step, not a key that ordinary users
+supply to Machinist. Keep it private and outside repositories. To use a different
+App, expand **Use your own GitHub App**, enter its public client ID and installation
+URL, and enable Device Flow in GitHub's App settings.
 
-## State and recovery
+Required repository permissions are Contents, Issues, and Pull requests read/write,
+Checks and Commit statuses read, plus mandatory Metadata read. No organization
+administration, repository administration, secrets, or workflow editing permission
+is requested. Permissions are still subject to repository rules and organization
+approval.
 
-The issue and trusted journal comments are the durable workflow record. Only
-comments authored by the foreman's authenticated GitHub account are reduced.
-Keep that identity stable. Run one foreman per repository; this journal is not
-a distributed lock for multiple foremen.
+App access tokens and refresh tokens are saved locally in a private directory.
+Local agent Git/gh processes receive the refreshed token through their environment,
+with a Git credential helper limited to the selected repository. Tokens are never
+written to remote URLs, executor arguments, or issue comments.
 
-Agent prompts are edited in Agents and saved to `.machinist/agents/{role}.md`
-in GitHub using commit-SHA concurrency checks. Bundled prompts are the fallback
-when that file does not exist. Each stage journals its prompt snapshot before
-execution. A later stage uses the then-current prompt.
+## Remote VM
 
-Coding CLIs need writable runtime directories and a model supported by the signed-in
-account. A worker launched inside another agent sandbox may inherit read-only
-restrictions on its usual CLI home. Start it from your normal terminal, or configure
-a separate writable CLI runtime using the provider's supported settings. Leave the
-model unset to use the CLI default. Recognized startup failures show recovery
-instructions without publishing raw worker output.
+Choose **Remote VM** during setup. Install Machinist, Git, GitHub CLI, and the coding
+CLI on the VM, then authenticate GitHub and the provider there. Download the private
+worker setup script from Machinist. It contains a worker connection credential;
+keep it private and remove the downloaded copy when no longer needed.
 
-Machine paths, credentials, executors, configuration, logs, and working checkouts
-stay on the host. Connection caches and leases are disposable. Restart rebuilds
-tasks from GitHub and interrupts previously running attempts rather than replaying
-external effects. Before retrying an interruption, confirm the old process stopped.
-Published task branches allow another worker to reconstruct a checkout.
+Run the displayed SSH tunnel command **on the VM** to reach this computer. The
+foreman host must be reachable over SSH with an appropriate account. The forwarded
+VM endpoint is `http://127.0.0.1:17341`. Machinist remains bound to loopback and does
+not enable SSH or provision a VM. Run the setup script on the VM to create private
+worker configuration, clone the repository using VM credentials, and start the
+worker. Then run verification in the browser. It checks VM repository identity,
+Git/gh write access, and a real read-only agent PONG before allowing setup to finish.
 
-Review requires a genuinely restricted executor. `read_only` declares worker
-capability; it does not itself sandbox an arbitrary command. Evidence is bounded;
-oversized diffs and unavailable checks block rather than silently passing.
+The VM does not receive the local GitHub App token. It uses its own host credentials.
+If SSH is initiated from this computer instead, use reverse forwarding to the VM
+rather than copying the displayed VM-to-foreman command unchanged.
 
-The default GitHub factory does not open a local workflow database or publish
-artifact snapshots. Legacy direct and sequence modes retain their existing SQLite
-and artifact behavior when selected explicitly. Existing SQLite tasks are not
-automatically migrated into GitHub issues.
+## Tasks and GitHub updates
 
-This slice does not include automatic CI follow-ups, GitHub review-event routing,
-merge polling, live output streaming, server pagination, or an automation editor.
-The Automations page describes the configured behavior without implying these
-features exist. Use New task for the GitHub factory.
+A plain request creates a local task. Paste an existing issue URL to connect it to
+GitHub. PING and other informational requests can finish in Triage. Code work runs
+through optional Spec and approval, Implement, and independent Review. Published
+specifications and implementation use one branch and PR.
+
+GitHub owns issues, published specs, code, PRs, and review. Machinist's local SQLite
+database owns scheduling, prompt snapshots, attempts, approvals, feedback, and
+receipts. Linked issues receive one concise status comment updated in place.
+Internal prompts, JSON events, logs, and handoffs are never posted to issues.
+There is no local specification viewer or Markdown artifact list in factory tasks.
+
+Review findings return to the same PR for at most three repair rounds. Inspect CI
+and merge on GitHub when ready. **Check merge status** verifies that the reviewed
+head was merged before marking a code task complete. Machinist never merges itself.
+
+## Recovery and compatibility
+
+Back up the factory database and machine configuration. Restart preserves local
+history and interrupts previously running attempts. Confirm the old process stopped
+before retrying. Published branches allow workspace recovery without provider-session
+memory. One foreman owns each local database.
+
+New installations use `server.state = "factory"`; the older `github` value remains
+an alias. Runtime files live beside the worker token, normally under
+`~/.machinist/server`. Existing source definitions and credentials are preserved by
+`init`. Legacy direct/sequence modes remain available explicitly.
+
+Old GitHub journal comments are not deleted or imported automatically. They remain
+historical. Re-adopt an issue explicitly to begin a new local task. This avoids
+silently resuming work while migrating away from comment-based persistence.
+
+Automatic CI/review follow-ups, merge polling, webhook relays, live streaming, and
+an automation editor remain outside this slice.

@@ -533,13 +533,13 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 }
 
 func applyServerDefaults(server Server) (Server, error) {
-	if server.State != "" && server.State != "sqlite" && server.State != "github" {
-		return Server{}, errors.New("server state must be github or sqlite")
+	if server.State != "" && server.State != "sqlite" && server.State != "github" && server.State != "factory" {
+		return Server{}, errors.New("server state must be factory or sqlite (github is a legacy alias)")
 	}
 	if server.Listen == "" {
 		server.Listen = "127.0.0.1:7331"
 	}
-	if server.State == "github" {
+	if server.State == "github" || server.State == "factory" {
 		server.Database = ""
 	} else if server.Database == "" {
 		home, err := os.UserHomeDir()

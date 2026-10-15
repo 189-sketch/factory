@@ -1,6 +1,6 @@
 [server]
 listen = "127.0.0.1:7331"
-state = "github"
+state = "factory"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
 

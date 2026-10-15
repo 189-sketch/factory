@@ -93,6 +93,19 @@ func githubFactoryTestServer(t *testing.T, client *memoryFactoryGitHub) *GitHubF
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
+	return server
+}
+func restartFactoryTestServer(t *testing.T, old *GitHubFactoryServer, client GitHubFactoryClient) *GitHubFactoryServer {
+	t.Helper()
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, err := newGitHubFactoryServer(old.definitionPath, "secret", 1, old.repositories, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
 	return server
 }
 func factoryHTTP(t *testing.T, s *GitHubFactoryServer, method, path string, input any, want int) []byte {
@@ -202,7 +215,7 @@ func TestGitHubFactoryHTTPFourRolesAndReconstruction(t *testing.T) {
 	if job = factoryJob(t, s, id); job.State != "awaiting_merge" {
 		t.Fatalf("state %s", job.State)
 	}
-	fresh := githubFactoryTestServer(t, client)
+	fresh := restartFactoryTestServer(t, s, client)
 	if job = factoryJob(t, fresh, id); job.State != "awaiting_merge" || job.Workflow.Factory.HeadSHA != metadata.HeadSHA {
 		t.Fatalf("reconstructed %#v", job)
 	}
@@ -218,7 +231,7 @@ func TestGitHubFactoryRestartInterruptsWithoutReplay(t *testing.T) {
 	if factoryPoll(t, s) == nil {
 		t.Fatal("missing assignment")
 	}
-	fresh := githubFactoryTestServer(t, client)
+	fresh := restartFactoryTestServer(t, s, client)
 	if job := factoryJob(t, fresh, id); job.State != "interrupted" {
 		t.Fatalf("state %s", job.State)
 	}
@@ -226,23 +239,26 @@ func TestGitHubFactoryRestartInterruptsWithoutReplay(t *testing.T) {
 		t.Fatal("interrupted task replayed")
 	}
 }
-func TestGitHubFactoryCompletionPublicationRetry(t *testing.T) {
+func TestLocalFactoryCompletionReceiptRetry(t *testing.T) {
 	client := newMemoryFactoryGitHub()
 	s := githubFactoryTestServer(t, client)
 	id := factorySubmit(t, s)
 	run := factoryPoll(t, s)
-	client.uncertainPost = true
-	completion := factoryCompletion(run, protocol.FactoryResult{})
-	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 409)
-	count := len(client.comments[1])
+	completion := factoryCompletion(run, protocol.FactoryResult{Resolved: true, Report: "PONG"})
 	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
-	if len(client.comments[1]) != count {
-		t.Fatal("retried completion appended a duplicate")
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	fresh := restartFactoryTestServer(t, s, client)
+	factoryHTTP(t, fresh, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	if job := factoryJob(t, fresh, id); len(job.Runs) != 1 || job.State != "succeeded" {
+		t.Fatalf("job %#v", job)
 	}
-	if job := factoryJob(t, s, id); job.State != "queued" || job.Runs[len(job.Runs)-1].Command != "implement" {
-		t.Fatalf("state %#v", job)
+	completion.LeaseToken = "wrong"
+	factoryHTTP(t, fresh, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 409)
+	if client.creates != 0 || client.adopts != 0 || len(client.comments) != 0 {
+		t.Fatal("local task mutated GitHub")
 	}
 }
+
 func TestGitHubFactoryAdoptsTicketAndRejectsSourceMismatch(t *testing.T) {
 	client := newMemoryFactoryGitHub()
 	client.issues[42] = GitHubIssue{Number: 42, Title: "Existing ticket", Body: "Ticket requirements", HTMLURL: "https://github.com/owner/repo/issues/42", State: "open", CreatedAt: time.Now()}
@@ -255,111 +271,25 @@ func TestGitHubFactoryAdoptsTicketAndRejectsSourceMismatch(t *testing.T) {
 	input["source_url"] = "https://github.com/owner/repo/issues/42"
 	factoryHTTP(t, s, "POST", "/api/v1/jobs", input, 201)
 	factoryHTTP(t, s, "POST", "/api/v1/jobs", input, 201)
-	if client.creates != 0 || len(client.comments[42]) != 1 {
+	if client.creates != 0 || client.adopts != 0 || len(client.comments[42]) != 0 {
 		t.Fatal("adoption duplicated task")
 	}
 }
-func TestGitHubFactoryUnavailableFailsClosed(t *testing.T) {
+func TestLocalFactoryWorksWithoutGitHub(t *testing.T) {
 	client := newMemoryFactoryGitHub()
-	s := githubFactoryTestServer(t, client)
-	factorySubmit(t, s)
 	client.offline = true
-	s.loaded = time.Time{}
-	p := protocol.PollRequest{InstanceID: "worker-instance", Name: "worker", Factory: true, Workflows: true, Reviews: true}
-	factoryHTTP(t, s, "POST", "/api/v1/workers/poll", p, 502)
-	if len(s.leases) != 0 {
-		t.Fatal("offline GitHub allowed execution")
-	}
-	if _, err := newGitHubFactoryServer(s.definitionPath, "secret", 1, map[string]string{"repo": "owner/repo"}, client); err == nil {
-		t.Fatal("startup accepted unavailable authenticated GitHub")
-	}
-}
-
-type blockingFactoryComments struct {
-	GitHubFactoryClient
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (c *blockingFactoryComments) Comments(ctx context.Context, repo string, number int) ([]GitHubComment, error) {
-	select {
-	case c.entered <- struct{}{}:
-	default:
-	}
-	select {
-	case <-c.release:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	return c.GitHubFactoryClient.Comments(ctx, repo, number)
-}
-
-func TestGitHubFactoryHeartbeatDuringBlockedGitHubRefresh(t *testing.T) {
-	client := newMemoryFactoryGitHub()
 	s := githubFactoryTestServer(t, client)
 	id := factorySubmit(t, s)
 	run := factoryPoll(t, s)
-	if run == nil {
-		t.Fatal("no run")
+	if run == nil || run.Factory.IssueURL != "" || run.Task.SourceURL != "" {
+		t.Fatalf("run %#v", run)
 	}
-	// Make the old liveness timestamps expire while GitHub is blocked. A fresh
-	// heartbeat must renew them before refresh makes its interruption decision.
-	s.liveMu.Lock()
-	s.leases[run.ID].last = time.Now().Add(-2 * leaseDuration)
-	worker := s.workers["worker-instance"]
-	worker.LastSeenAt = time.Now().Add(-2 * workerAvailabilityWindow)
-	s.workers["worker-instance"] = worker
-	s.liveMu.Unlock()
-	blocked := &blockingFactoryComments{GitHubFactoryClient: client, entered: make(chan struct{}, 1), release: make(chan struct{})}
-	s.client = blocked
-	s.loaded = time.Time{}
-	statusDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		req := httptest.NewRequest("GET", "/api/v1/status", nil)
-		out := httptest.NewRecorder()
-		s.Handler().ServeHTTP(out, req)
-		statusDone <- out
-	}()
-	select {
-	case <-blocked.entered:
-	case <-time.After(time.Second):
-		t.Fatal("refresh did not reach GitHub")
+	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: "PONG"})
+	if factoryJob(t, s, id).State != "succeeded" {
+		t.Fatal("offline task failed")
 	}
-	heartbeatDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		body, _ := json.Marshal(protocol.Heartbeat{InstanceID: "worker-instance", LeaseToken: run.LeaseToken})
-		req := httptest.NewRequest("POST", "/api/v1/runs/"+run.ID+"/heartbeat", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer secret")
-		out := httptest.NewRecorder()
-		s.Handler().ServeHTTP(out, req)
-		heartbeatDone <- out
-	}()
-	select {
-	case result := <-heartbeatDone:
-		if result.Code != 204 {
-			t.Fatalf("heartbeat status %d: %s", result.Code, result.Body.String())
-		}
-	case <-time.After(time.Second):
-		close(blocked.release)
-		t.Fatal("heartbeat blocked behind GitHub request")
-	}
-	if time.Since(s.liveWorkers()["worker-instance"].LastSeenAt) > time.Second {
-		t.Fatal("heartbeat did not refresh worker liveness")
-	}
-	close(blocked.release)
-	select {
-	case result := <-statusDone:
-		if result.Code != 200 {
-			t.Fatalf("status %d: %s", result.Code, result.Body.String())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("refresh stuck")
-	}
-	if job := factoryJob(t, s, id); job.State != "running" {
-		t.Fatalf("healthy run interrupted: %s", job.State)
-	}
-	if lease := s.liveLease(run.ID); lease == nil || time.Since(lease.last) > time.Second {
-		t.Fatal("heartbeat did not preserve run lease")
+	if client.creates != 0 || client.adopts != 0 || len(client.comments) != 0 {
+		t.Fatal("local task wrote to GitHub")
 	}
 }
 
@@ -384,8 +314,47 @@ func TestGitHubFactoryAnswersWithoutStartingImplementation(t *testing.T) {
 	if next := factoryPoll(t, s); next != nil {
 		t.Fatal("informational request started implementation")
 	}
-	fresh := githubFactoryTestServer(t, client)
+	fresh := restartFactoryTestServer(t, s, client)
 	if factoryJob(t, fresh, id).State != "succeeded" {
 		t.Fatal("answer lost on restart")
+	}
+}
+
+func TestLinkedIssueRefreshesRequirementsAndClosedStateBeforeDispatch(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprint(closed), func(t *testing.T) {
+			client := newMemoryFactoryGitHub()
+			client.issues[9] = GitHubIssue{Number: 9, HTMLURL: "https://github.com/owner/repo/issues/9", Title: "Original", Body: "Old requirements", State: "open"}
+			s := githubFactoryTestServer(t, client)
+			factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"workflow": "factory", "repository": "repo", "source_url": "https://github.com/owner/repo/issues/9"}, 201)
+			issue := client.issues[9]
+			issue.Body = "Updated requirements"
+			issue.Title = "Updated task"
+			if closed {
+				issue.State = "closed"
+			}
+			client.issues[9] = issue
+			run := factoryPoll(t, s)
+			if closed {
+				if run != nil {
+					t.Fatal("closed issue dispatched")
+				}
+				return
+			}
+			if run == nil || run.Task.Spec != "Updated requirements" || run.Task.Title != "Updated task" {
+				t.Fatalf("stale task: %#v", run)
+			}
+		})
+	}
+}
+func TestLocalTasksHaveDistinctBranches(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	factorySubmit(t, s)
+	first := factoryPoll(t, s)
+	factoryFinish(t, s, first, protocol.FactoryResult{Resolved: true})
+	factorySubmit(t, s)
+	second := factoryPoll(t, s)
+	if first.Factory.Branch == second.Factory.Branch || strings.Contains(first.Factory.Branch, "issue-0") {
+		t.Fatal("local requests share a task branch")
 	}
 }

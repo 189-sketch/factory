@@ -3,6 +3,7 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
+	HealthChecks      bool                `json:"health_checks,omitempty"`
 	Factory           bool                `json:"factory,omitempty"`
 	ReadOnlyExecutors []string            `json:"read_only_executors,omitempty"`
 	SharedOutputs     bool                `json:"shared_outputs,omitempty"`
@@ -21,23 +22,25 @@ type PollResponse struct {
 }
 
 type RunSpec struct {
-	Factory         *FactoryContext     `json:"factory,omitempty"`
-	Revision        *Revision           `json:"revision,omitempty"`
-	Task            *Task               `json:"task,omitempty"`
-	Inputs          map[string]Artifact `json:"inputs,omitempty"`
-	RequiredOutputs []string            `json:"required_outputs,omitempty"`
-	ArtifactLimits  *ArtifactLimits     `json:"artifact_limits,omitempty"`
-	Workflow        bool                `json:"workflow,omitempty"`
-	ID              string              `json:"id"`
-	JobID           string              `json:"job_id"`
-	Command         string              `json:"command"`
-	CommandHash     string              `json:"command_hash"`
-	Executor        string              `json:"executor"`
-	Model           string              `json:"model,omitempty"`
-	Repository      string              `json:"repository"`
-	RenderedPrompt  string              `json:"rendered_prompt"`
-	TimeoutMillis   int64               `json:"timeout_millis"`
-	LeaseToken      string              `json:"lease_token"`
+	HealthCheck      bool                `json:"health_check,omitempty"`
+	GitHubRepository string              `json:"github_repository,omitempty"`
+	Factory          *FactoryContext     `json:"factory,omitempty"`
+	Revision         *Revision           `json:"revision,omitempty"`
+	Task             *Task               `json:"task,omitempty"`
+	Inputs           map[string]Artifact `json:"inputs,omitempty"`
+	RequiredOutputs  []string            `json:"required_outputs,omitempty"`
+	ArtifactLimits   *ArtifactLimits     `json:"artifact_limits,omitempty"`
+	Workflow         bool                `json:"workflow,omitempty"`
+	ID               string              `json:"id"`
+	JobID            string              `json:"job_id"`
+	Command          string              `json:"command"`
+	CommandHash      string              `json:"command_hash"`
+	Executor         string              `json:"executor"`
+	Model            string              `json:"model,omitempty"`
+	Repository       string              `json:"repository"`
+	RenderedPrompt   string              `json:"rendered_prompt"`
+	TimeoutMillis    int64               `json:"timeout_millis"`
+	LeaseToken       string              `json:"lease_token"`
 }
 
 type Heartbeat struct {

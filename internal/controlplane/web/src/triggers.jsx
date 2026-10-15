@@ -7,7 +7,7 @@ import { triggerHealthTone, triggerView } from "@/trigger-state";
 
 export function TriggersPage({ triggers = [], loaded, error, stateBackend }) {
   return <Page title="Automations">
-    {stateBackend === "github" && <p className="max-w-2xl text-sm leading-6 text-muted-foreground">GitHub is the task journal. Issue comments hold stage reports, decisions, and handoffs. Local and remote workers execute the agents. Configured intake and schedules appear below when enabled.</p>}
+    {["github", "local"].includes(stateBackend) && <p className="max-w-2xl text-sm leading-6 text-muted-foreground">Connect GitHub issues and schedules to your local or remote agents. Specs and pull requests stay on GitHub. Internal execution state stays on the execution host.</p>}
     {error && <Failure value={error} />}
     {!loaded && !error ? <Loading /> : loaded && (triggers.length ? <div className="grid gap-3">{triggers.map((trigger) => <TriggerCard key={trigger.identity} trigger={trigger} />)}</div> : <Empty />)}
   </Page>;

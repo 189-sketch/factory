@@ -88,7 +88,7 @@ const specialistRoles = [
 export function AgentsPage({ csrfToken, repositories = [], stateBackend }) {
   const [repository, setRepository] = useState("");
   const selectedRepository = repositories.includes(repository) ? repository : repositories[0] || "";
-  const definitions = useDefinitions(stateBackend === "github" ? selectedRepository : "");
+  const definitions = useDefinitions(["github", "local"].includes(stateBackend) ? selectedRepository : "");
   const [selected, setSelected] = useState("triage");
   const [draft, setDraft] = useState(null);
   const [savedHashes, setSavedHashes] = useState({});
@@ -99,17 +99,17 @@ export function AgentsPage({ csrfToken, repositories = [], stateBackend }) {
   async function savePrompt() {
     setSaveState("Saving…");
     try {
-      const response = await fetch(`/api/v1/factory/agents/${selected}`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": csrfToken }, body: JSON.stringify({ prompt: draft ?? savedPrompts[selected] ?? command?.prompt ?? "", expected_hash: savedHashes[selected] ?? command?.hash ?? "", ...(stateBackend === "github" ? { repository: selectedRepository } : {}) }) });
+      const response = await fetch(`/api/v1/factory/agents/${selected}`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": csrfToken }, body: JSON.stringify({ prompt: draft ?? savedPrompts[selected] ?? command?.prompt ?? "", expected_hash: savedHashes[selected] ?? command?.hash ?? "", ...(["github", "local"].includes(stateBackend) ? { repository: selectedRepository } : {}) }) });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(response.status === 409 ? "This prompt changed elsewhere. Reload Agents before saving your changes." : body.error || `Unable to save prompt (${response.status})`);
       setSavedPrompts(current => ({ ...current, [selected]: draft ?? command?.prompt ?? "" }));
       setSavedHashes(current => ({ ...current, [selected]: body.hash || body.command?.hash || command?.hash }));
       setDraft(null);
-      setSaveState(stateBackend === "github" ? "Saved in GitHub. Future stage attempts use this version." : "Saved. Future attempts use this version.");
+      setSaveState(["github", "local"].includes(stateBackend) ? "Saved in GitHub. Future stage attempts use this version." : "Saved. Future attempts use this version.");
     } catch (error) { setSaveState(error.message); }
   }
   return <Page title="Agents" description="Four specialists. One task, one workspace, one pull request.">
-    {stateBackend === "github" && <label className="block max-w-sm"><span className="field-label">Repository</span><select className="field-control" value={selectedRepository} onChange={event => { setRepository(event.target.value); setDraft(null); setSavedHashes({}); setSavedPrompts({}); setSaveState(""); }}>{!repositories.length && <option value="">No repositories configured</option>}{repositories.map(name => <option key={name}>{name}</option>)}</select></label>}
+    {["github", "local"].includes(stateBackend) && <label className="block max-w-sm"><span className="field-label">Repository</span><select className="field-control" value={selectedRepository} onChange={event => { setRepository(event.target.value); setDraft(null); setSavedHashes({}); setSavedPrompts({}); setSaveState(""); }}>{!repositories.length && <option value="">No repositories configured</option>}{repositories.map(name => <option key={name}>{name}</option>)}</select></label>}
     {definitions.loading ? <Loading /> : definitions.error ? <Failure value={definitions.error} /> : <div className="agent-layout">
       <section className="agent-list" aria-label="Factory agents">{specialistRoles.map(([name, purpose]) => <button key={name} className={`agent-row ${selected === name ? "agent-row-selected" : ""}`} onClick={() => { setSelected(name); setDraft(null); setSaveState(""); }} aria-pressed={selected === name}><span className="text-sm font-semibold">{displayName(name)}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{purpose}</span><span className="mt-3 block text-xs text-muted-foreground">{definitions.value.commands.find(item => item.name === name)?.executor || "Not configured"}</span></button>)}</section>
       <section className="agent-detail min-w-0"><header className="mb-6"><h2 className="text-lg font-semibold">{displayName(selected)}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{role[1]}</p></header><Tabs key={selected} label={`${displayName(selected)} information`} items={[

@@ -185,3 +185,38 @@ a { text-underline-offset: 3px; }
  .factory-progress { gap: 12px 16px; }
  .factory-task-header { margin-bottom: 24px; }
 }
+
+.onboarding-page { max-width: 760px; margin: 0 auto; padding: 56px 36px; }
+.onboarding-page h1, .settings-connection-link h1 { font-size: 28px; font-weight: 650; letter-spacing: -.025em; }
+.onboarding-page header > p { margin-top: 10px; color: var(--muted-foreground); line-height: 1.7; max-width: 58ch; }
+.onboarding-steps { display: flex; gap: 24px; padding: 32px 0; margin-top: 12px; border-bottom: 1px solid var(--border); list-style: none; }
+.onboarding-steps li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted-foreground); }
+.onboarding-steps li > span { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--border); border-radius: 50%; font-variant-numeric: tabular-nums; }
+.onboarding-steps [aria-current="step"] { color: var(--primary); font-weight: 650; }
+.onboarding-steps [aria-current="step"] > span { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.onboarding-content { padding-top: 32px; }
+.onboarding-content h2 { font-size: 22px; font-weight: 600; margin: 12px 0; letter-spacing: -.02em; }
+.onboarding-content p { line-height: 1.7; font-size: 14px; color: var(--muted-foreground); max-width: 62ch; margin-bottom: 24px; }
+.onboarding-content form { display: grid; gap: 22px; margin-top: 28px; }
+.onboarding-content label:not(.onboarding-choice) { display: grid; gap: 8px; font-size: 13px; font-weight: 550; }
+.onboarding-content details { margin-top: 24px; font-size: 13px; }
+.onboarding-content summary { cursor: pointer; color: var(--muted-foreground); }
+.onboarding-content a, .settings-connection-link a { color: var(--primary); text-decoration: underline; text-underline-offset: 4px; }
+.onboarding-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 24px; }
+.onboarding-content fieldset { display: grid; gap: 8px; }
+.onboarding-content legend { font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+.onboarding-choice { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 14px; cursor: pointer; }
+.onboarding-choice input { accent-color: var(--primary); }
+.onboarding-choice small { display: block; color: var(--muted-foreground); margin-top: 4px; font-size: 12px; }
+.onboarding-summary { display: grid; grid-template-columns: 100px 1fr; row-gap: 16px; font-size: 14px; padding: 24px 0; border-block: 1px solid var(--border); margin: 28px 0; }
+.onboarding-summary dt { color: var(--muted-foreground); }
+.onboarding-summary dd { overflow-wrap: anywhere; }
+.onboarding-confirmed { display: flex; align-items: center; gap: 8px; }
+.onboarding-error { margin-top: 24px; padding: 14px 16px; border: 1px solid var(--danger); color: var(--danger); font-size: 14px; line-height: 1.7; }
+.device-authorization { margin: 24px 0; display: grid; justify-items: start; gap: 16px; }
+.device-authorization > span { font-size: 13px; color: var(--muted-foreground); }
+.device-authorization code { font-size: 30px; letter-spacing: .08em; font-variant-numeric: tabular-nums; user-select: all; }
+.onboarding-link { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
+.settings-connection-link { margin: 32px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+@media (max-width: 640px) { .onboarding-page { padding: 32px 20px; } .onboarding-steps { gap: 12px; flex-wrap: wrap; } .onboarding-steps li { font-size: 11px; } .onboarding-actions > button { flex-grow: 1; } .settings-connection-link { margin: 20px; flex-wrap: wrap; } }
+.onboarding-command { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; background: var(--muted); font-size: 12px; line-height: 1.7; margin: 16px 0; }

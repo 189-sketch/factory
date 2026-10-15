@@ -62,6 +62,11 @@ Run it directly:
 ./bin/machinist run --command=task-to-pr --repo=/path/to/repo --prompt="Complete https://github.com/owner/repo/issues/42"
 ```
 
+For guided setup, run `./bin/machinist start` and open the printed local URL.
+Connect GitHub, choose a repository and local or VM agent, then verify it with PING.
+No TOML editing or GitHub issue is needed for the connection check. See the
+[onboarding guide](docs/local-factory/README.md).
+
 ## How execution works
 
 For the four-specialist pipeline and its Warp-style Inbox, Runs, Agents, and

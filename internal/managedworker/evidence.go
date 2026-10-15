@@ -21,6 +21,7 @@ func repositoryCommand(ctx context.Context, directory string) evidenceCommand {
 		defer cancel()
 		command := exec.CommandContext(checkContext, program, args...)
 		command.Dir = directory
+		command.Env = commandEnvironment(checkContext)
 		var buffer evidenceBuffer
 		command.Stdout = &buffer
 		command.Stderr = &buffer

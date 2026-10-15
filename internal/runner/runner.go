@@ -38,6 +38,7 @@ const (
 )
 
 type Options struct {
+	Environment    []string
 	ReviewEvidence string
 	Factory        *protocol.FactoryContext
 	Revision       *protocol.Revision
@@ -203,7 +204,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
-	command.Env = append(sanitizedEnvironment(os.Environ()), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	command.Env = append(mergeEnvironment(sanitizedEnvironment(os.Environ()), options.Environment), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
 		body, err := json.Marshal(options.Revision)
@@ -785,4 +786,37 @@ func randomID(prefix string, bytes int) (string, error) {
 		return "", fmt.Errorf("generate %s ID: %w", prefix, err)
 	}
 	return prefix + "_" + hex.EncodeToString(buffer), nil
+}
+
+// mergeEnvironment applies only supported process credential settings, once per key.
+func mergeEnvironment(base, overrides []string) []string {
+	allowed := func(name string) bool {
+		switch name {
+		case "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "MACHINIST_GITHUB_REPOSITORY", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_COUNT":
+			return true
+		}
+		return strings.HasPrefix(name, "GIT_CONFIG_KEY_") || strings.HasPrefix(name, "GIT_CONFIG_VALUE_")
+	}
+	values := map[string]string{}
+	order := []string{}
+	for index, list := range [][]string{base, overrides} {
+		for _, entry := range list {
+			name, _, ok := strings.Cut(entry, "=")
+			if !ok {
+				continue
+			}
+			if index == 1 && !allowed(name) {
+				continue
+			}
+			if _, exists := values[name]; !exists {
+				order = append(order, name)
+			}
+			values[name] = entry
+		}
+	}
+	result := make([]string, 0, len(order))
+	for _, name := range order {
+		result = append(result, values[name])
+	}
+	return result
 }

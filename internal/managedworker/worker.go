@@ -20,13 +20,14 @@ import (
 )
 
 type Worker struct {
-	config         config.Worker
-	instanceID     string
-	client         *Client
-	stdout         io.Writer
-	stderr         io.Writer
-	heartbeatTicks <-chan time.Time
-	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
+	githubTokenProvider func(context.Context, string) (string, error)
+	config              config.Worker
+	instanceID          string
+	client              *Client
+	stdout              io.Writer
+	stderr              io.Writer
+	heartbeatTicks      <-chan time.Time
+	executeRun          func(context.Context, protocol.RunSpec) protocol.Completion
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -136,6 +137,7 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	request := protocol.PollRequest{
 		Factory:           true,
+		HealthChecks:      true,
 		ReadOnlyExecutors: w.readOnlyExecutors(),
 		SharedOutputs:     true,
 		Reviews:           true,
@@ -160,6 +162,36 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	if err != nil {
 		completion.Error = err.Error()
 		return completion
+	}
+	if spec.Factory != nil || spec.HealthCheck {
+		if w.githubTokenProvider != nil {
+			_, remoteRepository, remoteErr := factoryRemote(repositoryCommand(ctx, repository))
+			if remoteErr != nil {
+				completion.Error = remoteErr.Error()
+				return completion
+			}
+			if spec.GitHubRepository != "" && !strings.EqualFold(remoteRepository, spec.GitHubRepository) {
+				completion.Error = "registered checkout no longer matches the selected GitHub repository"
+				return completion
+			}
+			token, tokenErr := w.githubTokenProvider(ctx, spec.Repository)
+			if tokenErr != nil {
+				completion.Error = "GitHub App connection unavailable"
+				return completion
+			}
+			environment, environmentErr := GitHubEnvironment(token, remoteRepository)
+			if environmentErr != nil {
+				completion.Error = environmentErr.Error()
+				return completion
+			}
+			ctx = context.WithValue(ctx, commandEnvironmentKey{}, environment)
+		}
+	}
+	if spec.HealthCheck {
+		if err := validateGitHubConnection(repositoryCommand(ctx, repository), spec.GitHubRepository); err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
 	}
 	if spec.Factory != nil {
 		if spec.Task != nil && spec.Task.SourceURL != "" {
@@ -205,6 +237,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	}
 	result, runErr := runner.Execute(ctx, runner.Options{
 		Factory:        spec.Factory,
+		Environment:    commandEnvironment(ctx),
 		ReviewEvidence: reviewEvidence,
 		Revision:       spec.Revision,
 		Workflow:       spec.Workflow, JobID: spec.JobID,

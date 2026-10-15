@@ -423,7 +423,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			return
 		}
 		if definition.Workflows[input.Workflow].Mode == "factory" {
-			writeError(response, 400, errors.New("factory workflows require server.state = github"))
+			writeError(response, 400, errors.New("factory workflows require server.state = factory"))
 			return
 		}
 		steps, err := definition.ResolveTaskWorkflow(input.Workflow, input.Model)

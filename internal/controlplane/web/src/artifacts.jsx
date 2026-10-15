@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from "react";
 export function useTaskArtifacts(job, csrfToken) {
   const [state, setState] = useState({ jobID: null, byRun: {}, error: "" });
   useEffect(() => {
-    if (!job?.task || (job.state_backend === "github" || job.workflow?.factory)) return;
+    if (!job?.task || (["github", "local"].includes(job.state_backend) || job.workflow?.factory)) return;
     const controller = new AbortController();
     fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/artifacts`, { headers: { "X-Machinist-CSRF": csrfToken }, signal: controller.signal })
       .then(async r => { if (!r.ok) throw new Error("Could not load outputs"); return r.json(); })

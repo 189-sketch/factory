@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,24 +12,28 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	machinistexamples "github.com/owainlewis/machinist/examples"
 	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 
-// GitHubFactoryServer keeps only disposable connections and leases in memory.
-// Issues and their trusted journal comments are the authoritative task store.
-// Exactly one foreman serves a configured repository; workers may live on any host.
+// GitHubFactoryServer stores execution history locally and links published work
+// to GitHub. Workers may run on the local host or a remote VM.
 type GitHubFactoryServer struct {
+	setup          *onboarding
+	dataDirectory  string
 	mu             sync.Mutex
 	liveMu         sync.Mutex // Only leases and worker liveness; never held during GitHub requests.
 	auth           *Server
 	client         GitHubFactoryClient
+	local          *factoryLocalStore
 	definitionPath string
 	repositories   map[string]string
 	actor          string
@@ -40,9 +45,10 @@ type GitHubFactoryServer struct {
 	handler        http.Handler
 }
 type githubTask struct {
-	issue GitHubIssue
-	state *GitHubFactoryState
-	repo  string
+	issue   GitHubIssue
+	state   *GitHubFactoryState
+	repo    string
+	receipt *factoryReceipt
 }
 type githubLease struct {
 	spec     protocol.RunSpec
@@ -51,13 +57,23 @@ type githubLease struct {
 }
 
 func NewGitHubFactoryServer(path, token string, maxConcurrent int) (*GitHubFactoryServer, error) {
-	definition, err := config.LoadDefinitions(path)
+	definition, err := config.LoadConfig(path)
 	if err != nil {
 		return nil, err
 	}
-	return newGitHubFactoryServer(path, token, maxConcurrent, definition.GitHub.Repositories, NewGitHubFactoryClient())
+	s, err := newGitHubFactoryServer(path, token, maxConcurrent, map[string]string{}, NewGitHubFactoryClient(), filepath.Dir(definition.Server.WorkerTokenFile))
+	if err != nil {
+		return nil, err
+	}
+	s.setup, err = newOnboarding(s)
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	s.client = &ghFactoryClient{api: s.setup.connection.API}
+	return s, nil
 }
-func newGitHubFactoryServer(path, token string, maxConcurrent int, repositories map[string]string, client GitHubFactoryClient) (*GitHubFactoryServer, error) {
+func newGitHubFactoryServer(path, token string, maxConcurrent int, repositories map[string]string, client GitHubFactoryClient, dataDirectories ...string) (*GitHubFactoryServer, error) {
 	csrf, err := randomID("csrf", 24)
 	if err != nil {
 		return nil, err
@@ -71,17 +87,26 @@ func newGitHubFactoryServer(path, token string, maxConcurrent int, repositories 
 			return nil, err
 		}
 	}
-	if len(repositories) > 0 {
-		s.actor, err = client.CurrentUser(context.Background())
-		if err != nil {
-			return nil, fmt.Errorf("GitHub authentication: %w", err)
-		}
-		if strings.TrimSpace(s.actor) == "" {
-			return nil, errors.New("GitHub user identity is missing")
-		}
+	if s.repositories == nil {
+		s.repositories = map[string]string{}
+	}
+	s.actor = "local"
+	s.dataDirectory = filepath.Dir(path)
+	if len(dataDirectories) > 0 {
+		s.dataDirectory = dataDirectories[0]
+	}
+	s.local, err = openFactoryLocalStore(filepath.Join(s.dataDirectory, "factory.db"))
+	if err != nil {
+		return nil, err
 	}
 	s.handler, err = s.routes()
 	return s, err
+}
+func (s *GitHubFactoryServer) Close() error {
+	if s.setup != nil {
+		s.setup.stopWorker()
+	}
+	return s.local.db.Close()
 }
 func (s *GitHubFactoryServer) Handler() http.Handler { return s.handler }
 func (s *GitHubFactoryServer) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
@@ -93,6 +118,10 @@ func (s *GitHubFactoryServer) Serve(ctx context.Context, listen string, onListen
 		return err
 	}
 	defer listener.Close()
+	defer s.Close()
+	if s.setup != nil {
+		s.setup.listening(listener.Addr())
+	}
 	if onListening != nil {
 		onListening(listener.Addr())
 	}
@@ -123,6 +152,10 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", s.status)
+	mux.HandleFunc("GET /api/v1/onboarding", s.onboardingStatus)
+	mux.HandleFunc("GET /api/v1/onboarding/repositories", s.onboardingRepositories)
+	mux.HandleFunc("GET /api/v1/onboarding/worker-config", s.onboardingWorkerConfig)
+	mux.HandleFunc("POST /api/v1/onboarding/{action...}", s.auth.authorizeSubmission(s.onboardingAction))
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("PUT /api/v1/factory/agents/{name}", s.auth.authorizeSubmission(s.savePrompt))
@@ -140,46 +173,42 @@ func (s *GitHubFactoryServer) refresh(ctx context.Context, force bool) error {
 		return nil
 	}
 	tasks := map[string]*githubTask{}
-	aliases := s.repositoryNames()
-	for _, alias := range aliases {
-		repo := s.repositories[alias]
-		issues, err := s.client.ListTasks(ctx, repo)
+	records, err := s.local.tasks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		comments, err := s.local.comments(ctx, record.issue.HTMLURL)
 		if err != nil {
 			return err
 		}
-		for _, issue := range issues {
-			comments, err := s.client.Comments(ctx, repo, issue.Number)
-			if err != nil {
+		state, err := s.reduceLocal(record.issue, comments, record.alias)
+		if err != nil {
+			return err
+		}
+		task := &githubTask{issue: record.issue, state: state, repo: record.repository}
+		if state.LastEventID == 0 {
+			if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "created", Role: "triage"}); err != nil {
 				return err
 			}
-			state, err := ReduceGitHubFactory(issue, comments, s.actor, alias)
-			if err != nil {
-				return fmt.Errorf("%s issue %d: %w", repo, issue.Number, err)
-			}
-			task := &githubTask{issue: issue, state: state, repo: repo}
-			if state.LastEventID == 0 {
-				if issue.State != "open" {
-					continue
-				}
-				if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "created", Role: "triage"}); err != nil {
+		}
+		if task.state.Job.State == "running" {
+			run := task.state.Job.Runs[len(task.state.Job.Runs)-1]
+			if !s.leaseAlive(run.ID) {
+				if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "interrupted", RunID: run.ID, Role: task.state.Role}); err != nil {
 					return err
 				}
+				s.deleteLease(run.ID)
 			}
-			if task.state.Job.State == "running" {
-				run := task.state.Job.Runs[len(task.state.Job.Runs)-1]
-				if !s.leaseAlive(run.ID) {
-					if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "interrupted", RunID: run.ID, Role: task.state.Role}); err != nil {
-						return err
-					}
-					s.deleteLease(run.ID)
-				}
-			}
-			tasks[task.state.Job.ID] = task
 		}
+		tasks[task.state.Job.ID] = task
 	}
 	s.tasks = tasks
 	for id, lease := range s.liveLeases() {
 		task := s.tasks[lease.spec.JobID]
+		if lease.spec.HealthCheck {
+			continue
+		}
 		if task == nil || task.state.Job.State != "running" || !s.leaseAlive(id) {
 			s.deleteLease(id)
 		}
@@ -187,53 +216,77 @@ func (s *GitHubFactoryServer) refresh(ctx context.Context, force bool) error {
 	s.loaded = time.Now()
 	return nil
 }
+
+// reduceLocal reuses the transition rules without exposing internal journal links.
+func (s *GitHubFactoryServer) reduceLocal(issue GitHubIssue, comments []GitHubComment, alias string) (*GitHubFactoryState, error) {
+	state, err := ReduceGitHubFactory(issue, comments, "local", alias)
+	if err != nil {
+		return nil, err
+	}
+	state.Job.StateBackend = "local"
+	for i := range state.Job.Runs {
+		state.Job.Runs[i].GitHubURL = ""
+	}
+	if strings.HasPrefix(issue.HTMLURL, "local:") {
+		state.Job.Task.SourceURL = ""
+		state.Job.TriggerSubject = ""
+		state.Job.GitHubIssueTitle = ""
+	}
+	return state, nil
+}
+
+type factoryStatusWriter interface {
+	UpsertTaskStatus(context.Context, string, int, string) error
+}
+
 func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event GitHubFactoryEvent) error {
 	event.Version = 1
 	event.Previous = task.state.LastEventID
+	comments, err := s.local.comments(ctx, task.issue.HTMLURL)
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(event)
 	if err != nil {
 		return err
 	}
-	if len(raw) > 60000 {
-		return errors.New("GitHub journal event exceeds 60 KiB; shorten report or prompt")
+	if len(raw) > 1024*1024 {
+		return errors.New("execution event exceeds 1 MiB")
 	}
-	// Validate the proposed transition before creating a remote comment.
-	synthetic := GitHubComment{ID: event.Previous + 1, Body: GitHubFactoryMarker + string(raw), User: GitHubActor{Login: s.actor}, CreatedAt: time.Now().UTC()}
-	comments, err := s.client.Comments(ctx, task.repo, task.issue.Number)
+	synthetic := GitHubComment{ID: event.Previous + 1, Body: GitHubFactoryMarker + string(raw), User: GitHubActor{Login: "local"}, CreatedAt: time.Now().UTC()}
+	if _, err = s.reduceLocal(task.issue, append(comments, synthetic), task.state.Job.Repository); err != nil {
+		return err
+	}
+	if err = s.local.append(ctx, task.issue.HTMLURL, event, task.receipt); err != nil {
+		return err
+	}
+	comments, err = s.local.comments(ctx, task.issue.HTMLURL)
 	if err != nil {
 		return err
 	}
-	current, err := ReduceGitHubFactory(task.issue, comments, s.actor, task.state.Job.Repository)
+	task.state, err = s.reduceLocal(task.issue, comments, task.state.Job.Repository)
 	if err != nil {
 		return err
 	}
-	if current.LastEventID != event.Previous {
-		return ErrWorkflowAction
+	// A remote status update is best effort. Execution receipts are already durable.
+	if task.issue.Number > 0 {
+		if writer, ok := s.client.(factoryStatusWriter); ok {
+			body := fmt.Sprintf("Machinist: **%s**\n\nStage: %s", task.state.Job.State, task.state.Role)
+			if runs := task.state.Job.Runs; len(runs) > 0 {
+				summary := runs[len(runs)-1].Summary
+				if len(summary) > 2000 {
+					summary = summary[:2000] + "…"
+				}
+				if summary != "" {
+					body += "\n\n" + summary
+				}
+			}
+			if f := task.state.Job.Workflow.Factory; f.PRURL != "" {
+				body += "\n\n[Open pull request](" + f.PRURL + ")"
+			}
+			_ = writer.UpsertTaskStatus(ctx, task.repo, task.issue.Number, body)
+		}
 	}
-	if _, err = ReduceGitHubFactory(task.issue, append(comments, synthetic), s.actor, task.state.Job.Repository); err != nil {
-		return err
-	}
-	comment, err := s.client.PostComment(ctx, task.repo, task.issue.Number, synthetic.Body)
-	if err != nil {
-		s.loaded = time.Time{}
-		return err
-	}
-	// Re-read after publication: never execute work whose durable receipt is uncertain.
-	comments, err = s.client.Comments(ctx, task.repo, task.issue.Number)
-	if err != nil {
-		s.loaded = time.Time{}
-		return err
-	}
-	state, err := ReduceGitHubFactory(task.issue, comments, s.actor, task.state.Job.Repository)
-	if err != nil {
-		s.loaded = time.Time{}
-		return err
-	}
-	if state.LastEventID < comment.ID {
-		s.loaded = time.Time{}
-		return errors.New("GitHub has not confirmed the journal event")
-	}
-	task.state = state
 	return nil
 }
 func (s *GitHubFactoryServer) repositoryNames() []string {
@@ -262,7 +315,13 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 		worker.Connected = time.Since(worker.LastSeenAt) < workerAvailabilityWindow
 		workers = append(workers, worker)
 	}
-	writeJSON(w, 200, map[string]any{"jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "github"})
+	onboardingState := map[string]any{"required": false}
+	if s.setup != nil {
+		if data, err := s.setup.status(r.Context()); err == nil {
+			onboardingState = data
+		}
+	}
+	writeJSON(w, 200, map[string]any{"onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
 }
 func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, catalogResponse{Workflows: []string{"factory"}, Commands: []string{}, Repositories: s.repositoryNames()})
@@ -276,7 +335,35 @@ func (s *GitHubFactoryServer) command(ctx context.Context, repo, role string) (c
 	if err != nil {
 		return command, err
 	}
-	command.Prompt, command.Hash, err = s.client.AgentPrompt(ctx, repo, role)
+	if s.setup != nil {
+		selection := s.setup.snapshot().Selection
+		if selection.Agent != "" {
+			command.Executor = selection.Agent
+			command.Model = ""
+			if role == "review" {
+				command.Executor += "-review"
+			}
+		}
+	}
+	prompt, hash, localErr := s.local.prompt(ctx, repo, role)
+	if localErr == nil {
+		command.Prompt = prompt
+		command.Hash = hash
+		return command, nil
+	}
+	if !errors.Is(localErr, sql.ErrNoRows) {
+		return command, localErr
+	}
+	// Executor definitions include bundled prompts, so sign-in is not required.
+	if strings.TrimSpace(command.Prompt) == "" {
+		raw, readErr := machinistexamples.Files.ReadFile("prompts/" + role + ".md")
+		if readErr != nil {
+			return command, readErr
+		}
+		command.Prompt = string(raw)
+	}
+	sum := sha256.Sum256([]byte(command.Prompt))
+	command.Hash = hex.EncodeToString(sum[:])
 	return command, err
 }
 func (s *GitHubFactoryServer) definitions(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +399,7 @@ func (s *GitHubFactoryServer) definitionRepository(alias string) (string, error)
 	}
 	names := s.repositoryNames()
 	if len(names) == 0 {
-		return "", errors.New("configure a GitHub repository to load agents")
+		return "", nil
 	}
 	return s.repositories[names[0]], nil
 }
@@ -341,7 +428,20 @@ func (s *GitHubFactoryServer) savePrompt(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, err)
 		return
 	}
-	hash, err := s.client.SaveAgentPrompt(r.Context(), repo, role, input.Prompt, input.ExpectedHash)
+	if len(input.Prompt) > 256<<10 || strings.TrimSpace(input.Prompt) == "" {
+		writeError(w, 400, errors.New("prompt must contain text and be at most 256 KiB"))
+		return
+	}
+	if err = config.ValidatePromptParameters(role, input.Prompt); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	base, err := s.command(r.Context(), repo, role)
+	if err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	hash, err := s.local.savePrompt(r.Context(), repo, role, input.Prompt, input.ExpectedHash, base.Hash)
 	if err != nil {
 		writeError(w, 409, err)
 		return
@@ -349,6 +449,10 @@ func (s *GitHubFactoryServer) savePrompt(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, 200, map[string]string{"hash": hash})
 }
 func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
+	if s.setup != nil && !s.setup.snapshot().Finished {
+		writeError(w, 409, errors.New("complete onboarding before starting a task"))
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !limitRequestBody(w, r, maxRequestBytes) {
@@ -391,12 +495,13 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		issue, err = s.client.GetTask(r.Context(), repo, number)
+		if err == nil && (issue.Number != number || !strings.EqualFold(issue.HTMLURL, input.SourceURL)) {
+			err = errors.New("GitHub returned a different issue")
+		}
 		if err == nil && issue.State != "open" {
 			err = errors.New("issue is closed")
 		}
-		if err == nil {
-			err = s.client.AdoptTask(r.Context(), repo, number)
-		}
+
 	} else {
 		if body == "" {
 			writeError(w, 400, errors.New("describe the task or supply an issue"))
@@ -409,19 +514,28 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 				title = title[:100]
 			}
 		}
-		issue, err = s.client.CreateTask(r.Context(), repo, title, body)
+		localID, idErr := randomID("task", 12)
+		if idErr != nil {
+			writeError(w, 500, idErr)
+			return
+		}
+		issue = GitHubIssue{Title: title, Body: body, HTMLURL: "local:" + localID, State: "open", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	}
 	if err != nil {
 		writeError(w, 502, err)
 		return
 	}
 	s.loaded = time.Time{}
-	comments, err := s.client.Comments(r.Context(), repo, issue.Number)
+	if err = s.local.create(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	comments, err := s.local.comments(r.Context(), issue.HTMLURL)
 	if err != nil {
 		writeError(w, 502, err)
 		return
 	}
-	state, err := ReduceGitHubFactory(issue, comments, s.actor, input.Repository)
+	state, err := s.reduceLocal(issue, comments, input.Repository)
 	if err != nil {
 		writeError(w, 409, err)
 		return
@@ -468,7 +582,36 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	if action == "complete_merge" {
 		f := task.state.Job.Workflow.Factory
-		raw, err := readGitHubMerge(r.Context(), f.PRURL)
+		var raw []byte
+		var err error
+		if s.setup != nil {
+			u, _ := url.Parse(f.PRURL)
+			parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(parts) != 4 {
+				writeError(w, 400, errors.New("invalid pull request URL"))
+				return
+			}
+			raw, err = s.setup.connection.API(r.Context(), "GET", "/repos/"+strings.Join(parts[:2], "/")+"/pulls/"+parts[3], nil)
+			if err == nil {
+				var pr struct {
+					Merged         bool   `json:"merged"`
+					MergeCommitSHA string `json:"merge_commit_sha"`
+					Head           struct {
+						SHA string `json:"sha"`
+					} `json:"head"`
+				}
+				err = json.Unmarshal(raw, &pr)
+				if err == nil {
+					state := "OPEN"
+					if pr.Merged {
+						state = "MERGED"
+					}
+					raw, _ = json.Marshal(map[string]any{"state": state, "headRefOid": pr.Head.SHA, "mergeCommit": map[string]string{"oid": pr.MergeCommitSHA}})
+				}
+			}
+		} else {
+			raw, err = readGitHubMerge(r.Context(), f.PRURL)
+		}
 		if err != nil {
 			writeError(w, 502, err)
 			return
@@ -513,8 +656,18 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.liveMu.Lock()
-	s.workers[p.InstanceID] = Worker{InstanceID: p.InstanceID, Name: p.Name, LastSeenAt: time.Now().UTC(), Repositories: p.Repositories}
+	s.workers[p.InstanceID] = Worker{InstanceID: p.InstanceID, Name: p.Name, LastSeenAt: time.Now().UTC(), Repositories: p.Repositories, Executors: p.Executors, ReadOnlyExecutors: p.ReadOnlyExecutors}
 	s.liveMu.Unlock()
+	if s.setup != nil {
+		if check := s.setup.claimHealth(p); check != nil {
+			writeJSON(w, 200, protocol.PollResponse{Run: check})
+			return
+		}
+		if !s.setup.snapshot().Finished {
+			writeJSON(w, 200, protocol.PollResponse{})
+			return
+		}
+	}
 	if err := s.refresh(r.Context(), false); err != nil {
 		writeError(w, 502, err)
 		return
@@ -550,6 +703,33 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		task := s.tasks[id]
 		state := task.state
+		if state.Job.State == "queued" && repositories[state.Job.Repository] && task.issue.Number > 0 {
+			issue, err := s.client.GetTask(r.Context(), task.repo, task.issue.Number)
+			if err != nil {
+				writeError(w, 502, errors.New("could not refresh the linked GitHub issue before dispatch"))
+				return
+			}
+			if issue.Number != task.issue.Number || issue.HTMLURL != task.issue.HTMLURL {
+				writeError(w, 502, errors.New("GitHub returned a different issue"))
+				return
+			}
+			if err = s.local.updateIssue(r.Context(), issue); err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			task.issue = issue
+			comments, err := s.local.comments(r.Context(), issue.HTMLURL)
+			if err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			task.state, err = s.reduceLocal(issue, comments, state.Job.Repository)
+			if err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			state = task.state
+		}
 		if task.issue.State != "open" || state.Job.State != "queued" || !repositories[state.Job.Repository] {
 			continue
 		}
@@ -596,7 +776,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		f := task.state.Job.Workflow.Factory
 		var brief strings.Builder
-		fmt.Fprintf(&brief, "GitHub task: %s\nRequirements:\n%s\n", task.issue.HTMLURL, task.issue.Body)
+		fmt.Fprintf(&brief, "Task requirements:\n%s\n", task.issue.Body)
 		for _, stage := range []string{"triage", "spec", "implement", "review"} {
 			if report := task.state.Reports[stage]; report != "" {
 				fmt.Fprintf(&brief, "\n%s handoff:\n%s\n", stage, report)
@@ -607,9 +787,21 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		branch := f.Branch
 		if branch == "" {
-			branch = fmt.Sprintf("codex/issue-%d", task.issue.Number)
+			if task.issue.Number > 0 {
+				if task.issue.Number > 0 {
+					branch = fmt.Sprintf("codex/issue-%d", task.issue.Number)
+				} else {
+					branch = "codex/" + state.Job.ID
+				}
+			} else {
+				branch = "codex/" + strings.TrimPrefix(task.issue.HTMLURL, "local:")
+			}
 		}
-		spec := protocol.RunSpec{ID: run.ID, JobID: id, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Role: role, SpecURL: f.SpecURL, IssueURL: task.issue.HTMLURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
+		issueURL := task.issue.HTMLURL
+		if strings.HasPrefix(issueURL, "local:") {
+			issueURL = ""
+		}
+		spec := protocol.RunSpec{ID: run.ID, JobID: id, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, GitHubRepository: task.repo, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Role: role, SpecURL: f.SpecURL, IssueURL: issueURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
 		s.liveMu.Lock()
 		s.leases[run.ID] = &githubLease{spec: spec, instance: p.InstanceID, last: time.Now()}
 		s.liveMu.Unlock()
@@ -706,9 +898,18 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if s.local.receipt(r.Context(), id, p.InstanceID, p.LeaseToken) {
+		w.WriteHeader(204)
+		return
+	}
 	lease := s.liveLease(id)
 	if lease == nil || lease.instance != p.InstanceID || lease.spec.LeaseToken != p.LeaseToken {
 		writeError(w, 409, ErrLeaseConflict)
+		return
+	}
+	if lease.spec.HealthCheck && s.setup != nil && s.setup.finishHealth(id, p) {
+		s.deleteLease(id)
+		w.WriteHeader(204)
 		return
 	}
 	task := s.tasks[lease.spec.JobID]
@@ -716,13 +917,13 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("task not found"))
 		return
 	}
-	// Refresh the journal before reconciling a possibly retried completion.
-	comments, err := s.client.Comments(r.Context(), task.repo, task.issue.Number)
+	// Refresh local history before reconciling a possibly retried completion.
+	comments, err := s.local.comments(r.Context(), task.issue.HTMLURL)
 	if err != nil {
 		writeError(w, 502, err)
 		return
 	}
-	current, err := ReduceGitHubFactory(task.issue, comments, s.actor, task.state.Job.Repository)
+	current, err := s.reduceLocal(task.issue, comments, task.state.Job.Repository)
 	if err != nil {
 		writeError(w, 409, err)
 		return
@@ -759,6 +960,8 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("completed agent must report its GitHub handoff"))
 		return
 	}
+	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
+	defer func() { task.receipt = nil }()
 	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", RunID: id, Role: lease.spec.Factory.Role, Result: step}); err != nil {
 		writeError(w, 409, err)
 		return

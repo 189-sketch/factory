@@ -18,6 +18,7 @@ func (w *Worker) factoryWorkspace(ctx context.Context, repository string, spec p
 	}
 	git := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repository}, args...)...)
+		cmd.Env = commandEnvironment(ctx)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, out)
@@ -79,6 +80,7 @@ func (w *Worker) factoryWorkspace(ctx context.Context, repository string, spec p
 	}
 	if _, err := os.Stat(path); err == nil {
 		cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--show-toplevel")
+		cmd.Env = commandEnvironment(ctx)
 		out, err := cmd.Output()
 		expected, resolveErr := filepath.EvalSymlinks(path)
 		if err != nil || resolveErr != nil || strings.TrimSpace(string(out)) != expected {
@@ -90,6 +92,7 @@ func (w *Worker) factoryWorkspace(ctx context.Context, repository string, spec p
 			return "", err
 		}
 		actualCmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		actualCmd.Env = commandEnvironment(ctx)
 		actual, err := actualCmd.Output()
 		expectedCommon, expectedErr := filepath.EvalSymlinks(common)
 		actualCommon, actualErr := filepath.EvalSymlinks(strings.TrimSpace(string(actual)))

@@ -84,11 +84,13 @@ type Run struct {
 }
 
 type Worker struct {
-	InstanceID   string    `json:"instance_id"`
-	Name         string    `json:"name"`
-	LastSeenAt   time.Time `json:"last_seen_at"`
-	Repositories []string  `json:"repositories"`
-	Connected    bool      `json:"connected"`
+	Executors         []string  `json:"executors,omitempty"`
+	ReadOnlyExecutors []string  `json:"read_only_executors,omitempty"`
+	InstanceID        string    `json:"instance_id"`
+	Name              string    `json:"name"`
+	LastSeenAt        time.Time `json:"last_seen_at"`
+	Repositories      []string  `json:"repositories"`
+	Connected         bool      `json:"connected"`
 }
 
 type Snapshot struct {

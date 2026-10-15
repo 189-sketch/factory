@@ -25,7 +25,7 @@ export function TaskDetail({
   onWorkflowAction,
 }) {
   const artifacts = useTaskArtifacts(job, csrfToken);
-  const githubState = job?.state_backend === "github";
+  const githubState = ["github", "local"].includes(job?.state_backend);
   const factoryTask = githubState || Boolean(job?.workflow?.factory);
   if (!job)
     return (
@@ -287,7 +287,7 @@ export function TaskDetail({
                       value={formatTimestamp(job.updated_at)}
                     />
                   </dl>
-                  {githubState ? <Button asChild variant="outline"><a href={job.task?.source_url} target="_blank" rel="noreferrer">Open issue</a></Button> : <Button
+                  {githubState ? job.task?.source_url && <Button asChild variant="outline"><a href={job.task?.source_url} target="_blank" rel="noreferrer">Open issue</a></Button> : <Button
                     variant="outline"
                     disabled={!terminal || deleting}
                     onClick={() => onDelete(job)}
@@ -313,7 +313,7 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
       <header className="factory-task-header">
         <a href="#/runs" className="factory-back"><ArrowLeft className="size-4" aria-hidden="true" />All runs</a>
         <div className="factory-task-title"><h1>{jobDisplayTitle(job)}</h1><State value={job.state} /></div>
-        <div className="factory-task-meta"><span>{job.repository}</span><span>·</span><a href={job.task?.source_url} target="_blank" rel="noreferrer">Open issue</a></div>
+        <div className="factory-task-meta"><span>{job.repository}</span>{job.task?.source_url && <><span>·</span><a href={job.task.source_url} target="_blank" rel="noreferrer">Open issue</a></>}</div>
       </header>
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       <ol className="factory-progress" aria-label="Task progress">
