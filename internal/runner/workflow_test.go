@@ -41,7 +41,7 @@ func TestWorkflowResultContract(t *testing.T) {
 
 func TestFactoryPromptCarriesAuthoritativeContext(t *testing.T) {
 	prompt := factoryPrompt(&protocol.FactoryContext{Role: "review", HeadSHA: "abc", PRURL: "https://github.com/a/b/pull/1", Branch: "codex/task"}, "/task/workspace")
-	for _, want := range []string{"review", "abc", "https://github.com/a/b/pull/1", "codex/task", "/task/workspace", "Never merge"} {
+	for _, want := range []string{"review", "abc", "https://github.com/a/b/pull/1", "codex/task", "/task/workspace", "Never merge", "reports, documents, HTML pages", "delivered through the task PR", "takes precedence over an earlier handoff proposing artifact-only delivery", "no requested file or code change"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("missing %q", want)
 		}

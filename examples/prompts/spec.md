@@ -31,7 +31,8 @@ Machinist stores execution history and handoffs locally. Read the task context
 supplied by the foreman; a GitHub issue is optional. Published specs and PRs live
 on GitHub. Never post prompts, execution events, or internal reports to issues.
 Local worktrees and agent session memory are disposable scratch.
-Do not write workflow reports or result files. Return exactly one JSON object as
+Do not write internal workflow handoff or result files. Requested deliverables,
+such as reports and documents, are tracked repository files delivered through the task PR. Return exactly one JSON object as
 your final message with outcome (complete, blocked, failed), nonempty summary,
 and factory containing version: 1 and your role. Keep the entire JSON below 16 KiB.
 Triage and Implement put their handoff in factory.report; Spec includes a concise

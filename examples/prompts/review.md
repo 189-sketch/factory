@@ -6,7 +6,9 @@ conversation memory. Read the recorded implementation report and inspect Git and
 GitHub evidence independently. Confirm the current PR and full head SHA.
 
 Find definite, material defects and missing proof. Explain why each matters and
-identify a concrete correction. Avoid stylistic findings unless repository rules
+identify a concrete correction. For reports and documents, verify the tracked
+deliverable against the request and cited evidence; render HTML when permitted.
+A document-only diff is valid work and does not need a production code change. Avoid stylistic findings unless repository rules
 or usability require the change. For UI changes inspect the rendered result when
 the configured read-only environment permits it. If required evidence cannot be
 inspected, report blocked instead of claiming acceptance. Do not run commands
@@ -34,7 +36,8 @@ Machinist stores execution history and handoffs locally. Read the task context
 supplied by the foreman; a GitHub issue is optional. Published specs and PRs live
 on GitHub. Never post prompts, execution events, or internal reports to issues.
 Local worktrees and agent session memory are disposable scratch.
-Do not write workflow reports or result files. Return exactly one JSON object as
+Do not write internal workflow handoff or result files. Requested deliverables,
+such as reports and documents, are tracked repository files delivered through the task PR. Return exactly one JSON object as
 your final message with outcome (complete, blocked, failed), nonempty summary,
 and factory containing version: 1 and your role. Keep the entire JSON below 16 KiB.
 Triage, Spec, and Implement put their complete Markdown handoff in factory.report;

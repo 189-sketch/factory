@@ -17,7 +17,9 @@ Remove local specification viewers and unnecessary factory artifact storage.
 - AC-2: Triage routes to optional Spec or Implement. Spec publishes a GitHub
   document and draft PR, then waits for approval of the exact producing attempt.
 - AC-3: Implement reuses the branch and PR, advances its head, and publishes a
-  ready PR. Host Git and GitHub evidence must match the claimed result.
+  ready PR. Requested reports, documents, and other files follow this same PR
+  delivery rule, including document-only changes. Plain questions and health checks
+  without a requested file may finish in Triage. Host Git and GitHub evidence must match the claimed result.
 - AC-4: Independent read-only Review receives the exact diff and check evidence.
   Definite findings trigger at most three repair rounds on the same PR. Accepted
   review waits for human merge and a GitHub-verified completion check.

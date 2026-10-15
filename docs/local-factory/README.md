@@ -114,3 +114,7 @@ an automation editor remain outside this slice.
 For linked issues, Triage receives the existing repository label names and may suggest up to ten exact classification labels in `factory.labels`. The foreman validates those suggestions against the current catalog and adds matching labels through the GitHub App API. It never creates classification labels or removes existing human labels. Local tasks make no label requests.
 
 The foreman owns only `machinist:needs-spec`, `machinist:ready`, and `machinist:blocked`. It creates these on demand and replaces only these three labels as the route changes. Other `machinist:*` labels are preserved. Terminal tasks and PRs awaiting merge have no routing label. Label publication is best effort after local execution state is saved; a later task transition retries reconciliation. GitHub failures do not discard agent results.
+
+### Deliverables use pull requests
+
+Every requested file, including reports, documents, and HTML pages, is committed on the assigned task branch and delivered through its PR. Use existing repository paths, or `docs/reports/<task-name>.<extension>` when no convention exists. Document-only work follows Implement and independent Review; it does not require a production code change. Plain questions and health checks without a requested deliverable can still finish in Triage. Internal agent handoffs stay local and are not committed as deliverables.

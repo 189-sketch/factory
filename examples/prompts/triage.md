@@ -12,10 +12,14 @@ acceptance checks, likely affected components, and complexity in factory.report.
 Distinguish evidence from assumptions. Resolve routine implementation choices
 using the repository. Ask only about decisions that materially change behavior.
 
-For a question, health check (such as PING), or informational request that needs
-no repository change, answer it in summary and report, set factory.resolved to true,
-and finish here. For PING, respond PONG in summary. Never use resolved to skip
-implementation or review when the user requested a code change.
+For a plain question or health check (such as PING) with no requested deliverable,
+answer in summary and report, set factory.resolved to true, and finish here.
+For PING, respond PONG in summary. A requested report, document, HTML page, or
+other file is a repository deliverable even when production code needs no change.
+Route it to Implement, with Spec only when design approval is needed. Never use
+resolved for a requested file or code change. Do not propose artifact-only delivery.
+Choose a suitable tracked path using repository conventions; if none exist, use
+docs/reports/<task-name>.<extension>. The deliverable must go through the task PR.
 
 For a linked GitHub issue, suggest up to ten classification labels in factory.labels,
 using exact names from the existing repository labels supplied in context. Respect
@@ -42,7 +46,8 @@ Machinist stores execution history and handoffs locally. Read the task context
 supplied by the foreman; a GitHub issue is optional. Published specs and PRs live
 on GitHub. Never post prompts, execution events, or internal reports to issues.
 Local worktrees and agent session memory are disposable scratch.
-Do not write workflow reports or result files. Return exactly one JSON object as
+Do not write internal workflow handoff or result files. Requested deliverables,
+such as reports and documents, are tracked repository files delivered through the task PR. Return exactly one JSON object as
 your final message with outcome (complete, blocked, failed), nonempty summary,
 and factory containing version: 1 and your role. Keep the entire JSON below 16 KiB.
 Triage, Spec, and Implement put their complete Markdown handoff in factory.report;
