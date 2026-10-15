@@ -51,6 +51,7 @@ type githubTask struct {
 	receipt *factoryReceipt
 }
 type githubLease struct {
+	phase    string
 	spec     protocol.RunSpec
 	instance string
 	last     time.Time
@@ -322,8 +323,18 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs := []Job{}
+	leases := s.liveLeases()
 	for _, task := range s.tasks {
-		jobs = append(jobs, task.state.Job)
+		job := task.state.Job
+		job.Runs = append([]Run(nil), job.Runs...)
+		for i := range job.Runs {
+			if lease, ok := leases[job.Runs[i].ID]; ok && job.Runs[i].State == "running" {
+				job.Runs[i].Phase = lease.phase
+				last := lease.last
+				job.Runs[i].HeartbeatAt = &last
+			}
+		}
+		jobs = append(jobs, job)
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].UpdatedAt.After(jobs[j].UpdatedAt) })
 	workers := []Worker{}
@@ -964,6 +975,10 @@ func (s *GitHubFactoryServer) heartbeat(w http.ResponseWriter, r *http.Request) 
 	}
 	now := time.Now().UTC()
 	lease.last = now
+	switch p.Phase {
+	case "preparing", "checking_pr", "starting_sandbox", "running_agent", "collecting_result", "publishing":
+		lease.phase = p.Phase
+	}
 	worker := s.workers[p.InstanceID]
 	worker.LastSeenAt = now
 	s.workers[p.InstanceID] = worker

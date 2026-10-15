@@ -16,12 +16,13 @@ func TestFactoryResultRejectsInvalidRoutingEvidence(t *testing.T) {
 		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"implement","pr_url":"https://evil.example/pull/1"}}`,
 		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"implement","head_sha":"short"}}`,
 		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"triage","execute":"shell"}}`,
+		`{"outcome":"complete","summary":"ok","factory":{"version":1,"role":"triage","pr_description":"private triage"}}`,
 	} {
 		if _, err := ParseStepResult([]byte(body)); err == nil {
 			t.Fatalf("accepted %s", body)
 		}
 	}
-	for _, body := range []string{`{"outcome":"complete","summary":"legacy"}`, `{"outcome":"complete","summary":"routed","factory":{"version":1,"role":"triage","needs_spec":true}}`} {
+	for _, body := range []string{`{"outcome":"complete","summary":"legacy"}`, `{"outcome":"complete","summary":"routed","factory":{"version":1,"role":"triage","needs_spec":true}}`, `{"outcome":"complete","summary":"built","factory":{"version":1,"role":"implement","pr_description":"## Why\nA regression.\n## What\nFixed it.\n## Verification\nTests passed."}}`} {
 		if _, err := ParseStepResult([]byte(body)); err != nil {
 			t.Fatal(err)
 		}

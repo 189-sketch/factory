@@ -152,7 +152,16 @@ func (w *Worker) publishCandidate(ctx context.Context, workspace, bundle string,
 	}
 	if len(existing) == 1 {
 		f.PRURL = existing[0].URL
+		if spec.Factory.PRURL != "" && f.PRURL != spec.Factory.PRURL {
+			return fmt.Errorf("publication changed the assigned PR")
+		}
+		if err = updateCandidateDescription(command, directory, repository, f.PRURL, candidatePRBody(result.StepResult)); err != nil {
+			return err
+		}
 	} else {
+		if spec.Factory.PRURL != "" {
+			return fmt.Errorf("assigned PR is no longer open; refusing a competing PR")
+		}
 		defaultRef, e := repositoryCommand(ctx, workspace)("git", "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD")
 		if e != nil {
 			return e
@@ -161,10 +170,7 @@ func (w *Worker) publishCandidate(ctx context.Context, workspace, bundle string,
 		if spec.Task != nil && spec.Task.Title != "" {
 			title = spec.Task.Title
 		}
-		body := f.Report
-		if len(body) > 12000 {
-			body = body[:12000]
-		}
+		body := candidatePRBody(result.StepResult)
 		request, _ := json.Marshal(map[string]any{"title": title, "head": branch, "base": strings.TrimPrefix(strings.TrimSpace(string(defaultRef)), remote+"/"), "body": body, "draft": spec.Factory.Role == "spec"})
 		requestPath := filepath.Join(directory, "pull-request.json")
 		if err = os.WriteFile(requestPath, request, 0600); err != nil {
@@ -201,6 +207,32 @@ func (w *Worker) publishCandidate(ctx context.Context, workspace, bundle string,
 		}
 	}
 	return f.Validate()
+}
+
+// Internal handoffs stay on the execution host. Only the public result summary
+// belongs in a pull request description, never Factory.Report or prompt context.
+func candidatePRBody(result *protocol.StepResult) string {
+	if result.Factory != nil && strings.TrimSpace(result.Factory.PRDescription) != "" {
+		return strings.TrimSpace(result.Factory.PRDescription)
+	}
+	return strings.TrimSpace(result.Summary)
+}
+
+func updateCandidateDescription(command evidenceCommand, directory, repository, prURL, body string) error {
+	number := strings.TrimPrefix(prURL, "https://github.com/"+repository+"/pull/")
+	if !regexp.MustCompile(`^[1-9][0-9]*$`).MatchString(number) {
+		return fmt.Errorf("PR description target does not match assigned repository")
+	}
+	request, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(directory, "pull-request-description.json")
+	if err = os.WriteFile(path, request, 0600); err != nil {
+		return err
+	}
+	_, err = command("gh", "api", "--method", "PATCH", "repos/"+repository+"/pulls/"+number, "--input", path)
+	return err
 }
 
 // Recover an already-published first attempt, including a lost PR response.

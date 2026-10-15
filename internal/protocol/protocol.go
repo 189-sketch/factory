@@ -46,6 +46,7 @@ type RunSpec struct {
 }
 
 type Heartbeat struct {
+	Phase      string `json:"phase,omitempty"`
 	InstanceID string `json:"instance_id"`
 	LeaseToken string `json:"lease_token"`
 }

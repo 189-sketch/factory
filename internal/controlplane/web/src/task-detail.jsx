@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -327,7 +327,7 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
         <h2>{resultTitle(job, result)}</h2>
         {result?.summary && <p className="factory-summary">{job.state === "failed" && /^invalid character .*looking for beginning of value/.test(result.summary) ? "The agent returned an unreadable result. Retry this stage, or request changes on the existing PR." : result.summary}</p>}
         {result?.error && result.error !== result.summary && <p role="alert" className="factory-summary text-danger">{result.error}</p>}
-        {!result?.summary && <p className="factory-summary">{job.state === "running" ? "The agent is working. Results will appear here." : "Waiting for a worker to pick up this task."}</p>}
+        {job.state === "running" ? <RunActivity run={latest} /> : !result?.summary && <p className="factory-summary">{job.state === "queued" ? "Waiting for a runner to pick up this task." : "No result was reported."}</p>}
         {progress?.spec_url && <a className="factory-spec-link" href={progress.spec_url} target="_blank" rel="noreferrer">Open spec on GitHub<ArrowRight className="size-4" aria-hidden="true" /></a>}
         <TaskActions key={`${job.id}:${latest?.id}:${job.state}:${job.hold_version || 0}`} job={job} result={result} onAction={onWorkflowAction} />
       </section>
@@ -343,6 +343,27 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
 
     </article>
   );
+}
+
+export function RunActivity({ run, now }) {
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    if (now !== undefined) return;
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [now]);
+  now ??= clock;
+  const phases = { preparing: "Preparing the workspace", checking_pr: "Checking the pull request and CI", starting_sandbox: "Starting the Kubernetes sandbox", running_agent: "Agent running", collecting_result: "Collecting the result and stopping the sandbox", publishing: "Publishing the branch and pull request" };
+  const age = run?.heartbeat_at ? Math.max(0, Math.floor((now - Date.parse(run.heartbeat_at)) / 1000)) : null;
+  const elapsed = run?.started_at ? Math.max(0, now - Date.parse(run.started_at)) : null;
+  return <div className="space-y-2">
+    <p role="status" className="factory-summary">{phases[run?.phase] || (age === null ? "Waiting for runner status" : "Runner active")}</p>
+    <p className={cn("text-xs", age !== null && age > 20 ? "text-warning" : "text-muted-foreground")}>
+      {run?.worker_name && <span>{run.worker_name} · </span>}
+      {age === null ? "No heartbeat received yet." : age > 20 ? `Runner status delayed. Last heartbeat ${age}s ago. The run may be interrupted.` : `Runner connected · heartbeat ${age}s ago.`}
+      {elapsed !== null && <span> · Elapsed {formatDurationMillis(Math.floor(elapsed / 1000) * 1000)}</span>}
+    </p>
+  </div>;
 }
 
 function ExecutionDetails({ run }) {

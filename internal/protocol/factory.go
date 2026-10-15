@@ -31,18 +31,19 @@ type Finding struct {
 
 // FactoryResult adds a versioned routing contract without changing legacy steps.
 type FactoryResult struct {
-	Labels    []string  `json:"labels,omitempty"`
-	Resolved  bool      `json:"resolved,omitempty"`
-	SpecURL   string    `json:"spec_url,omitempty"`
-	Report    string    `json:"report,omitempty"`
-	Version   int       `json:"version"`
-	Role      string    `json:"role"`
-	NeedsSpec bool      `json:"needs_spec,omitempty"`
-	Verdict   string    `json:"verdict,omitempty"`
-	Findings  []Finding `json:"findings,omitempty"`
-	PRURL     string    `json:"pr_url,omitempty"`
-	HeadSHA   string    `json:"head_sha,omitempty"`
-	Branch    string    `json:"branch,omitempty"`
+	PRDescription string    `json:"pr_description,omitempty"`
+	Labels        []string  `json:"labels,omitempty"`
+	Resolved      bool      `json:"resolved,omitempty"`
+	SpecURL       string    `json:"spec_url,omitempty"`
+	Report        string    `json:"report,omitempty"`
+	Version       int       `json:"version"`
+	Role          string    `json:"role"`
+	NeedsSpec     bool      `json:"needs_spec,omitempty"`
+	Verdict       string    `json:"verdict,omitempty"`
+	Findings      []Finding `json:"findings,omitempty"`
+	PRURL         string    `json:"pr_url,omitempty"`
+	HeadSHA       string    `json:"head_sha,omitempty"`
+	Branch        string    `json:"branch,omitempty"`
 }
 
 var gitSHA = regexp.MustCompile(`^[a-fA-F0-9]{40}$`)
@@ -51,6 +52,9 @@ var pullPath = regexp.MustCompile(`^/[^/]+/[^/]+/pull/[1-9][0-9]*$`)
 func (r FactoryResult) Validate() error {
 	if r.Version != 1 {
 		return errors.New("unsupported factory result version")
+	}
+	if r.PRDescription != "" && ((r.Role != "spec" && r.Role != "implement") || len(r.PRDescription) > 8192) {
+		return errors.New("public PR descriptions are limited to 8 KiB and Spec or Implement")
 	}
 	switch r.Role {
 	case "triage", "spec", "implement", "review":

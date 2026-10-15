@@ -101,6 +101,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	ctx = withRunProgress(ctx)
 	execute := w.executeRun
 	if execute == nil {
 		execute = w.execute
@@ -246,6 +247,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	}
 	var reviewEvidence string
 	if spec.Factory != nil && spec.Factory.Role == "review" {
+		setRunProgress(ctx, "checking_pr")
 		evidence, err := collectReviewEvidence(repositoryCommand(ctx, repository), spec.Factory)
 		if err != nil {
 			completion.Error = err.Error()
@@ -287,6 +289,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	var result runner.Result
 	var runErr error
 	if w.config.Kubernetes == nil {
+		setRunProgress(ctx, "running_agent")
 		result, runErr = runner.Execute(ctx, options)
 	} else {
 		if spec.Factory == nil && !spec.HealthCheck {
@@ -302,8 +305,9 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		}
 		options.Environment = nil
 		var bundle string
-		result, bundle, runErr = (kuberunner.Connector{Config: *w.config.Kubernetes}).Execute(ctx, options, w.config.Executors[spec.Executor].ReadOnly)
+		result, bundle, runErr = (kuberunner.Connector{Config: *w.config.Kubernetes, Progress: func(phase string) { setRunProgress(ctx, phase) }}).Execute(ctx, options, w.config.Executors[spec.Executor].ReadOnly)
 		if runErr == nil && spec.Factory != nil && (spec.Factory.Role == "spec" || spec.Factory.Role == "implement") {
+			setRunProgress(ctx, "publishing")
 			runErr = w.publishCandidate(ctx, repository, bundle, spec, &result)
 		}
 		if result.ID != "" {
@@ -377,6 +381,7 @@ func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.
 
 func (w *Worker) heartbeat(ctx context.Context, spec protocol.RunSpec) error {
 	return w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(spec.ID)+"/heartbeat", protocol.Heartbeat{
+		Phase:      runProgress(ctx),
 		InstanceID: w.instanceID,
 		LeaseToken: spec.LeaseToken,
 	}, nil)

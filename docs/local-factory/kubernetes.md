@@ -112,5 +112,25 @@ Automated checks cover unsafe archive rejection, no API-key fallback, fixed Job
 boundaries, proxy denial, cancellation auth retention, delayed Pod deletion,
 target routing, restart and shutdown, and lost publication reconciliation. A real
 GKE probe verified denied metadata/API/direct internet access, proxy restrictions,
-read-only source and absence of a cluster token. Native model execution and PR
-delivery must additionally pass after the operator completes the dedicated login.
+read-only source and absence of a cluster token.
+
+Live acceptance on 2026-10-15 used a dedicated Codex subscription login: the
+read-only connection check returned PONG, a fresh single-agent Job returned PONG,
+and the standard pipeline triaged a small documentation task, skipped Spec,
+built it and published [PR #519](https://github.com/owainlewis/machinist/pull/519).
+Independent Review accepted the pushed revision after CI passed. A second commit
+on the same PR exercised public Why / What / Verification descriptions without
+publishing the private handoff. Local/VM and sandbox delivery share this prompt
+contract. The trusted connector also updates the existing PR description.
+
+A cancellation test stopped a running native command, confirmed no attempt Pods
+or credential locks remained, and then passed another native PONG check using the
+retained login. This proves cache persistence across fresh Pods, including after
+cancellation; a new login did not require token refresh during these short tests.
+
+The UI shows live preparation, GitHub verification, sandbox startup, execution and
+publication phases with the runner heartbeat and elapsed time. These transient
+signals stay in memory and are never published to GitHub. Preparation diagnostics
+are bounded private logs retained before Pod cleanup. The checkout is created by
+the non-root init container inside the source volume, so Git ownership checks
+remain enabled.

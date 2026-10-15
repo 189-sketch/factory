@@ -25,6 +25,9 @@ var triagePrompt string
 //go:embed prompts/factory.md
 var factoryContract string
 
+//go:embed prompts/pull-request.md
+var pullRequestPrompt string
+
 func readStepResult(path string) (*protocol.StepResult, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -50,6 +53,14 @@ func readStepResult(path string) (*protocol.StepResult, error) {
 }
 
 func factoryPrompt(factory *protocol.FactoryContext, workspace string) string {
+	prompt := factoryStagePrompt(factory, workspace)
+	if factory.Role == "implement" || factory.Role == "spec" {
+		prompt += "\n\n" + pullRequestPrompt
+	}
+	return prompt
+}
+
+func factoryStagePrompt(factory *protocol.FactoryContext, workspace string) string {
 	if factory.CommitOnly && (factory.Role == "implement" || factory.Role == "spec") {
 		body, _ := json.Marshal(factory)
 		return fmt.Sprintf(sandboxPrompt, factory.Role, body, workspace)

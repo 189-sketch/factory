@@ -20,8 +20,9 @@ import (
 )
 
 type Connector struct {
-	Config config.Kubernetes
-	run    func(context.Context, io.Reader, int, ...string) ([]byte, error)
+	Config   config.Kubernetes
+	Progress func(string)
+	run      func(context.Context, io.Reader, int, ...string) ([]byte, error)
 }
 
 func (c Connector) command(ctx context.Context, input io.Reader, limit int, args ...string) ([]byte, error) {
@@ -97,6 +98,7 @@ func (c Connector) Login(ctx context.Context, in io.Reader, out, stderr io.Write
 }
 
 func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly bool) (runner.Result, string, error) {
+	c.progress("starting_sandbox")
 	if err := c.Config.Validate(); err != nil {
 		return runner.Result{}, "", err
 	}
@@ -214,6 +216,7 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 		return runner.Result{}, "", err
 	}
 	// Retrieve auth separately, never in result.json, event logs or public files.
+	c.progress("collecting_result")
 	if err = c.retainAuth(ctx, pod); err != nil {
 		return runner.Result{}, "", err
 	}
@@ -351,6 +354,15 @@ func (c Connector) awaitResult(ctx context.Context, pod string) error {
 		}
 		status, _ := object["status"].(map[string]any)
 		phase, _ := status["phase"].(string)
+		if containers, ok := status["containerStatuses"].([]any); ok {
+			for _, raw := range containers {
+				container, _ := raw.(map[string]any)
+				state, _ := container["state"].(map[string]any)
+				if container["name"] == "agent" && state["running"] != nil {
+					c.progress("running_agent")
+				}
+			}
+		}
 		if phase == "Failed" || phase == "Succeeded" {
 			return fmt.Errorf("sandbox terminated before acknowledgement; inspect the Job and reseed auth before clearing its lock")
 		}
@@ -359,6 +371,12 @@ func (c Connector) awaitResult(ctx context.Context, pod string) error {
 			return ctx.Err()
 		case <-time.After(time.Second):
 		}
+	}
+}
+
+func (c Connector) progress(phase string) {
+	if c.Progress != nil {
+		c.Progress(phase)
 	}
 }
 

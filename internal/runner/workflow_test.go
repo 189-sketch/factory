@@ -76,3 +76,16 @@ func TestNativeFactoryMessagePresentation(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryDeliveryModeSeparatesPublicPRDescriptionFromPrivateHandoff(t *testing.T) {
+	for _, factory := range []*protocol.FactoryContext{
+		{Role: "implement"}, {Role: "spec"}, {Role: "implement", Recipe: "single"}, {Role: "implement", CommitOnly: true},
+	} {
+		prompt := factoryPrompt(factory, "/workspace")
+		for _, required := range []string{"factory.pr_description", "## Why", "## What", "## Verification", "internal handoff in factory.report"} {
+			if !strings.Contains(prompt, required) {
+				t.Fatalf("delivery mode %+v lacks public PR guidance %q", factory, required)
+			}
+		}
+	}
+}

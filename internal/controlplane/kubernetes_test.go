@@ -124,3 +124,26 @@ func TestClearInboxPersistsWithoutDeletingTaskAndResurfacesOnChange(t *testing.T
 		t.Fatal("clearing inbox wrote to GitHub")
 	}
 }
+
+func TestRunProgressIsLiveAndNeverStoredAsWorkflowState(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	id := submitRecipe(t, s, "single", "live-progress")
+	run := factoryPoll(t, s)
+	lease := s.liveLease(run.ID)
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/heartbeat", protocol.Heartbeat{InstanceID: lease.instance, LeaseToken: run.LeaseToken, Phase: "starting_sandbox"}, 204)
+	job := factoryJob(t, s, id)
+	if job.Runs[0].Phase != "starting_sandbox" || job.Runs[0].HeartbeatAt == nil {
+		t.Fatal("live phase and heartbeat are missing")
+	}
+	if s.tasks[id].state.Job.Runs[0].Phase != "" {
+		t.Fatal("transient progress was persisted into workflow state")
+	}
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/heartbeat", protocol.Heartbeat{InstanceID: lease.instance, LeaseToken: run.LeaseToken, Phase: "untrusted arbitrary text"}, 204)
+	if factoryJob(t, s, id).Runs[0].Phase != "starting_sandbox" {
+		t.Fatal("unrecognized progress text reached the UI")
+	}
+	s.deleteLease(run.ID)
+	if factoryJob(t, s, id).Runs[0].HeartbeatAt != nil {
+		t.Fatal("old heartbeat survived its lease")
+	}
+}

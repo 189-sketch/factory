@@ -66,6 +66,8 @@ type Job struct {
 }
 
 type Run struct {
+	Phase          string             `json:"phase,omitempty"`
+	HeartbeatAt    *time.Time         `json:"heartbeat_at,omitempty"`
 	Report         string             `json:"report,omitempty"`
 	GitHubURL      string             `json:"github_url,omitempty"`
 	Revision       *protocol.Revision `json:"revision,omitempty"`
