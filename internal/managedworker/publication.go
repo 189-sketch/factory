@@ -18,6 +18,7 @@ import (
 // fresh sandbox. The receipt stays until a later stage/head supersedes it, so a
 // lost completion response or host restart can also replay publication safely.
 type candidatePublication struct {
+	Task       *protocol.Task          `json:"task,omitempty"`
 	Repository string                  `json:"repository"`
 	Workspace  string                  `json:"workspace"`
 	Base       string                  `json:"base"`
@@ -38,7 +39,7 @@ func (w *Worker) savePublication(spec protocol.RunSpec, repository, workspace, b
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(candidatePublication{Repository: repository, Workspace: workspace, Base: base, Bundle: bundle, Assignment: *spec.Factory, Result: result})
+	data, err := json.Marshal(candidatePublication{Task: spec.Task, Repository: repository, Workspace: workspace, Base: base, Bundle: bundle, Assignment: *spec.Factory, Result: result})
 	if err != nil {
 		return err
 	}
@@ -89,6 +90,10 @@ func (w *Worker) resumePublication(ctx context.Context, registered string, spec 
 	previous, assigned := pending.Assignment, spec.Factory
 	if previous.Role != assigned.Role || previous.Recipe != assigned.Recipe || previous.Branch != assigned.Branch || previous.HeadSHA != assigned.HeadSHA || previous.PRURL != assigned.PRURL {
 		return completion, false // The controller has moved to another stage/head.
+	}
+	if (pending.Task == nil) != (spec.Task == nil) || (pending.Task != nil && *pending.Task != *spec.Task) {
+		completion.Error = "Task requirements changed since the pending publication; start a new run for the revised request"
+		return completion, true
 	}
 	if publicationFeedback(previous.Context) != publicationFeedback(assigned.Context) {
 		completion.Error = "finish pending PR publication by retrying without new feedback, then request changes on the published result"

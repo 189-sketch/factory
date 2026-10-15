@@ -15,23 +15,28 @@ import (
 const GitHubFactoryMarker = "<!-- machinist:v1 -->\n"
 
 type GitHubFactoryEvent struct {
-	Recipe     string               `json:"recipe,omitempty"`
-	Version    int                  `json:"version"`
-	Previous   int64                `json:"previous"`
-	Kind       string               `json:"kind"`
-	RunID      string               `json:"run_id,omitempty"`
-	Role       string               `json:"role,omitempty"`
-	Prompt     string               `json:"prompt,omitempty"`
-	PromptHash string               `json:"prompt_hash,omitempty"`
-	Executor   string               `json:"executor,omitempty"`
-	Model      string               `json:"model,omitempty"`
-	WorkerName string               `json:"worker_name,omitempty"`
-	Result     *protocol.StepResult `json:"result,omitempty"`
-	Feedback   string               `json:"feedback,omitempty"`
-	Stopped    bool                 `json:"stopped,omitempty"`
+	ExitCode       *int                 `json:"exit_code,omitempty"`
+	Error          string               `json:"error,omitempty"`
+	TokenUsage     *int64               `json:"token_usage,omitempty"`
+	DurationMillis *int64               `json:"duration_millis,omitempty"`
+	Recipe         string               `json:"recipe,omitempty"`
+	Version        int                  `json:"version"`
+	Previous       int64                `json:"previous"`
+	Kind           string               `json:"kind"`
+	RunID          string               `json:"run_id,omitempty"`
+	Role           string               `json:"role,omitempty"`
+	Prompt         string               `json:"prompt,omitempty"`
+	PromptHash     string               `json:"prompt_hash,omitempty"`
+	Executor       string               `json:"executor,omitempty"`
+	Model          string               `json:"model,omitempty"`
+	WorkerName     string               `json:"worker_name,omitempty"`
+	Result         *protocol.StepResult `json:"result,omitempty"`
+	Feedback       string               `json:"feedback,omitempty"`
+	Stopped        bool                 `json:"stopped,omitempty"`
 }
 
 type GitHubFactoryState struct {
+	CancelledFrom   string
 	FixedRecipe     bool
 	Job             Job
 	LastEventID     int64
@@ -136,6 +141,11 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 		s.LastEventID = comment.ID
 		s.Job.UpdatedAt = comment.CreatedAt
 		switch event.Kind {
+		case "dispatch_blocked":
+			if s.Job.State != "queued" {
+				return nil, ErrWorkflowAction
+			}
+			s.block(event.Feedback)
 		case "started":
 			if s.Job.State != "queued" || event.Role != s.Role {
 				return nil, fmt.Errorf("stage is not queued")
@@ -143,6 +153,8 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if strings.TrimSpace(event.Prompt) == "" || event.PromptHash == "" {
 				return nil, fmt.Errorf("started stage requires its prompt snapshot and hash")
 			}
+			run.Prompt = event.Prompt
+			run.CommandHash = event.PromptHash
 			run.State = "running"
 			run.StartedAt = comment.CreatedAt
 			run.Executor = event.Executor
@@ -175,6 +187,13 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if !run.StartedAt.IsZero() {
 				duration := max(int64(0), comment.CreatedAt.Sub(run.StartedAt).Milliseconds())
 				run.DurationMillis = &duration
+			}
+			run.ExitCode, run.Error = event.ExitCode, event.Error
+			if event.TokenUsage != nil && *event.TokenUsage >= 0 {
+				run.TokenUsage = event.TokenUsage
+			}
+			if event.DurationMillis != nil && *event.DurationMillis >= 0 {
+				run.DurationMillis = event.DurationMillis
 			}
 			run.Outcome = result.Outcome
 			run.Summary = result.Summary
@@ -212,7 +231,12 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 				return nil, fmt.Errorf("confirm previous process stopped before retry")
 			}
 			s.Feedback = event.Feedback
-			s.queue(issue.HTMLURL, s.Role, "queued")
+			state := "queued"
+			if s.Job.State == "cancelled" && s.CancelledFrom == "awaiting_approval" {
+				state = "awaiting_approval"
+			}
+			s.CancelledFrom = ""
+			s.queue(issue.HTMLURL, s.Role, state)
 		case "request_changes":
 			if s.Job.Recipe == "answer" {
 				return nil, fmt.Errorf("Answer jobs use retry for feedback and cannot route into delivery")
@@ -233,7 +257,10 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if s.Job.State == "succeeded" || s.Job.State == "cancelled" {
 				return nil, ErrWorkflowAction
 			}
-			run.State = "cancelled"
+			s.CancelledFrom = s.Job.State
+			if run.Outcome == "" && run.CompletedAt.IsZero() {
+				run.State = "cancelled"
+			}
 			s.Job.State = "cancelled"
 		case "complete_merge":
 			if s.Job.State != "awaiting_merge" {
@@ -304,6 +331,10 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 		}
 		if progress.PRURL != "" && (progress.PRURL != f.PRURL || progress.Branch != f.Branch) {
 			s.block("Specification revision must retain the existing PR and branch")
+			return nil
+		}
+		if progress.SpecURL != "" && progress.HeadSHA == f.HeadSHA {
+			s.block("Specification revision made no new commit")
 			return nil
 		}
 		progress.SpecURL = f.SpecURL

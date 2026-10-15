@@ -66,6 +66,8 @@ type Job struct {
 }
 
 type Run struct {
+	Prompt         string             `json:"prompt,omitempty"`
+	CommandHash    string             `json:"command_hash,omitempty"`
 	Phase          string             `json:"phase,omitempty"`
 	HeartbeatAt    *time.Time         `json:"heartbeat_at,omitempty"`
 	Report         string             `json:"report,omitempty"`

@@ -19,19 +19,21 @@ import (
 // Automations reuse single-agent jobs. Only their definitions and schedule cursor
 // are additional state; execution, recovery and delivery use the normal runner.
 type factoryAutomation struct {
-	StopConfirmedAt *time.Time `json:"stop_confirmed_at,omitempty"`
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	Repository      string     `json:"repository"`
-	Prompt          string     `json:"prompt"`
-	Cron            string     `json:"cron"`
-	Timezone        string     `json:"timezone"`
-	Paused          bool       `json:"paused"`
-	Version         int        `json:"version"`
-	NextDue         *time.Time `json:"next_due,omitempty"`
-	LastRun         *time.Time `json:"last_run,omitempty"`
-	LastJob         string     `json:"last_job,omitempty"`
-	LastError       string     `json:"last_error,omitempty"`
+	Busy                  bool       `json:"busy,omitempty"`
+	NeedsStopConfirmation bool       `json:"needs_stop_confirmation,omitempty"`
+	StopConfirmedAt       *time.Time `json:"stop_confirmed_at,omitempty"`
+	ID                    string     `json:"id"`
+	Name                  string     `json:"name"`
+	Repository            string     `json:"repository"`
+	Prompt                string     `json:"prompt"`
+	Cron                  string     `json:"cron"`
+	Timezone              string     `json:"timezone"`
+	Paused                bool       `json:"paused"`
+	Version               int        `json:"version"`
+	NextDue               *time.Time `json:"next_due,omitempty"`
+	LastRun               *time.Time `json:"last_run,omitempty"`
+	LastJob               string     `json:"last_job,omitempty"`
+	LastError             string     `json:"last_error,omitempty"`
 }
 
 func (s *factoryLocalStore) automations(ctx context.Context) ([]factoryAutomation, error) {
@@ -103,7 +105,11 @@ func (s *GitHubFactoryServer) validateAutomation(a *factoryAutomation, now time.
 func (s *GitHubFactoryServer) listAutomations(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	list, err := s.local.automations(r.Context())
+	if err := s.refresh(r.Context(), false); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	list, err := s.automationStatus(r.Context())
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -269,8 +275,9 @@ func (s *GitHubFactoryServer) automationBusy(ctx context.Context, a factoryAutom
 			return true, nil
 		}
 		if job.State == "cancelled" && !stopped && (a.StopConfirmedAt == nil || job.UpdatedAt.After(*a.StopConfirmedAt)) {
-			for _, run := range job.Runs {
-				if !run.StartedAt.IsZero() {
+			if len(job.Runs) > 0 {
+				run := job.Runs[len(job.Runs)-1]
+				if !run.StartedAt.IsZero() && run.CompletedAt.IsZero() {
 					return true, errors.New("verify the previous runner processes have stopped before starting another run")
 				}
 			}
@@ -463,4 +470,23 @@ func (s *GitHubFactoryServer) serveAutomations(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// Runtime indicators are derived, never persisted as scheduling authority.
+func (s *GitHubFactoryServer) automationStatus(ctx context.Context) ([]factoryAutomation, error) {
+	list, err := s.local.automations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		list[i].Busy, err = s.automationBusy(ctx, list[i], "", true)
+		if err != nil {
+			return nil, err
+		}
+		if !list[i].Busy {
+			_, stopErr := s.automationBusy(ctx, list[i], "", false)
+			list[i].NeedsStopConfirmation = stopErr != nil
+		}
+	}
+	return list, nil
 }

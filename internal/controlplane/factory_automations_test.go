@@ -212,6 +212,11 @@ func TestAutomationHistoricalRetriesCannotOverlapNewerRuns(t *testing.T) {
 		t.Fatal("successful retry was not immediately claimable")
 	}
 	automationRun(t, s, a, "third", 409)
+	var list []factoryAutomation
+	json.Unmarshal(factoryHTTP(t, s, "GET", "/api/v1/automations", nil, 200), &list)
+	if len(list) != 1 || !list[0].Busy {
+		t.Fatal("historical active retry missing from automation status")
+	}
 }
 
 func TestAutomationAdmissionAndCursorRollbackTogether(t *testing.T) {

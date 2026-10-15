@@ -16,6 +16,11 @@ test("automations expose manual and scheduled jobs, progress and editor without 
   const html = renderToStaticMarkup(React.createElement(AutomationsPage,{automations:[a],jobs:[{id:"job1",state:"awaiting_merge"}],repositories:["repo"],loaded:true}));
   assert.match(html,/Resume/); assert.match(html,/href="#\/runs\/job1"/); assert.match(html,/Run now/);
   assert.match(html,/repository root/); assert.doesNotMatch(html,/<details|type="checkbox"|role="switch"/);
+  const historical = renderToStaticMarkup(React.createElement(AutomationsPage,{automations:[{...a,busy:true}],jobs:[{id:"job1",state:"succeeded"}],repositories:["repo"],loaded:true}));
+  assert.match(historical,/Waiting on an active run/);
+  assert.match(historical,/<button[^>]*disabled=""[^>]*>[\s\S]*?Run now/);
+  const stopped = renderToStaticMarkup(React.createElement(AutomationsPage,{automations:[{...a,needs_stop_confirmation:true}],jobs:[{id:"job1",state:"cancelled"}],repositories:["repo"],loaded:true}));
+  assert.match(stopped,/Confirm stopped and run/);
   const editor = renderToStaticMarkup(React.createElement(AutomationEditor,{initial:a,repositories:["repo"],pending:false}));
   assert.match(editor,/Instructions/); assert.match(editor,/Timezone/); assert.match(editor,/Delete automation/);
 });

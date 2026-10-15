@@ -209,3 +209,10 @@ func TestCancellationRetainsAuthAndWaitsForPodDeletion(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallAllowsGoProxyDownloads(t *testing.T) {
+	data, _ := json.Marshal((Connector{}).InstallObjects())
+	if !strings.Contains(string(data), "storage.googleapis.com") {
+		t.Fatal("Go module archive host is blocked")
+	}
+}

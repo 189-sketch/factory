@@ -118,7 +118,7 @@ func (s *GitHubFactoryServer) seedPublicationHolds(ctx context.Context) error {
 		return nil
 	}
 	for _, task := range s.tasks {
-		if (task.state.Job.State == "blocked" || task.state.Job.ID == "github_c64108094ef7986624f5c339") && task.state.Job.PublicationHold == "" {
+		if task.state.Job.State == "blocked" && task.state.Job.PublicationHold == "" {
 			if err := s.event(ctx, task, GitHubFactoryEvent{Kind: "publication_hold", Feedback: "Imported blocked work: publication requires explicit operator review"}); err != nil {
 				return err
 			}

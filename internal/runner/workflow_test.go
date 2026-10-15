@@ -89,3 +89,13 @@ func TestEveryDeliveryModeSeparatesPublicPRDescriptionFromPrivateHandoff(t *test
 		}
 	}
 }
+
+func TestFactoryDoesNotRenderUserTemplateTokensAgain(t *testing.T) {
+	const output = `{"type":"item.completed","item":{"type":"agent_message","text":"{\"outcome\":\"complete\",\"summary\":\"PONG\",\"factory\":{\"version\":1,\"role\":\"triage\",\"resolved\":true,\"report\":\"PONG\"}}"}}` + "\n"
+	command := codexJSONAgentCommand(t, "codex-review", "codex", false, `input=$(cat); case "$input" in *'{{inputs.plan}}'*) ;; *) exit 7;; esac; printf '%s' '`+output+`'`, 5*time.Second)
+	command.Prompt = "User asks about {{inputs.plan}} and {{stage.output_dir}}"
+	result, err := Execute(t.Context(), Options{Factory: &protocol.FactoryContext{Role: "triage"}, Task: &protocol.Task{Spec: "literal braces"}, Workflow: true, JobID: "task", Command: command, Repository: newGitRepository(t), DataDirectory: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil || result.StepResult == nil {
+		t.Fatalf("literal user tokens failed: %v", err)
+	}
+}

@@ -10,8 +10,10 @@ Sign in through the GitHub App and grant access to the repositories you want to
 use. Add more repositories from **Projects → Add project**. Each project has its
 own checkout and uses the shared agent and execution target.
 
-Local agents receive a refreshed GitHub App token scoped by the Git credential
-helper to their selected repository. On a VM, the worker uses the GitHub login
+Local agents receive a refreshed GitHub App token. The Git credential helper
+limits normal Git authentication to the selected repository; the API token still
+has access to all repositories granted to the App. Local and VM agents are trusted
+with their host account permissions, so project selection is not a security sandbox. On a VM, the worker uses the GitHub login
 configured on that host. Kubernetes agent pods receive no GitHub credentials;
 the trusted connector publishes their changes. See
 [Kubernetes setup](local-factory/kubernetes.md).

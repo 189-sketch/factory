@@ -64,14 +64,14 @@ export function AutomationsPage({ automations = [], jobs = [], repositories = []
     {!loaded ? <p role="status" className="py-8 text-sm text-muted-foreground">Loading automations…</p> : automations.length ? <div className="automation-list" aria-label="Saved automations">
       {automations.map(a => {
         const job = jobs.find(job => job.id === a.last_job);
-        const busy = job && !["succeeded", "failed", "cancelled"].includes(job.state);
+        const busy = a.busy || (job && !["succeeded", "failed", "cancelled"].includes(job.state));
         return <article key={a.id} className="automation-row">
           <div className="automation-info"><h2>{a.name}</h2><p>{a.repository}</p><p className="automation-schedule"><Clock3 className="size-3.5" aria-hidden="true" />{automationSchedule(a)}</p>
             {a.next_due && <p>Next: <time dateTime={a.next_due}>{dateLabel(a.next_due)}</time></p>}
             {a.last_error && <p className="text-warning">{a.last_error}</p>}
           </div>
-          <div className="automation-result">{a.last_job ? <><a href={`#/runs/${a.last_job}`}>Last run<span className="sr-only"> {a.name}</span></a>{job && <State value={job.state} compact />}{busy && <span>Waiting on this run</span>}{a.last_run && <time dateTime={a.last_run}>{dateLabel(a.last_run)}</time>}</> : <span>No runs yet</span>}</div>
-          <div className="automation-actions">{confirmRun === a.id && <Button variant="outline" size="sm" disabled={Boolean(pending)} onClick={() => act(a, "run", true)}>Confirm stopped and run</Button>}<Button variant="outline" size="sm" disabled={Boolean(pending) || Boolean(editor) || Boolean(busy)} onClick={() => act(a, "run")}><Play className="size-3.5" />{pending === a.id ? "Working…" : "Run now"}<span className="sr-only"> {a.name}</span></Button>
+          <div className="automation-result">{a.last_job ? <><a href={`#/runs/${a.last_job}`}>Last run<span className="sr-only"> {a.name}</span></a>{job && <State value={job.state} compact />}{busy && <span>Waiting on an active run</span>}{a.last_run && <time dateTime={a.last_run}>{dateLabel(a.last_run)}</time>}</> : <span>No runs yet</span>}</div>
+          <div className="automation-actions">{(confirmRun === a.id || a.needs_stop_confirmation) && <Button variant="outline" size="sm" disabled={Boolean(pending)} onClick={() => act(a, "run", true)}>Confirm stopped and run</Button>}<Button variant="outline" size="sm" disabled={Boolean(pending) || Boolean(editor) || Boolean(busy)} onClick={() => act(a, "run")}><Play className="size-3.5" />{pending === a.id ? "Working…" : "Run now"}<span className="sr-only"> {a.name}</span></Button>
             {a.cron && <Button variant="ghost" size="sm" disabled={Boolean(pending) || Boolean(editor)} onClick={() => act(a, "pause")}>{a.paused ? "Resume" : "Pause"}<span className="sr-only"> {a.name}</span></Button>}
             <Button variant="ghost" size="sm" disabled={Boolean(pending) || Boolean(editor)} onClick={event => { opener.current = event.currentTarget; setFailure(""); setConflict(false); setEditor(a); }}>Edit<span className="sr-only"> {a.name}</span></Button>
           </div>

@@ -484,3 +484,27 @@ func TestServerStateStorageSelection(t *testing.T) {
 		t.Fatalf("GitHub mode retained database: %+v %v", server, err)
 	}
 }
+
+func TestKubeconfigPathsFollowConfigDirectory(t *testing.T) {
+	for _, input := range []string{"cluster/config", "~/machinist-kubeconfig", ""} {
+		t.Run(input, func(t *testing.T) {
+			base := t.TempDir()
+			want := input
+			if input != "" {
+				var err error
+				want, err = resolveConfigPath(input, base)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			worker, err := applyWorkerDefaults(Worker{Name: "test", configDir: base, Kubernetes: &Kubernetes{Kubeconfig: input}})
+			if err != nil || worker.Kubernetes.Kubeconfig != want {
+				t.Fatalf("worker path: %v %v", worker.Kubernetes, err)
+			}
+			server, err := applyServerDefaults(Server{State: "factory", WorkerTokenFile: "worker.token", configDir: base, Kubernetes: &Kubernetes{Kubeconfig: input}})
+			if err != nil || server.Kubernetes.Kubeconfig != want {
+				t.Fatalf("server path: %v %v", server.Kubernetes, err)
+			}
+		})
+	}
+}

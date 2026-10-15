@@ -50,6 +50,11 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 			}
 		}
 	}
+	for _, executor := range workerConfig.Executors {
+		if err := runner.CheckRestrictedClaude(context.Background(), executor.Command); err != nil {
+			return nil, err
+		}
+	}
 	client, err := NewClient(workerConfig)
 	if err != nil {
 		return nil, err
@@ -232,10 +237,20 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 				return recovered
 			}
 		}
+		registeredRepository := repository
 		repository, err = w.factoryWorkspace(ctx, repository, spec)
 		if err != nil {
 			completion.Error = err.Error()
 			return completion
+		}
+		if spec.Factory.Role == "review" {
+			defer func() {
+				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+				if _, err := repositoryCommand(cleanup, registeredRepository)("git", "worktree", "remove", repository); err != nil {
+					fmt.Fprintf(w.stderr, "machinist: review workspace retained: %v\n", err)
+				}
+			}()
 		}
 	}
 	command, err := w.config.ResolveCommandModel(config.ResolvedCommand{

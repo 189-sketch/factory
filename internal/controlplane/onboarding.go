@@ -478,6 +478,11 @@ func (o *onboarding) selectAgent(agent, host string) error {
 		if _, err := exec.LookPath(agent); err != nil {
 			return fmt.Errorf("%s was not found on this computer", agent)
 		}
+		if agent == "claude" {
+			if err := runner.CheckRestrictedClaude(context.Background(), setupExecutors(agent)["claude-review"].Command); err != nil {
+				return err
+			}
+		}
 	}
 	o.stopWorker()
 	o.mu.Lock()

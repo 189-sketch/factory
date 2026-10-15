@@ -2,6 +2,7 @@ package managedworker
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,6 +119,17 @@ func TestFactoryWorkspacePreservesTaskAndReviewSnapshot(t *testing.T) {
 	}
 	if content, err := os.ReadFile(filepath.Join(synced, "other")); err != nil || string(content) != "implemented on host B" {
 		t.Fatal("host B implementation missing")
+	}
+	// Early command-resolution failure still removes its disposable review snapshot.
+	worker.config.Repositories = map[string]config.Repository{"repo": {Path: repo}}
+	worker.config.Executors = map[string]config.Executor{"codex-review": {ReadOnly: true}}
+	worker.stderr = io.Discard
+	reviewSpec := protocol.RunSpec{ID: "cleanup-review", JobID: "task1", Repository: "repo", Executor: "codex-review", Factory: &protocol.FactoryContext{Role: "review", HeadSHA: spec.Factory.HeadSHA, Branch: "codex/task1"}}
+	if completion := worker.execute(context.Background(), reviewSpec); completion.State != "failed" {
+		t.Fatal("invalid executor was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(worker.config.DataDirectory, "workspaces", "task1-review-cleanup-review")); !os.IsNotExist(err) {
+		t.Fatal("disposable review checkout leaked after failure")
 	}
 	// Unpublished host A commits cannot be discarded or silently resumed.
 	if err := os.WriteFile(filepath.Join(synced, "local"), []byte("unpublished"), 0600); err != nil {

@@ -231,3 +231,38 @@ func TestGitHubFactoryReviewWithoutReport(t *testing.T) {
 		})
 	}
 }
+
+func TestCancelledSpecificationStillRequiresApproval(t *testing.T) {
+	j := newJournal(t)
+	j.finish(protocol.FactoryResult{NeedsSpec: true})
+	j.finish(specFixtureResult())
+	j.add(GitHubFactoryEvent{Kind: "cancel"})
+	j.add(GitHubFactoryEvent{Kind: "retry", Stopped: true})
+	if j.state.Job.State != "awaiting_approval" {
+		t.Fatal("retry bypassed specification approval")
+	}
+	j.add(GitHubFactoryEvent{Kind: "approve"})
+	if j.state.Job.State != "queued" {
+		t.Fatal("explicit approval did not dispatch")
+	}
+}
+func TestSpecificationRevisionRequiresNewCommit(t *testing.T) {
+	j := newJournal(t)
+	j.finish(protocol.FactoryResult{NeedsSpec: true})
+	j.finish(specFixtureResult())
+	j.add(GitHubFactoryEvent{Kind: "request_changes", Feedback: "Revise the design"})
+	j.finish(specFixtureResult())
+	if j.state.Job.State != "blocked" || !strings.Contains(j.state.Job.Runs[len(j.state.Job.Runs)-1].Summary, "no new commit") {
+		t.Fatal("unchanged specification revision accepted")
+	}
+}
+func TestCancelPreservesAcceptedReviewHistory(t *testing.T) {
+	j := newJournal(t)
+	j.finish(protocol.FactoryResult{})
+	j.finish(protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", Branch: "task-1", HeadSHA: strings.Repeat("b", 40)})
+	j.finish(protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: strings.Repeat("b", 40), Verdict: "accepted"})
+	j.add(GitHubFactoryEvent{Kind: "cancel"})
+	if j.state.Job.State != "cancelled" || j.state.Job.Runs[len(j.state.Job.Runs)-1].State != "succeeded" {
+		t.Fatal("cancellation overwrote completed review")
+	}
+}

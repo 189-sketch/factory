@@ -531,6 +531,12 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 			return Worker{}, fmt.Errorf("executor %q defines models but its command does not contain %s", name, modelParameter)
 		}
 	}
+	if worker.Kubernetes != nil && worker.Kubernetes.Kubeconfig != "" {
+		worker.Kubernetes.Kubeconfig, err = resolveConfigPath(worker.Kubernetes.Kubeconfig, worker.configDir)
+		if err != nil {
+			return Worker{}, err
+		}
+	}
 	return worker, nil
 }
 
@@ -565,6 +571,12 @@ func applyServerDefaults(server Server) (Server, error) {
 	tokenPath, err := resolveConfigPath(server.WorkerTokenFile, server.configDir)
 	if err != nil {
 		return Server{}, fmt.Errorf("resolve worker token file: %w", err)
+	}
+	if server.Kubernetes != nil && server.Kubernetes.Kubeconfig != "" {
+		server.Kubernetes.Kubeconfig, err = resolveConfigPath(server.Kubernetes.Kubeconfig, server.configDir)
+		if err != nil {
+			return Server{}, err
+		}
 	}
 	server.WorkerTokenFile = tokenPath
 	return server, nil

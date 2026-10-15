@@ -38,7 +38,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   let finishClear;
   globalThis.fetch = async (url, options) => {
     if(url.endsWith("/clear_inbox")) return new Promise(resolve=>{finishClear=()=>{otherInterruptedJob.inbox_cleared=true;resolve({ok:true,json:async()=>({})});};});
-    if (url === "/api/v1/definitions") return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
+    if (url.startsWith("/api/v1/definitions")) return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
     if (url === "/api/v1/factory/agents/triage" && options?.method === "PUT") { savedPrompt = JSON.parse(options.body); return { ok: true, json: async () => ({ hash: "new-hash" }) }; }
 
     if (url.endsWith("/cancel") && options?.method === "POST") {
@@ -54,7 +54,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
       ] };
     }
     if (url.endsWith("/content")) return { ok: true, text: async () => "<script>literal file text</script>" };
-    return { ok: true, json: async () => ({ jobs: [...jobs, detailJob, interruptedJob, otherInterruptedJob, humanDecisionJob, pendingReviewJob, githubJob, { ...otherInterruptedJob, id: "job_interrupted_second", task: { title: "Second interrupted task" }, runs: [{ id: "second-interrupted", command: "build", state: "interrupted" }] }], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
+    return { ok: true, json: async () => ({ state_backend: "local", jobs: [...jobs, detailJob, interruptedJob, otherInterruptedJob, humanDecisionJob, pendingReviewJob, githubJob, { ...otherInterruptedJob, id: "job_interrupted_second", task: { title: "Second interrupted task" }, runs: [{ id: "second-interrupted", command: "build", state: "interrupted" }] }], workers: [], commands: [], repositories: ["example/repo"], triggers: [], csrf_token: "test" }) };
   };
 
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
@@ -170,8 +170,8 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Triage")).click();
   await eventually(()=>assert.equal(document.querySelector("textarea").value,"Updated triage prompt"));
   button("Save prompt").click();
-  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
-  await eventually(() => assert.match(document.body.textContent, /Saved. Future attempts use this version/));
+  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash", repository: "example/repo" }));
+  await eventually(() => assert.match(document.body.textContent, /Saved. Future stage attempts use this Markdown version/));
 
   window.location.hash = "#/inbox";
   await eventually(()=>assert.ok(document.querySelector(".inbox-list")));

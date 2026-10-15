@@ -103,6 +103,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if options.Stdout == nil || options.Stderr == nil {
 		return Result{}, errors.New("stdout and stderr are required")
 	}
+	if err := CheckRestrictedClaude(ctx, options.Command.Command); err != nil {
+		return Result{}, err
+	}
 	repository, err := ResolveRepository(options.Repository)
 	if err != nil {
 		return Result{}, err
@@ -160,7 +163,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	}
 	outputDirectory := ""
 	scratchDirectory := ""
-	if options.Task != nil {
+	if options.Task != nil && options.Factory == nil {
 		outputDirectory = filepath.Join(runDirectory, "outputs")
 		scratchDirectory = filepath.Join(runDirectory, "scratch")
 		if err := os.Mkdir(scratchDirectory, 0700); err != nil {

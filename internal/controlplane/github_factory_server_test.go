@@ -339,6 +339,11 @@ func TestLinkedIssueRefreshesRequirementsAndClosedStateBeforeDispatch(t *testing
 				if run != nil {
 					t.Fatal("closed issue dispatched")
 				}
+				for _, task := range s.tasks {
+					if task.state.Job.State != "blocked" {
+						t.Fatal("closed issue stayed queued")
+					}
+				}
 				return
 			}
 			if run == nil || run.Task.Spec != "Updated requirements" || run.Task.Title != "Updated task" {

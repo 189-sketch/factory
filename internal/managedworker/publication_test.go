@@ -76,7 +76,7 @@ func TestCandidatePublicationResumesAfterPushAndAPIFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	worker := &Worker{config: config.Worker{DataDirectory: workerDir, Kubernetes: &config.Kubernetes{}, Repositories: map[string]config.Repository{"repo": {Path: registered}}}, client: &Client{base: server.URL, http: server.Client()}, instanceID: "worker"}
-	spec := protocol.RunSpec{ID: "first-attempt", JobID: "task", Repository: "repo", GitHubRepository: "owner/repo", LeaseToken: "lease", Factory: &protocol.FactoryContext{Role: "implement", Recipe: "factory", Branch: "codex/task", HeadSHA: base, PRURL: "https://github.com/owner/repo/pull/12"}}
+	spec := protocol.RunSpec{ID: "first-attempt", JobID: "task", Repository: "repo", GitHubRepository: "owner/repo", LeaseToken: "lease", Task: &protocol.Task{Title: "Task", Spec: "Original requirements"}, Factory: &protocol.FactoryContext{Role: "implement", Recipe: "factory", Branch: "codex/task", HeadSHA: base, PRURL: "https://github.com/owner/repo/pull/12"}}
 	result := runner.Result{ID: spec.ID, EventsPath: filepath.Join(runDir, "events.jsonl"), State: runner.StateSucceeded, StepResult: &protocol.StepResult{Outcome: "complete", Summary: "Delivered candidate", Factory: &protocol.FactoryResult{Version: 1, Role: "implement", Report: "Verified change", Branch: "codex/task", HeadSHA: head}}}
 	if err := worker.publishCandidate(ctx, workspace, bundle, spec, &result); err == nil {
 		t.Fatal("expected post-push GitHub API failure")
@@ -119,6 +119,13 @@ func TestCandidatePublicationResumesAfterPushAndAPIFailure(t *testing.T) {
 	changed.Factory = &feedback
 	if rejected := restarted.execute(ctx, changed); !strings.Contains(rejected.Error, "without new feedback") {
 		t.Fatal("pending publication discarded new feedback")
+	}
+	newTask := *spec.Task
+	newTask.Spec = "Revised linked issue requirements"
+	revised := spec
+	revised.Task = &newTask
+	if rejected := restarted.execute(ctx, revised); !strings.Contains(rejected.Error, "requirements changed") {
+		t.Fatal("cached candidate accepted revised task requirements")
 	}
 	advanced := *spec.Factory
 	advanced.HeadSHA = head

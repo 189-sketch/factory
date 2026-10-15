@@ -81,4 +81,9 @@ test("a retained repository prompt draft keeps its original version for conflict
   assert.equal(document.querySelector("textarea").disabled, false);
   assert.equal(document.querySelector("select").disabled, false);
   assert.equal(document.querySelector("textarea").value, "# My unsaved draft");
+  globalThis.fetch = async () => ({ ok:true,json:async()=>({commands:[{name:"triage",prompt:"Legacy prompt"}]}) });
+  await act(async()=>root.render(React.createElement(AgentsPage,{csrfToken:"test",repositories:["repo"],stateBackend:"sqlite"})));
+  await click("Edit prompt");
+  assert.match(document.body.textContent,/legacy backend uses configuration files/);
+  assert.equal(document.querySelector("textarea"),null);
 });

@@ -23,7 +23,9 @@ Open the printed local URL. Setup guides you through four steps:
    only after it returns PONG. Local workers start automatically after setup.
 
 Install Git, GitHub CLI, and the selected coding CLI first. Sign in to the coding
-CLI on its execution host. Leave model selection unset to use the CLI default.
+CLI on its execution host. Claude Code requires version 2.1.248 or later for
+restricted Triage and Review; older versions receive an upgrade error before
+starting an agent. See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference). Leave model selection unset to use the CLI default.
 The CLI needs a writable runtime directory. If launching inside another agent's
 restricted environment, use a separate writable provider runtime or start
 Machinist from your normal terminal.
@@ -55,8 +57,12 @@ is requested. Permissions are still subject to repository rules and organization
 approval.
 
 App access tokens and refresh tokens are saved locally in a private directory.
-Local agent Git/gh processes receive the refreshed token through their environment,
-with a Git credential helper limited to the selected repository. Tokens are never
+Local agent Git/gh processes receive the refreshed token through their environment.
+The Git credential helper limits normal Git authentication to the selected
+repository, but the API token can access every repository granted to the App.
+Local and VM agents are trusted with their host account permissions; their
+checkout selection is not a security sandbox. Use Kubernetes when agents must
+run without GitHub credentials. Tokens are never
 written to remote URLs, executor arguments, or issue comments.
 
 ## Remote VM

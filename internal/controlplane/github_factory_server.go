@@ -358,7 +358,7 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 			onboardingState = data
 		}
 	}
-	automations, err := s.local.automations(r.Context())
+	automations, err := s.automationStatus(r.Context())
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -366,6 +366,8 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"automations": automations, "onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
 }
 func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	writeJSON(w, 200, catalogResponse{Workflows: []string{"factory"}, Commands: []string{}, Repositories: s.repositoryNames()})
 }
 func (s *GitHubFactoryServer) command(ctx context.Context, repo, role string) (config.ResolvedCommand, error) {
@@ -887,6 +889,13 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			}
 			state = task.state
 		}
+		if state.Job.State == "queued" && task.issue.State != "open" {
+			if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: "dispatch_blocked", RunID: state.Job.Runs[len(state.Job.Runs)-1].ID, Role: state.Role, Feedback: "The linked GitHub issue is closed. Reopen it before retrying."}); err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			continue
+		}
 		if state.Job.PublicationHold != "" || task.issue.State != "open" || state.Job.State != "queued" || !repositories[state.Job.Repository] {
 			continue
 		}
@@ -921,6 +930,14 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		if hash == "" {
 			sum := sha256.Sum256([]byte(command.Prompt))
 			hash = "bundled-" + hex.EncodeToString(sum[:])
+		}
+		encodedPrompt, _ := json.Marshal(prompt)
+		if len(encodedPrompt) > 768<<10 {
+			if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: "dispatch_blocked", RunID: state.Job.Runs[len(state.Job.Runs)-1].ID, Role: state.Role, Feedback: "The rendered prompt is too large. Shorten the agent prompt or task before retrying."}); err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			continue
 		}
 		if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "started", RunID: run.ID, Role: role, Prompt: prompt, PromptHash: hash, Executor: command.Executor, Model: command.Model, WorkerName: p.Name}); err != nil {
 			writeError(w, 409, err)
@@ -1110,11 +1127,14 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var result struct {
-		StepResult json.RawMessage `json:"step_result"`
+		StepResult     json.RawMessage `json:"step_result"`
+		TokenUsage     *int64          `json:"token_usage"`
+		DurationMillis *int64          `json:"duration_millis"`
 	}
 	step := &protocol.StepResult{Outcome: "failed", Summary: p.Error, Factory: &protocol.FactoryResult{Version: 1, Role: lease.spec.Factory.Role}}
+	decodeErr := json.Unmarshal(p.Result, &result)
 	if p.State == "succeeded" {
-		if err = json.Unmarshal(p.Result, &result); err == nil {
+		if err = decodeErr; err == nil {
 			step, err = protocol.ParseStepResult(result.StepResult)
 		}
 		if err != nil {
@@ -1135,7 +1155,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
-	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", RunID: id, Role: lease.spec.Factory.Role, Result: step}); err != nil {
+	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
 		writeError(w, 409, err)
 		return
 	}
