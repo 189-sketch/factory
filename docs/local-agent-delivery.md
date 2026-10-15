@@ -36,8 +36,8 @@ such as `[repositories.my_repo]` in `~/.machinist/worker.toml`.
 ## Prompts and run history stay local
 
 The control plane stores jobs, rendered prompts, runs, and workflow attempts in
-a local SQLite database. By default it is `~/.machinist/server/machinist.db`. Saved task
-files are kept on the same server's disk. See
+a local SQLite database. By default it is `~/.machinist/server/machinist.db`.
+Saved task files are kept on the same server's disk. See
 [configuration](configuration.md#artifact-storage-directory).
 
 Machinist does not post prompts or run logs to GitHub. What reaches GitHub is
