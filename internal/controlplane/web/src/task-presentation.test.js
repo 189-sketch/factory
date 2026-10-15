@@ -39,3 +39,10 @@ test("factory review completion binds accepted handoff and remains incomplete du
   assert.equal(handoff.stages[3].current, false);
   assert.equal(handoff.stages[1].skipped, true);
 });
+
+
+test("an informational answer completes only triage and skips unused factory stages", () => {
+ const result=taskPresentation({state:"succeeded",workflow:{steps:["triage","spec","implement","review"],current_step:0,factory:{}},runs:[{id:"reply",command:"triage",outcome:"complete"}]});
+ assert.equal(result.stages[0].complete,true);
+ assert.ok(result.stages.slice(1).every(stage=>stage.skipped && !stage.complete));
+});

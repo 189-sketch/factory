@@ -231,7 +231,9 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 	progress := s.Job.Workflow.Factory
 	switch s.Role {
 	case "triage":
-		if f.NeedsSpec {
+		if f.Resolved {
+			s.Job.State = "succeeded"
+		} else if f.NeedsSpec {
 			s.queue(url, "spec", "queued")
 		} else {
 			s.queue(url, "implement", "queued")

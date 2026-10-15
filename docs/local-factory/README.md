@@ -30,6 +30,8 @@ repository. Adopted issues receive the `machinist:task` label. Repeating intake
 for the same issue reuses its task.
 
 1. Triage researches requirements and chooses whether a specification is needed.
+   Questions and health checks needing no repository changes can finish here.
+   For example, PING returns PONG without creating an implementation PR.
 2. Spec pushes a tracked document to the task branch and opens one draft PR.
    Approve that revision through Inbox. Open spec takes you to GitHub.
 3. Implement reuses the task branch and PR, runs checks, pushes the result, and
@@ -58,6 +60,13 @@ Agent prompts are edited in Agents and saved to `.machinist/agents/{role}.md`
 in GitHub using commit-SHA concurrency checks. Bundled prompts are the fallback
 when that file does not exist. Each stage journals its prompt snapshot before
 execution. A later stage uses the then-current prompt.
+
+Coding CLIs need writable runtime directories and a model supported by the signed-in
+account. A worker launched inside another agent sandbox may inherit read-only
+restrictions on its usual CLI home. Start it from your normal terminal, or configure
+a separate writable CLI runtime using the provider's supported settings. Leave the
+model unset to use the CLI default. Recognized startup failures show recovery
+instructions without publishing raw worker output.
 
 Machine paths, credentials, executors, configuration, logs, and working checkouts
 stay on the host. Connection caches and leases are disposable. Restart rebuilds

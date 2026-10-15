@@ -37,6 +37,7 @@ export function TaskDetail({
         {error && <p role="alert">{error}</p>}
       </div>
     );
+  if (factoryTask) return <FactoryTaskDetail job={job} error={error} onWorkflowAction={onWorkflowAction} />;
   const terminal = ["succeeded", "failed", "cancelled"].includes(job.state);
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
@@ -303,6 +304,42 @@ export function TaskDetail({
   );
 }
 
+function FactoryTaskDetail({ job, error, onWorkflowAction }) {
+  const { result, history, stages } = taskPresentation(job);
+  const latest = job.runs.at(-1);
+  const progress = job.workflow?.factory;
+  return (
+    <article className="factory-task">
+      <header className="factory-task-header">
+        <a href="#/runs" className="factory-back"><ArrowLeft className="size-4" aria-hidden="true" />All runs</a>
+        <div className="factory-task-title"><h1>{jobDisplayTitle(job)}</h1><State value={job.state} /></div>
+        <div className="factory-task-meta"><span>{job.repository}</span><span>·</span><a href={job.task?.source_url} target="_blank" rel="noreferrer">Open issue</a></div>
+      </header>
+      {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      <ol className="factory-progress" aria-label="Task progress">
+        {stages.map(stage => <li key={stage.name} aria-current={stage.current ? "step" : undefined} className={cn(stage.current && "is-current", stage.complete && "is-complete")}>
+          {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{friendlyName(stage.name)}{stage.skipped && <span>Skipped</span>}
+        </li>)}
+      </ol>
+      <section className="factory-result" aria-label="Current result">
+        <h2>{resultTitle(job, result)}</h2>
+        {result?.summary && <p className="factory-summary">{result.summary}</p>}
+        {result?.error && result.error !== result.summary && <p role="alert" className="factory-summary text-danger">{result.error}</p>}
+        {!result?.summary && <p className="factory-summary">{job.state === "running" ? "The agent is working. Results will appear here." : "Waiting for a worker to pick up this task."}</p>}
+        {progress?.spec_url && <a className="factory-spec-link" href={progress.spec_url} target="_blank" rel="noreferrer">Open spec on GitHub<ArrowRight className="size-4" aria-hidden="true" /></a>}
+        <TaskActions key={`${job.id}:${latest?.id}:${job.state}`} job={job} result={result} onAction={onWorkflowAction} />
+      </section>
+      {history.length > 0 && <section className="factory-history" aria-label="Previous attempts"><h2>Earlier activity</h2><ol>{history.map(run => <li key={run.id}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{friendlyName(run.command)}</span><State value={run.outcome === "complete" ? "succeeded" : run.outcome || run.state} /></div><p>{run.summary || run.error}</p>{run.github_url && <a href={run.github_url} target="_blank" rel="noreferrer">View on GitHub</a>}</li>)}</ol></section>}
+      <details className="factory-details"><summary>Run details</summary>
+        {result && <ExecutionDetails run={result} />}
+        <dl className="mt-5 grid gap-3 sm:grid-cols-2"><RunMetric label="Task ID" value={job.id} /><RunMetric label="Updated" value={formatTimestamp(job.updated_at)} /></dl>
+        {result?.github_url && <a className="mt-5 block text-sm text-primary underline" href={result.github_url} target="_blank" rel="noreferrer">Open stage on GitHub</a>}
+        <h2 className="mt-6 mb-2 text-sm font-medium">Original request</h2><p className="whitespace-pre-wrap break-words text-sm leading-6">{job.task?.spec || job.prompt}</p>
+      </details>
+    </article>
+  );
+}
+
 function ExecutionDetails({ run }) {
   return (
     <section
@@ -450,7 +487,7 @@ function TaskActions({ job, result, onAction }) {
       )}
       {job.state === "awaiting_merge" && <p className="text-sm text-muted-foreground">Independent review is complete. Inspect the pull request and CI checks on GitHub, then merge when ready. Machinist verifies the merge before completing this task.</p>}
       {humanDecision && <p className="text-sm text-muted-foreground">The reviewer needs your judgment. Request changes to send your decision to implementation, or retry review after resolving the question.</p>}
-      {retry && !requesting && <label className="block"><span className="field-label">Reply or recovery context · optional</span><textarea className="field-control min-h-24" value={feedback} onChange={event => setFeedback(event.target.value)} maxLength={4000} placeholder="Answer the agent’s question or explain what changed." /></label>}
+      {retry && !requesting && <details className="retry-context" open={job.state === "blocked" ? true : undefined}><summary>Add context before retrying</summary><label className="mt-3 block"><span className="field-label">Reply or recovery context · optional</span><textarea className="field-control min-h-24" value={feedback} onChange={event => setFeedback(event.target.value)} maxLength={4000} placeholder="Answer the agent’s question or explain what changed." /></label></details>}
       {job.state === "blocked" && (
         <p className="text-sm text-muted-foreground">
           Update the issue or resolve the blocker, then retry this step.

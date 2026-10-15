@@ -29,7 +29,8 @@ It creates an isolated task worktree and a detached review snapshot.
 process trees on cancellation or timeout. Factory results come from the agent's
 final JSON response, without local report-file publication.
 
-Triage may skip Spec. Spec pushes a document and draft PR, then waits for approval
+Triage can answer informational requests without repository changes, or route code
+work onward. Triage may skip Spec. Spec pushes a document and draft PR, then waits for approval
 of that attempt. Implement reuses the branch and PR. Review checks the exact
 published head using bounded host-collected diff and GitHub check evidence.
 Findings trigger at most three repair rounds on the same PR. Accepted review waits

@@ -152,6 +152,8 @@ test("runs default to list view and share filters when switching views", async (
   assert.ok(document.querySelector('a[href="https://github.com/example/repo/issues/1#issuecomment-2"]'));
   assert.equal([...document.querySelectorAll("button")].some(element => element.textContent === "Delete task"), false);
   assert.equal([...document.querySelectorAll('[role="tab"]')].some(element => ["Artifacts", "Handoffs"].includes(element.textContent)), false);
+  assert.equal(document.querySelector('[role="tablist"]'), null, "factory task uses a single reading flow");
+  assert.equal([...document.querySelectorAll("details")].find(el => el.querySelector("summary")?.textContent === "Run details")?.open, false, "technical details start collapsed");
   window.location.hash = "#/agents";
   await eventually(() => assert.ok(document.querySelector('[aria-label="Factory agents"]')));
   await eventually(() => assert.equal(document.querySelector("textarea").value, "triage original prompt"));

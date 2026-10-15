@@ -362,3 +362,30 @@ func TestGitHubFactoryHeartbeatDuringBlockedGitHubRefresh(t *testing.T) {
 		t.Fatal("heartbeat did not preserve run lease")
 	}
 }
+
+func TestGitHubFactoryAnswersWithoutStartingImplementation(t *testing.T) {
+	client := newMemoryFactoryGitHub()
+	s := githubFactoryTestServer(t, client)
+	id := factorySubmit(t, s)
+	run := factoryPoll(t, s)
+	completion := factoryCompletion(run, protocol.FactoryResult{Resolved: true, Report: "PONG"})
+	var result map[string]protocol.StepResult
+	if err := json.Unmarshal(completion.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	step := result["step_result"]
+	step.Summary = "PONG"
+	completion.Result, _ = json.Marshal(map[string]protocol.StepResult{"step_result": step})
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	job := factoryJob(t, s, id)
+	if job.State != "succeeded" || len(job.Runs) != 1 || job.Runs[0].Summary != "PONG" {
+		t.Fatalf("job = %#v", job)
+	}
+	if next := factoryPoll(t, s); next != nil {
+		t.Fatal("informational request started implementation")
+	}
+	fresh := githubFactoryTestServer(t, client)
+	if factoryJob(t, fresh, id).State != "succeeded" {
+		t.Fatal("answer lost on restart")
+	}
+}

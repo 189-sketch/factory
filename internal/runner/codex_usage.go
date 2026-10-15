@@ -17,6 +17,7 @@ const (
 )
 
 type structuredUsageCollector struct {
+	diagnostics  *startupDiagnostics
 	buffer       []byte
 	discarding   bool
 	usage        *int64
@@ -508,10 +509,11 @@ func (collector *structuredUsageCollector) completeLine() {
 
 func (collector *structuredUsageCollector) parseLine(line []byte) {
 	var event struct {
-		Type   string          `json:"type"`
-		Usage  json.RawMessage `json:"usage"`
-		Result string          `json:"result"`
-		Item   struct {
+		Type    string          `json:"type"`
+		IsError bool            `json:"is_error"`
+		Usage   json.RawMessage `json:"usage"`
+		Result  string          `json:"result"`
+		Item    struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"item"`
@@ -521,6 +523,9 @@ func (collector *structuredUsageCollector) parseLine(line []byte) {
 			collector.usage = nil
 		}
 		return
+	}
+	if collector.diagnostics != nil && (event.Type == "error" || event.Type == "turn.failed" || (event.Type == "result" && event.IsError)) {
+		_, _ = collector.diagnostics.Write(line)
 	}
 	switch {
 	case event.Type == "item.completed" && event.Item.Type == "agent_message" && event.Item.Text != "":

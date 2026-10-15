@@ -277,12 +277,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	var streams sync.WaitGroup
 	streams.Add(2)
 	usageCollector := newUsageCollector(options.Command.Executor, executorCommand)
+	diagnostics := &startupDiagnostics{}
 	stdoutDestination := options.Stdout
 	if usageCollector != nil {
+		usageCollector.diagnostics = diagnostics
 		stdoutDestination = io.MultiWriter(options.Stdout, usageCollector)
 	}
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	go pumpStream(&streams, stderrReader, io.MultiWriter(options.Stderr, diagnostics), "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
@@ -297,6 +299,14 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
 	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
+	if usageCollector != nil {
+		usageCollector.flush()
+	}
+	if state == StateFailed && outcome != nil && agentExecutor {
+		if hint := diagnostics.message(); hint != "" {
+			outcome = fmt.Errorf("%s (%w)", hint, outcome)
+		}
+	}
 	if options.Workflow && state == StateSucceeded {
 		step, err := readStepResult(filepath.Join(runDirectory, "step-result.json"))
 		// Factory stages return their contract as the final agent message;

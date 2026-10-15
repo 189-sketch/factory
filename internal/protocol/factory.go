@@ -28,6 +28,7 @@ type Finding struct {
 
 // FactoryResult adds a versioned routing contract without changing legacy steps.
 type FactoryResult struct {
+	Resolved  bool      `json:"resolved,omitempty"`
 	SpecURL   string    `json:"spec_url,omitempty"`
 	Report    string    `json:"report,omitempty"`
 	Version   int       `json:"version"`
@@ -51,6 +52,9 @@ func (r FactoryResult) Validate() error {
 	case "triage", "spec", "implement", "review":
 	default:
 		return errors.New("invalid factory role")
+	}
+	if r.Resolved && (r.Role != "triage" || r.NeedsSpec) {
+		return errors.New("only triage can resolve a request without changes, without requesting a spec")
 	}
 	if r.NeedsSpec && r.Role != "triage" {
 		return errors.New("only triage may request a spec")
