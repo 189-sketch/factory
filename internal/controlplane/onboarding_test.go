@@ -15,7 +15,10 @@ import (
 	"github.com/owainlewis/machinist/internal/protocol"
 )
 
-func setupTestServer(t *testing.T) (*GitHubFactoryServer, *onboarding) {
+func setupTestServer(t *testing.T, repositoryNames ...string) (*GitHubFactoryServer, *onboarding) {
+	if len(repositoryNames) == 0 {
+		repositoryNames = []string{"owner/repo"}
+	}
 	t.Helper()
 	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
 	o, err := newOnboarding(s)
@@ -31,7 +34,11 @@ func setupTestServer(t *testing.T) (*GitHubFactoryServer, *onboarding) {
 		case "/user/installations":
 			w.Write([]byte(`{"installations":[{"id":1,"permissions":{"contents":"write","issues":"write","pull_requests":"write","checks":"read","statuses":"read"}}]}`))
 		case "/user/installations/1/repositories":
-			w.Write([]byte(`{"repositories":[{"id":1,"full_name":"owner/repo","permissions":{"push":true}}]}`))
+			repos := []map[string]any{}
+			for i, name := range repositoryNames {
+				repos = append(repos, map[string]any{"id": i + 1, "full_name": name, "permissions": map[string]bool{"push": true}})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"repositories": repos})
 		case "/repos/owner/repo":
 			w.Write([]byte(`{"permissions":{"push":true}}`))
 		default:

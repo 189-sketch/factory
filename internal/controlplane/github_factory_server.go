@@ -165,6 +165,7 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/onboarding/repositories", s.onboardingRepositories)
 	mux.HandleFunc("GET /api/v1/onboarding/worker-config", s.onboardingWorkerConfig)
 	mux.HandleFunc("POST /api/v1/onboarding/{action...}", s.auth.authorizeSubmission(s.onboardingAction))
+	mux.HandleFunc("POST /api/v1/projects", s.auth.authorizeSubmission(s.addProject))
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("PUT /api/v1/factory/agents/{name}", s.auth.authorizeSubmission(s.savePrompt))

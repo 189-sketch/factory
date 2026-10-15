@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -38,11 +39,12 @@ type setupCheck struct {
 	Message string `json:"message"`
 }
 type setupSettings struct {
-	ClientID   string         `json:"client_id"`
-	InstallURL string         `json:"install_url"`
-	Selection  setupSelection `json:"selection"`
-	Check      setupCheck     `json:"check"`
-	Finished   bool           `json:"finished"`
+	Repositories map[string]string `json:"repositories,omitempty"`
+	ClientID     string            `json:"client_id"`
+	InstallURL   string            `json:"install_url"`
+	Selection    setupSelection    `json:"selection"`
+	Check        setupCheck        `json:"check"`
+	Finished     bool              `json:"finished"`
 }
 type LocalWorker interface {
 	Run(context.Context) error
@@ -58,6 +60,7 @@ type setupHealth struct {
 }
 
 type onboarding struct {
+	configureMu   sync.Mutex // Serializes setup and project changes, including worker restarts.
 	mu            sync.Mutex
 	settings      setupSettings
 	dir, baseURL  string
@@ -85,8 +88,12 @@ func newOnboarding(s *GitHubFactoryServer) (*onboarding, error) {
 	if err != nil {
 		return nil, err
 	}
-	if o.settings.Selection.Repository != "" {
-		s.repositories[o.settings.Selection.Repository] = o.settings.Selection.Repository
+	o.settings.Repositories = o.settings.projectPaths()
+	for repo := range o.settings.Repositories {
+		if _, err := githubRepositoryPath(repo); err != nil {
+			return nil, fmt.Errorf("configured project: %w", err)
+		}
+		s.repositories[repo] = repo
 	}
 	o.runCheck = o.checkAgent
 	return o, nil
@@ -120,7 +127,25 @@ func (o *onboarding) saveLocked() error {
 	}
 	return os.Rename(name, filepath.Join(o.dir, "settings.json"))
 }
-func (o *onboarding) snapshot() setupSettings { o.mu.Lock(); defer o.mu.Unlock(); return o.settings }
+func (state setupSettings) projectPaths() map[string]string {
+	paths := maps.Clone(state.Repositories)
+	if paths == nil {
+		paths = map[string]string{}
+	}
+	if state.Selection.Repository != "" {
+		if _, ok := paths[state.Selection.Repository]; !ok {
+			paths[state.Selection.Repository] = state.Selection.Path
+		}
+	}
+	return paths
+}
+func (o *onboarding) snapshot() setupSettings {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	state := o.settings
+	state.Repositories = state.projectPaths()
+	return state
+}
 func (o *onboarding) status(ctx context.Context) (map[string]any, error) {
 	github, err := o.connection.Status(ctx)
 	if err != nil {
@@ -191,6 +216,10 @@ func (s *GitHubFactoryServer) onboardingAction(w http.ResponseWriter, r *http.Re
 	}
 	o := s.setup
 	action := r.PathValue("action")
+	if action == "check" || action == "finish" || action == "github/disconnect" || action == "github/configure" {
+		o.configureMu.Lock()
+		defer o.configureMu.Unlock()
+	}
 	var result any = map[string]bool{"ok": true}
 	var err error
 	switch action {
@@ -324,16 +353,16 @@ func (s *GitHubFactoryServer) onboardingRepositories(w http.ResponseWriter, r *h
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, 200, repos)
 }
-func (o *onboarding) selectRepository(ctx context.Context, repo, path string) error {
+func (o *onboarding) prepareRepository(ctx context.Context, repo, path string) (string, error) {
 	if _, err := githubRepositoryPath(repo); err != nil {
-		return err
+		return "", err
 	}
 	repos, err := o.loadRepositories(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !slices.ContainsFunc(repos, func(r GitHubConnectedRepository) bool { return r.FullName == repo }) {
-		return errors.New("the GitHub App cannot access this repository")
+		return "", errors.New("the GitHub App cannot access this repository")
 	}
 	for _, r := range repos {
 		if r.FullName == repo && !r.CanWrite {
@@ -341,56 +370,56 @@ func (o *onboarding) selectRepository(ctx context.Context, repo, path string) er
 			if reason == "" {
 				reason = "GitHub write access is required for this repository"
 			}
-			return errors.New(reason)
+			return "", errors.New(reason)
 		}
 	}
 	token, err := o.connection.Token(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	env, err := githubauth.GitHubEnvironment(token, repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if path == "" {
 		path = filepath.Join(o.dir, "checkouts", filepath.FromSlash(repo))
 		if _, e := os.Stat(path); os.IsNotExist(e) {
 			if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				return err
+				return "", err
 			}
 			cmd := exec.CommandContext(ctx, "git", "clone", "--", "https://github.com/"+repo+".git", path)
 			cmd.Env = append(os.Environ(), env...)
 			if err = cmd.Run(); err != nil {
-				return errors.New("could not clone repository; verify GitHub App contents access")
+				return "", errors.New("could not clone repository; verify GitHub App contents access")
 			}
 		}
 	}
 	path, err = filepath.Abs(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	path, err = filepath.EvalSymlinks(path)
 	if err != nil {
-		return errors.New("checkout path does not exist")
+		return "", errors.New("checkout path does not exist")
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--show-toplevel")
 	raw, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(raw)) != path {
-		return errors.New("choose the root of an existing Git checkout")
+		return "", errors.New("choose the root of an existing Git checkout")
 	}
 	cmd = exec.CommandContext(ctx, "git", "-C", path, "remote", "get-url", "origin")
 	raw, err = cmd.Output()
 	if err != nil || !sameGitHubRepository(strings.TrimSpace(string(raw)), repo) {
-		return errors.New("checkout origin does not match the selected GitHub repository")
+		return "", errors.New("checkout origin does not match the selected GitHub repository")
 	}
 	cmd = exec.CommandContext(ctx, "git", "-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	raw, err = cmd.Output()
 	if err != nil {
-		return errors.New("could not locate checkout metadata")
+		return "", errors.New("could not locate checkout metadata")
 	}
 	probe, err := os.CreateTemp(strings.TrimSpace(string(raw)), "machinist-write-check-*")
 	if err != nil {
-		return errors.New("checkout Git metadata is not writable; leave the checkout path blank to create a managed clone")
+		return "", errors.New("checkout Git metadata is not writable; leave the checkout path blank to create a managed clone")
 	}
 	probeName := probe.Name()
 	_ = probe.Close()
@@ -399,22 +428,19 @@ func (o *onboarding) selectRepository(ctx context.Context, repo, path string) er
 	cmd = exec.CommandContext(ctx, "git", "-C", path, "ls-remote", "--exit-code", "origin", "HEAD")
 	cmd.Env = append(os.Environ(), env...)
 	if err = cmd.Run(); err != nil {
-		return errors.New("Git could not access the selected repository with the GitHub App credential")
+		return "", errors.New("Git could not access the selected repository with the GitHub App credential")
 	}
-	o.stopWorker()
-	o.mu.Lock()
-	o.settings.Selection = setupSelection{Repository: repo, Path: path}
-	o.settings.Check = setupCheck{}
-	o.settings.Finished = false
-	err = o.saveLocked()
-	o.mu.Unlock()
+	return path, nil
+}
+
+func (o *onboarding) selectRepository(ctx context.Context, repo, path string) error {
+	o.configureMu.Lock()
+	defer o.configureMu.Unlock()
+	prepared, err := o.prepareRepository(ctx, repo, path)
 	if err != nil {
 		return err
 	}
-	o.server.mu.Lock()
-	o.server.repositories[repo] = repo
-	o.server.mu.Unlock()
-	return nil
+	return o.commitProject(repo, prepared, true)
 }
 func sameGitHubRepository(remote, repo string) bool {
 	for _, prefix := range []string{"https://github.com/", "git@github.com:", "ssh://git@github.com/"} {
@@ -425,6 +451,8 @@ func sameGitHubRepository(remote, repo string) bool {
 	return false
 }
 func (o *onboarding) selectAgent(agent, host string) error {
+	o.configureMu.Lock()
+	defer o.configureMu.Unlock()
 	if agent != "codex" && agent != "claude" {
 		return errors.New("select Codex or Claude Code")
 	}
@@ -480,7 +508,11 @@ func (o *onboarding) workerConfig(selection setupSelection) (config.Worker, erro
 	if err := os.WriteFile(tokenPath, []byte(o.server.auth.workerToken), 0600); err != nil {
 		return config.Worker{}, err
 	}
-	cfg := config.Worker{Name: "machinist-local", DataDirectory: filepath.Join(o.dir, "worker"), ControlPlane: config.ControlPlane{URL: base, TokenFile: tokenPath}, Executors: setupExecutors(selection.Agent), Repositories: map[string]config.Repository{selection.Repository: {Path: selection.Path}}}
+	repositories := map[string]config.Repository{}
+	for repo, path := range o.snapshot().projectPaths() {
+		repositories[repo] = config.Repository{Path: path}
+	}
+	cfg := config.Worker{Name: "machinist-local", DataDirectory: filepath.Join(o.dir, "worker"), ControlPlane: config.ControlPlane{URL: base, TokenFile: tokenPath}, Executors: setupExecutors(selection.Agent), Repositories: repositories}
 	if selection.Host == "kubernetes" {
 		definition, err := config.LoadConfig(o.server.definitionPath)
 		if err != nil {
@@ -520,7 +552,7 @@ func (o *onboarding) startWorker() error {
 		return err
 	}
 	worker.SetGitHubTokenProvider(func(ctx context.Context, alias string) (string, error) {
-		if alias != state.Selection.Repository {
+		if _, allowed := cfg.Repositories[alias]; !allowed {
 			return "", errors.New("worker repository not selected")
 		}
 		repos, err := o.loadRepositories(ctx)
@@ -539,6 +571,11 @@ func (o *onboarding) startWorker() error {
 		o.mu.Unlock()
 		cancel()
 		return nil
+	}
+	if o.settings.Selection != state.Selection || !maps.Equal(o.settings.projectPaths(), state.projectPaths()) {
+		o.mu.Unlock()
+		cancel()
+		return errors.New("runner configuration changed; retry setup")
 	}
 	o.cancel = cancel
 	o.done = done
@@ -786,14 +823,23 @@ func (s *GitHubFactoryServer) onboardingWorkerConfig(w http.ResponseWriter, r *h
 		writeError(w, 400, errors.New("select a repository and remote VM first"))
 		return
 	}
-	cfg := config.Worker{Name: "machinist-vm", DataDirectory: "./machinist-worker", ControlPlane: config.ControlPlane{URL: "http://127.0.0.1:17341", TokenFile: "./worker.token"}, Executors: setupExecutors(selection.Agent), Repositories: map[string]config.Repository{selection.Repository: {Path: "./repository"}}}
+	repositories := map[string]config.Repository{}
+	for repo := range s.setup.snapshot().projectPaths() {
+		repositories[repo] = config.Repository{Path: "./repositories/" + repo}
+	}
+	cfg := config.Worker{Name: "machinist-vm", DataDirectory: "./machinist-worker", ControlPlane: config.ControlPlane{URL: "http://127.0.0.1:17341", TokenFile: "./worker.token"}, Executors: setupExecutors(selection.Agent), Repositories: repositories}
 	raw, err := toml.Marshal(cfg)
 	if err != nil {
 		writeError(w, 500, err)
 		return
 	}
 	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	script := "#!/bin/sh\nset -eu\numask 077\ncommand -v machinist >/dev/null\ncommand -v gh >/dev/null\ncommand -v " + selection.Agent + " >/dev/null\ngh auth status\nmkdir -p machinist-vm\ncd machinist-vm\nprintf '%s' " + q(s.auth.workerToken) + " > worker.token\ncat > worker.toml <<'MACHINIST_CONFIG'\n" + string(raw) + "MACHINIST_CONFIG\nif [ ! -d repository/.git ]; then gh repo clone " + q(selection.Repository) + " repository; fi\nexec machinist worker start --config worker.toml\n"
+	script := "#!/bin/sh\nset -eu\numask 077\ncommand -v machinist >/dev/null\ncommand -v gh >/dev/null\ncommand -v " + selection.Agent + " >/dev/null\ngh auth status\nmkdir -p machinist-vm\ncd machinist-vm\nprintf '%s' " + q(s.auth.workerToken) + " > worker.token\ncat > worker.toml <<'MACHINIST_CONFIG'\n" + string(raw) + "MACHINIST_CONFIG\n"
+	for _, repo := range slices.Sorted(maps.Keys(repositories)) {
+		path := repositories[repo].Path
+		script += "mkdir -p " + q(filepath.Dir(path)) + "\nif [ ! -d " + q(path+"/.git") + " ]; then gh repo clone " + q(repo) + " " + q(path) + "; fi\n"
+	}
+	script += "exec machinist worker start --config worker.toml\n"
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="machinist-worker-setup.sh"`)
 	w.Header().Set("Cache-Control", "no-store")

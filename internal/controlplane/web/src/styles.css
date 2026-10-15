@@ -417,3 +417,28 @@ a { text-underline-offset: 3px; }
 .dashboard-error h2 {color:var(--danger);}
 @media(max-width:1100px){.dashboard-columns{grid-template-columns:minmax(0,1fr);}.dashboard-runtime{border-left:0;border-top:1px solid var(--border);border-radius:0 0 6px 6px;}.dashboard-runtime-link{max-width:none;}.dashboard-priority-columns{gap:16px;}}
 @media(max-width:767px){.dashboard-stat{padding:12px;}.dashboard-stat:first-child{padding-left:0;}.dashboard-stat > strong{font-size:24px;}.dashboard-stat > div{font-size:11px;line-height:1.4;min-height:32px;align-items:flex-start;gap:6px;}.dashboard-stat small{font-size:10px;}.dashboard-priority-columns{grid-template-columns:minmax(0,1fr);gap:12px;}.dashboard-activity,.dashboard-runtime{padding:16px;}.dashboard-job-row{grid-template-columns:minmax(0,1fr) auto;gap:8px;}.dashboard-job-title strong{white-space:normal;overflow-wrap:anywhere;}.dashboard-job-stage{display:none;}.dashboard-job-row > time{grid-column:1 / -1;text-align:left;margin-top:-4px;}.app-sidebar nav .nav-item[href="#/repositories"]{display:none;}.dashboard-section-heading{gap:12px;}}
+
+/* Project management extends the same compact list and inline editor. */
+.project-editor {max-width:56rem;border:1px solid var(--border);border-radius:6px;margin-bottom:24px;}
+.project-editor > header {display:flex;align-items:center;justify-content:space-between;padding:8px 16px;border-bottom:1px solid var(--border);}
+.project-editor h2 {font-size:14px;font-weight:600;}
+.project-editor form {display:grid;gap:14px;padding:16px;}
+.project-editor label {display:grid;gap:6px;font-size:12px;font-weight:500;}
+.project-editor label small {color:var(--muted-foreground);font-weight:400;}
+.project-editor footer {display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:14px;}
+.project-hint,.project-notice {font-size:12px;line-height:1.7;color:var(--muted-foreground);}
+.project-hint a {display:inline-flex;gap:3px;align-items:center;color:var(--primary);text-decoration:underline;}
+.project-notice {margin-bottom:16px;color:var(--foreground);}
+.project-error {font-size:13px;line-height:1.6;color:var(--danger);}
+.project-refresh {display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--muted-foreground);}
+.project-list {border-top:1px solid var(--border);}
+.project-list article {display:flex;gap:12px;align-items:center;padding:16px 0;border-bottom:1px solid var(--border);font-size:13px;}
+.project-list article > svg {color:var(--muted-foreground);flex-shrink:0;}
+.project-list article > div {min-width:0;}
+.project-list article a {display:inline-flex;align-items:center;gap:4px;overflow-wrap:anywhere;font-weight:500;}
+.project-list article a:hover {color:var(--primary);}
+.project-list article small {display:block;font-size:11px;color:var(--muted-foreground);margin-top:4px;}
+.project-list article > span {margin-left:auto;white-space:nowrap;font-size:11px;}
+.project-connected {color:var(--success);}
+.project-vm-setup {display:grid;gap:4px;margin-bottom:16px;}
+@media(max-width:480px){.project-list article{flex-wrap:wrap;}.project-list article > div{flex:1;}.project-list article > span{margin-left:28px;width:100%;}.project-editor form{padding:14px;}}

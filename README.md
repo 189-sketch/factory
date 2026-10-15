@@ -67,6 +67,18 @@ Connect GitHub, choose a repository and local or VM agent, then verify it with P
 No TOML editing or GitHub issue is needed for the connection check. See the
 [onboarding guide](docs/local-factory/README.md).
 
+## Multiple projects
+
+Open **Projects → Add project** to connect another repository. Adding a project
+preserves your existing projects, agent, and execution target. Each repository
+gets its own checkout, and runs and automations choose from the configured list.
+The project list is saved on the control-plane host and restored after restart.
+
+Only repositories granted to your GitHub App appear. Use **Manage GitHub access**
+to grant more repositories, then **Refresh repositories**. Local and Kubernetes
+runners reload while idle. For a VM, stop its existing worker, download the updated
+VM setup from Projects, and run it to clone and register all configured projects.
+
 ## How execution works
 
 For the four-specialist pipeline and its Warp-style Inbox, Runs, Agents, and
