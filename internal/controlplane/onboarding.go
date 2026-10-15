@@ -445,7 +445,7 @@ func (o *onboarding) selectAgent(agent, host string) error {
 }
 func setupExecutors(agent string) map[string]config.Executor {
 	if agent == "claude" {
-		return map[string]config.Executor{"claude": {Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"}}, "claude-review": {ReadOnly: true, Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"}}}
+		return map[string]config.Executor{"claude": {Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"}}, "claude-review": {ReadOnly: true, Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--safe-mode", "--restricted", "--strict-mcp-config", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"}}}
 	}
 	return map[string]config.Executor{"codex": {Command: []string{"codex", "exec", "--json", "--sandbox", "danger-full-access", "-"}}, "codex-review": {ReadOnly: true, Command: []string{"codex", "exec", "--json", "--sandbox", "read-only", "-"}}}
 }

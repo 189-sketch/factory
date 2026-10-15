@@ -44,6 +44,9 @@ type Store struct {
 }
 
 type Job struct {
+	Recipe           string            `json:"recipe,omitempty"`
+	PublicationHold  string            `json:"publication_hold,omitempty"`
+	HoldVersion      int64             `json:"hold_version,omitempty"`
 	StateBackend     string            `json:"state_backend,omitempty"`
 	Task             *protocol.Task    `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`

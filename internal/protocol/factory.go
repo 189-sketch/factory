@@ -8,6 +8,7 @@ import (
 )
 
 type FactoryContext struct {
+	Recipe   string `json:"recipe,omitempty"`
 	SpecURL  string `json:"spec_url,omitempty"`
 	Context  string `json:"context,omitempty"`
 	IssueURL string `json:"issue_url,omitempty"`

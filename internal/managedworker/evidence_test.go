@@ -219,3 +219,24 @@ func TestSpecEvidenceRequiresActualDocumentAtPushedHead(t *testing.T) {
 		})
 	}
 }
+
+func TestAnswerWorkspaceRejectsFilesAndReportsHead(t *testing.T) {
+	for _, dirty := range []bool{false, true} {
+		command := func(program string, args ...string) ([]byte, error) {
+			if args[0] == "rev-parse" {
+				return []byte("base-head\n"), nil
+			}
+			if dirty {
+				return []byte("?? requested-report.html\n"), nil
+			}
+			return nil, nil
+		}
+		head, err := answerWorkspaceState(command)
+		if dirty && err == nil {
+			t.Fatal("Answer accepted a requested file")
+		}
+		if !dirty && (err != nil || head != "base-head") {
+			t.Fatalf("clean answer: %q %v", head, err)
+		}
+	}
+}

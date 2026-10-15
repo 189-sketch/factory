@@ -138,7 +138,7 @@ func factorySubmit(t *testing.T, s *GitHubFactoryServer) string {
 }
 func factoryPoll(t *testing.T, s *GitHubFactoryServer) *protocol.RunSpec {
 	t.Helper()
-	p := protocol.PollRequest{InstanceID: "worker-instance", Name: "worker", Executors: []string{"codex"}, ReadOnlyExecutors: []string{"codex"}, Repositories: []string{"repo"}, Factory: true, Workflows: true, Reviews: true}
+	p := protocol.PollRequest{SingleAgent: true, InstanceID: "worker-instance", Name: "worker", Executors: []string{"codex"}, ReadOnlyExecutors: []string{"codex"}, Repositories: []string{"repo"}, Factory: true, Workflows: true, Reviews: true}
 	raw := factoryHTTP(t, s, "POST", "/api/v1/workers/poll", p, 200)
 	var result protocol.PollResponse
 	if err := json.Unmarshal(raw, &result); err != nil {

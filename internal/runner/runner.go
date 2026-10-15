@@ -313,7 +313,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		// Factory stages return their contract as the final agent message;
 		// the host reads it without granting the agent filesystem write access.
 		if options.Factory != nil && usageCollector != nil {
-			step, err = protocol.ParseStepResult([]byte(usageCollector.lastMessage()))
+			step, err = parseFactoryMessage(usageCollector.lastMessage())
 		}
 		if err != nil {
 			state, exitCode, outcome = StateFailed, 1, err

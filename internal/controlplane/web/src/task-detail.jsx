@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
+import { stageLabel } from "./stage-progress.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { jobDisplayTitle } from "./runs-board.js";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
@@ -110,7 +111,7 @@ export function TaskDetail({
                 ) : (
                   <span className="text-xs">{index + 1}</span>
                 )}
-                {friendlyName(stage.name)}
+                {stageLabel(stage.name)}
                 {stage.skipped && <span className="text-xs text-muted-foreground">Skipped</span>}
                 {stage.current && (
                   <span className="text-xs text-muted-foreground">
@@ -202,7 +203,7 @@ export function TaskDetail({
                             <h3 className="font-medium">
                               {run.outcome === "changes_requested"
                                 ? "Changes requested"
-                                : friendlyName(run.command)}
+                                : stageLabel(run.command)}
                             </h3>
                             <State
                               value={
@@ -239,7 +240,7 @@ export function TaskDetail({
           {
             id: "agents",
             label: "Agents",
-            content: <div className="divide-y divide-border">{job.runs.map(run => <article key={run.id} className="py-4"><div className="flex flex-wrap justify-between gap-3"><h2 className="text-sm font-medium">{friendlyName(run.command)}</h2><State value={run.state} /></div><ExecutionDetails run={run} /><details className="mt-3 text-xs"><summary className="cursor-pointer text-muted-foreground">Prompt snapshot</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-words font-mono leading-6">{run.prompt || "Prompt snapshot is not reported for this attempt. View the current agent definition in Agents."}</pre></details></article>)}</div>,
+            content: <div className="divide-y divide-border">{job.runs.map(run => <article key={run.id} className="py-4"><div className="flex flex-wrap justify-between gap-3"><h2 className="text-sm font-medium">{stageLabel(run.command)}</h2><State value={run.state} /></div><ExecutionDetails run={run} /><section className="mt-3 text-xs"><h3 className="text-muted-foreground">Prompt snapshot</h3><pre className="mt-3 overflow-auto whitespace-pre-wrap break-words font-mono leading-6">{run.prompt || "Prompt snapshot is not reported for this attempt. View the current agent definition in Agents."}</pre></section></article>)}</div>,
           },
           {
             id: "instructions",
@@ -318,24 +319,28 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       <ol className="factory-progress" aria-label="Task progress">
         {stages.map(stage => <li key={stage.name} aria-current={stage.current ? "step" : undefined} className={cn(stage.current && "is-current", stage.complete && "is-complete")}>
-          {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{friendlyName(stage.name)}{stage.skipped && <span>Skipped</span>}
+          {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(stage.name)}{stage.skipped && <span>Skipped</span>}
         </li>)}
       </ol>
-      <section className="factory-result" aria-label="Current result">
+      <Tabs key={job.id} label="Run sections" items={[
+        {id:"activity",label:"Activity",content:<>      <section className="factory-result" aria-label="Current result">
         <h2>{resultTitle(job, result)}</h2>
-        {result?.summary && <p className="factory-summary">{result.summary}</p>}
+        {result?.summary && <p className="factory-summary">{job.state === "failed" && /^invalid character .*looking for beginning of value/.test(result.summary) ? "The agent returned an unreadable result. Retry this stage, or request changes on the existing PR." : result.summary}</p>}
         {result?.error && result.error !== result.summary && <p role="alert" className="factory-summary text-danger">{result.error}</p>}
         {!result?.summary && <p className="factory-summary">{job.state === "running" ? "The agent is working. Results will appear here." : "Waiting for a worker to pick up this task."}</p>}
         {progress?.spec_url && <a className="factory-spec-link" href={progress.spec_url} target="_blank" rel="noreferrer">Open spec on GitHub<ArrowRight className="size-4" aria-hidden="true" /></a>}
-        <TaskActions key={`${job.id}:${latest?.id}:${job.state}`} job={job} result={result} onAction={onWorkflowAction} />
+        <TaskActions key={`${job.id}:${latest?.id}:${job.state}:${job.hold_version || 0}`} job={job} result={result} onAction={onWorkflowAction} />
       </section>
-      {history.length > 0 && <section className="factory-history" aria-label="Previous attempts"><h2>Earlier activity</h2><ol>{history.map(run => <li key={run.id}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{friendlyName(run.command)}</span><State value={run.outcome === "complete" ? "succeeded" : run.outcome || run.state} /></div><p>{run.summary || run.error}</p>{run.github_url && <a href={run.github_url} target="_blank" rel="noreferrer">View on GitHub</a>}</li>)}</ol></section>}
-      <details className="factory-details"><summary>Run details</summary>
+      {history.length > 0 && <section className="factory-history" aria-label="Previous attempts"><h2>Earlier activity</h2><ol>{history.map(run => <li key={run.id}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{stageLabel(run.command)}</span><State value={run.outcome === "complete" ? "succeeded" : run.outcome || run.state} /></div><p>{run.summary || run.error}</p>{run.github_url && <a href={run.github_url} target="_blank" rel="noreferrer">View on GitHub</a>}</li>)}</ol></section>}
+</>},
+        {id:"details",label:"Details",content:<>      <section className="factory-details"><h2 className="text-sm font-medium">Run details</h2>
         {result && <ExecutionDetails run={result} />}
         <dl className="mt-5 grid gap-3 sm:grid-cols-2"><RunMetric label="Task ID" value={job.id} /><RunMetric label="Updated" value={formatTimestamp(job.updated_at)} /></dl>
         {result?.github_url && <a className="mt-5 block text-sm text-primary underline" href={result.github_url} target="_blank" rel="noreferrer">Open stage on GitHub</a>}
         <h2 className="mt-6 mb-2 text-sm font-medium">Original request</h2><p className="whitespace-pre-wrap break-words text-sm leading-6">{job.task?.spec || job.prompt}</p>
-      </details>
+      </section></>},
+      ]} />
+
     </article>
   );
 }
@@ -402,141 +407,48 @@ function TaskActions({ job, result, onAction }) {
   const [requesting, setRequesting] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
+  const [releaseConfirmed, setReleaseConfirmed] = useState(false);
   const latest = job.runs.at(-1);
-  const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(
-    /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/,
-  )?.[0];
-  const action = async (name) => {
-    setBusy(true);
-    try {
-      await onAction(
-        job,
-        name,
-        stopped,
-        ["request_changes", "retry"].includes(name) ? feedback : "",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
+  const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/)?.[0];
+  const needsStopped = ["interrupted", "cancelled"].includes(job.state);
+  const retryable = ["blocked", "failed", "interrupted", "cancelled"].includes(job.state);
   const humanDecision = job.state === "blocked" && job.workflow?.factory?.verdict === "human_decision_needed";
-  const retry = ["blocked", "failed", "interrupted", "cancelled"].includes(
-    job.state,
-  );
-  return (
-    <div className="space-y-3">
-      {prURL && (
-        <Button asChild variant="outline">
-          <a href={prURL} target="_blank" rel="noreferrer">
-            Open PR
-          </a>
-        </Button>
-      )}
-      {(["awaiting_approval", "awaiting_merge"].includes(job.state) || humanDecision) && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {!humanDecision && <Button
-              disabled={busy || requesting}
-              onClick={() => action(job.state === "awaiting_merge" ? "complete_merge" : "approve")}
-            >
-              {job.state === "awaiting_merge" ? "Check merge status" : `Approve and start ${friendlyName(latest?.command).toLowerCase()}`}
-            </Button>}
-            {(latest?.reviewed_run_id || job.state === "awaiting_merge" || humanDecision) && (
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => setRequesting(true)}
-              >
-                Request changes
-              </Button>
-            )}
-          </div>
-          {requesting && (
-            <div className="space-y-3">
-              <label className="block">
-                <span className="field-label">What needs to change?</span>
-                <textarea
-                  className="field-control min-h-24"
-                  value={feedback}
-                  onChange={(e) => setFeedback(e.target.value)}
-                  maxLength={4000}
-                  placeholder="Explain what to revise in the previous stage’s result."
-                />
-              </label>
-              <p className="text-xs text-muted-foreground">
-                You’ll review the revised result before continuing.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={busy || !feedback.trim()}
-                  onClick={() => action("request_changes")}
-                >
-                  {busy ? "Submitting…" : "Send feedback and revise"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() => setRequesting(false)}
-                >
-                  Keep reviewing
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      {job.state === "awaiting_merge" && <p className="text-sm text-muted-foreground">Independent review is complete. Inspect the pull request and CI checks on GitHub, then merge when ready. Machinist verifies the merge before completing this task.</p>}
-      {humanDecision && <p className="text-sm text-muted-foreground">The reviewer needs your judgment. Request changes to send your decision to implementation, or retry review after resolving the question.</p>}
-      {retry && !requesting && <details className="retry-context" open={job.state === "blocked" ? true : undefined}><summary>Add context before retrying</summary><label className="mt-3 block"><span className="field-label">Reply or recovery context · optional</span><textarea className="field-control min-h-24" value={feedback} onChange={event => setFeedback(event.target.value)} maxLength={4000} placeholder="Answer the agent’s question or explain what changed." /></label></details>}
-      {job.state === "blocked" && (
-        <p className="text-sm text-muted-foreground">
-          Update the issue or resolve the blocker, then retry this step.
-        </p>
-      )}
-      {["interrupted", "cancelled"].includes(job.state) && (
-        <label className="flex items-start gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={stopped}
-            onChange={(event) => setStopped(event.target.checked)}
-          />
-          I have verified the previous worker process has stopped. Retrying will
-          inspect existing work before continuing.
-        </label>
-      )}
-      {["queued", "running", "awaiting_approval", "awaiting_merge", "blocked", "interrupted"].includes(
-        job.state,
-      ) && (
-        <Button
-          variant="ghost"
-          className="text-muted-foreground hover:text-danger"
-          disabled={busy}
-          onClick={() => action("cancel")}
-        >
-          Cancel task
-        </Button>
-      )}
-      {retry && (
-        <Button
-          disabled={
-            busy ||
-            (["interrupted", "cancelled"].includes(job.state) && !stopped)
-          }
-          onClick={() => action("retry")}
-        >
-          Retry {friendlyName(latest?.command).toLowerCase()}
-        </Button>
-      )}
+  const canRequest = job.recipe !== "answer" && (job.state === "awaiting_merge" || humanDecision || (job.state === "awaiting_approval" && latest?.reviewed_run_id) || (["failed", "blocked"].includes(job.state) && latest?.command === "review" && prURL));
+  const stage = job.recipe === "single" ? "agent" : job.recipe === "answer" ? "answer" : stageLabel(latest?.command).toLowerCase();
+  const act = async name => {
+    setBusy(true);
+    try { await onAction(job, name, stopped, ["request_changes", "retry"].includes(name) ? feedback : name === "publication_hold" ? "Operator requested private publication hold" : ""); }
+    finally { setBusy(false); }
+  };
+  const stopConfirmation = needsStopped && <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={stopped} onChange={event => setStopped(event.target.checked)} />I have verified the previous worker process has stopped.</label>;
+  if (job.publication_hold) return <section className="publication-hold"><h3>Publication held private</h3><p>{job.publication_hold}</p><p>Review the content and destination before releasing this hold. Retry and prompt changes cannot release it.</p><label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={releaseConfirmed} onChange={event => setReleaseConfirmed(event.target.checked)} />I allow publication to {job.repository}.</label>{stopConfirmation}<Button className="mt-4" variant="outline" disabled={busy || !releaseConfirmed || (needsStopped && !stopped)} onClick={() => act("release_publication")}>Release publication hold</Button></section>;
+  return <div className="task-actions">
+    {humanDecision ? <p className="action-hint">The reviewer needs your judgment. Send a decision to Build, or retry Review after resolving the question.</p> : job.state === "blocked" ? <p className="action-hint">Resolve the blocker or reply to the agent before retrying.</p> : needsStopped ? <p className="action-hint">Confirm the previous process has stopped before continuing.</p> : job.state === "awaiting_merge" ? <p className="action-hint">{job.recipe === "single" ? "Single-agent mode has no independent review. Inspect the PR and CI on GitHub before merging, then check its status here." : "Review and CI must match the current PR head. Merge on GitHub when ready, then check its status here."}</p> : null}
+    {(retryable || requesting) && <label className="block"><span className="field-label">{requesting ? "What needs to change?" : "Reply to the agent (optional)"}</span><textarea className="field-control min-h-24" value={feedback} onChange={event => setFeedback(event.target.value)} maxLength={4000} placeholder={requesting ? "Explain the change to make on the existing PR." : "Answer the question or explain what changed."} /></label>}
+    {stopConfirmation}
+    <div className="task-action-row">
+      {requesting ? <><Button disabled={busy || !feedback.trim()} onClick={() => act("request_changes")}>{busy ? "Sending…" : "Send feedback and revise"}</Button><Button variant="outline" disabled={busy} onClick={() => setRequesting(false)}>Keep reviewing</Button></> : <>
+        {job.state === "awaiting_approval" && <Button disabled={busy} onClick={() => act("approve")}>Approve and start {stage}</Button>}
+        {job.state === "awaiting_merge" && <Button disabled={busy} onClick={() => act("complete_merge")}>Check merge status</Button>}
+        {humanDecision && <Button disabled={busy} onClick={() => setRequesting(true)}>Request changes</Button>}
+        {retryable && <Button variant={humanDecision ? "outline" : "default"} disabled={busy || (needsStopped && !stopped)} onClick={() => act("retry")}>Retry {stage}</Button>}
+        {canRequest && !humanDecision && <Button variant="outline" disabled={busy} onClick={() => setRequesting(true)}>Request changes</Button>}
+      </>}
+      {prURL && <Button asChild variant="outline"><a href={prURL} target="_blank" rel="noreferrer">Open PR</a></Button>}
+      <div className="task-secondary-actions">
+        {(retryable || ["awaiting_approval", "awaiting_merge"].includes(job.state)) && <Button variant="ghost" disabled={busy || (needsStopped && !stopped)} onClick={() => act("publication_hold")}>Keep private</Button>}
+        {["queued", "running", "awaiting_approval", "awaiting_merge", "blocked", "interrupted"].includes(job.state) && <Button variant="ghost" disabled={busy} onClick={() => act("cancel")}>Cancel task</Button>}
+      </div>
     </div>
-  );
+  </div>;
 }
 
 function resultTitle(job, result) {
-  const command = friendlyName(job.runs.at(-1)?.command);
+  const command = job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(job.runs.at(-1)?.command);
   switch (job.state) {
     case "awaiting_approval":
       return result
-        ? `${friendlyName(result.command)} ready for review`
+        ? `${stageLabel(result.command)} ready for review`
         : `Ready to start ${command.toLowerCase()}`;
     case "running":
       return `${command} in progress`;

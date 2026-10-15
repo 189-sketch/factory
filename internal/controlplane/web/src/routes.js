@@ -1,4 +1,4 @@
-const pages = new Set(["setup", "inbox", "agents", "automations", "settings", "runs", "analytics", "workers", "triggers", "commands", "workflows"]);
+const pages = new Set(["repositories", "runners", "setup", "inbox", "agents", "automations", "settings", "runs", "analytics", "workers", "triggers"]);
 
 export function routeFromHash(hash) {
   const value = hash.replace(/^#\//, "");

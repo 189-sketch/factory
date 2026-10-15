@@ -14,7 +14,11 @@ import (
 
 // factoryLocalStore owns execution history. Nothing in these tables is published
 // to GitHub. Issue snapshots are inputs, while specs and PRs remain remote links.
-type factoryLocalStore struct{ db *sql.DB }
+type factoryLocalStore struct {
+	db        *sql.DB
+	lock      *os.File
+	seedHolds bool
+}
 type localFactoryTask struct {
 	issue             GitHubIssue
 	repository, alias string
@@ -38,13 +42,15 @@ func openFactoryLocalStore(path string) (*factoryLocalStore, error) {
  CREATE TABLE IF NOT EXISTS factory_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS factory_events_task ON factory_events(task,id);
  CREATE TABLE IF NOT EXISTS factory_receipts (run TEXT PRIMARY KEY, instance TEXT NOT NULL, token TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS job_requests (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, task TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS store_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS factory_prompts (repository TEXT NOT NULL, role TEXT NOT NULL, prompt TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(repository,role));`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
 	_ = os.Chmod(path, 0600)
-	return &factoryLocalStore{db}, nil
+	return &factoryLocalStore{db: db}, nil
 }
 func (s *factoryLocalStore) tasks(ctx context.Context) ([]localFactoryTask, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT issue,repository,alias FROM factory_tasks ORDER BY url`)
@@ -67,12 +73,38 @@ func (s *factoryLocalStore) tasks(ctx context.Context) ([]localFactoryTask, erro
 	return tasks, rows.Err()
 }
 func (s *factoryLocalStore) create(ctx context.Context, task localFactoryTask) error {
+	return s.createRequest(ctx, task, "", "", "import")
+}
+func (s *factoryLocalStore) createRequest(ctx context.Context, task localFactoryTask, requestID, fingerprint, recipe string) error {
 	raw, err := json.Marshal(task.issue)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO factory_tasks(url,issue,repository,alias) VALUES(?,?,?,?) ON CONFLICT(url) DO NOTHING`, task.issue.HTMLURL, string(raw), task.repository, task.alias)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO factory_tasks(url,issue,repository,alias) VALUES(?,?,?,?) ON CONFLICT(url) DO NOTHING`, task.issue.HTMLURL, string(raw), task.repository, task.alias)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 && recipe != "import" {
+		role := "triage"
+		if recipe == "direct" || recipe == "single" {
+			role = "implement"
+		}
+		event, _ := json.Marshal(GitHubFactoryEvent{Version: 1, Kind: "created", Role: role, Recipe: recipe})
+		if _, err = tx.ExecContext(ctx, `INSERT INTO factory_events(task,body,created) VALUES(?,?,?)`, task.issue.HTMLURL, GitHubFactoryMarker+string(event), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	if requestID != "" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO job_requests(request_id,fingerprint,task) VALUES(?,?,?)`, requestID, fingerprint, task.issue.HTMLURL); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func (s *factoryLocalStore) comments(ctx context.Context, url string) ([]GitHubComment, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,body,created FROM factory_events WHERE task=? ORDER BY id`, url)
@@ -174,4 +206,10 @@ func (s *factoryLocalStore) updateIssue(ctx context.Context, issue GitHubIssue) 
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE factory_tasks SET issue=? WHERE url=?`, string(raw), issue.HTMLURL)
 	return err
+}
+
+func (s *factoryLocalStore) request(ctx context.Context, id string) (string, string, error) {
+	var fingerprint, task string
+	err := s.db.QueryRowContext(ctx, `SELECT fingerprint,task FROM job_requests WHERE request_id=?`, id).Scan(&fingerprint, &task)
+	return fingerprint, task, err
 }

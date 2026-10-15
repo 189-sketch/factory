@@ -95,7 +95,7 @@ func newGitHubFactoryServer(path, token string, maxConcurrent int, repositories 
 	if len(dataDirectories) > 0 {
 		s.dataDirectory = dataDirectories[0]
 	}
-	s.local, err = openFactoryLocalStore(filepath.Join(s.dataDirectory, "factory.db"))
+	s.local, err = openLocalJobs(s.dataDirectory)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,11 @@ func (s *GitHubFactoryServer) Close() error {
 	if s.setup != nil {
 		s.setup.stopWorker()
 	}
-	return s.local.db.Close()
+	err := s.local.db.Close()
+	if s.local.lock != nil {
+		_ = s.local.lock.Close()
+	}
+	return err
 }
 func (s *GitHubFactoryServer) Handler() http.Handler { return s.handler }
 func (s *GitHubFactoryServer) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
@@ -204,6 +208,9 @@ func (s *GitHubFactoryServer) refresh(ctx context.Context, force bool) error {
 		tasks[task.state.Job.ID] = task
 	}
 	s.tasks = tasks
+	if err := s.seedPublicationHolds(ctx); err != nil {
+		return err
+	}
 	for id, lease := range s.liveLeases() {
 		task := s.tasks[lease.spec.JobID]
 		if lease.spec.HealthCheck {
@@ -268,8 +275,13 @@ func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event
 	if err != nil {
 		return err
 	}
+	s.publishTaskStatus(ctx, task)
+	return nil
+}
+
+func (s *GitHubFactoryServer) publishTaskStatus(ctx context.Context, task *githubTask) {
 	// A remote status update is best effort. Execution receipts are already durable.
-	if task.issue.Number > 0 {
+	if task.issue.Number > 0 && task.state.Job.PublicationHold == "" {
 		if labels, ok := s.client.(factoryLabelClient); ok {
 			_ = labels.SyncTaskLabels(ctx, task.repo, task.issue.Number, task.state.SuggestedLabels, factoryRoutingLabel(task.state))
 		}
@@ -290,7 +302,6 @@ func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event
 			_ = writer.UpsertTaskStatus(ctx, task.repo, task.issue.Number, body)
 		}
 	}
-	return nil
 }
 func (s *GitHubFactoryServer) repositoryNames() []string {
 	names := make([]string, 0, len(s.repositories))
@@ -324,7 +335,7 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 			onboardingState = data
 		}
 	}
-	writeJSON(w, 200, map[string]any{"onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
+	writeJSON(w, 200, map[string]any{"onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
 }
 func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, catalogResponse{Workflows: []string{"factory"}, Commands: []string{}, Repositories: s.repositoryNames()})
@@ -471,9 +482,49 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("configure the repository's GitHub mapping first"))
 		return
 	}
-	if input.Workflow != "factory" || input.Command != "" {
-		writeError(w, 400, errors.New("GitHub factory accepts the factory workflow"))
+	if (input.Workflow != "" && input.Workflow != "factory") || input.Command != "" || input.Model != "" {
+		writeError(w, 400, errors.New("choose a recipe; executors and models use the configured agent profile"))
 		return
+	}
+	recipe := input.Recipe
+	if recipe == "" {
+		recipe = "factory"
+	}
+	if recipe != "factory" && recipe != "single" {
+		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
+		return
+	}
+	if len(input.ClientRequestID) > 128 || strings.TrimSpace(input.ClientRequestID) != input.ClientRequestID {
+		writeError(w, 400, errors.New("invalid client request ID"))
+		return
+	}
+	raw, _ := json.Marshal(input)
+	sum := sha256.Sum256(raw)
+	fingerprint := hex.EncodeToString(sum[:])
+	if input.ClientRequestID != "" {
+		previous, url, err := s.local.request(r.Context(), input.ClientRequestID)
+		if err == nil {
+			if previous != fingerprint {
+				writeError(w, 409, errors.New("client request ID was already used for a different request"))
+				return
+			}
+			if err = s.refresh(r.Context(), true); err != nil {
+				writeError(w, 500, err)
+				return
+			}
+			for _, task := range s.tasks {
+				if task.issue.HTMLURL == url {
+					writeJSON(w, 200, map[string]string{"id": task.state.Job.ID})
+					return
+				}
+			}
+			writeError(w, 500, errors.New("submission receipt has no job"))
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 500, err)
+			return
+		}
 	}
 	body := strings.TrimSpace(input.Spec)
 	if body == "" {
@@ -529,7 +580,23 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.loaded = time.Time{}
-	if err = s.local.create(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}); err != nil {
+	existing, readErr := s.local.comments(r.Context(), issue.HTMLURL)
+	if readErr != nil {
+		writeError(w, 500, readErr)
+		return
+	}
+	if len(existing) > 0 {
+		current, reduceErr := s.reduceLocal(issue, existing, input.Repository)
+		if reduceErr != nil {
+			writeError(w, 409, reduceErr)
+			return
+		}
+		if current.Job.Recipe != recipe {
+			writeError(w, 409, errors.New("linked issue already has a job with a different recipe"))
+			return
+		}
+	}
+	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}, input.ClientRequestID, fingerprint, input.Recipe); err != nil {
 		writeError(w, 500, err)
 		return
 	}
@@ -552,6 +619,9 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.tasks[task.state.Job.ID] = task
+	if len(existing) == 0 {
+		s.publishTaskStatus(r.Context(), task)
+	}
 	writeJSON(w, 201, map[string]string{"id": task.state.Job.ID})
 }
 func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
@@ -561,9 +631,10 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		RunID    string `json:"run_id"`
-		Feedback string `json:"feedback"`
-		Stopped  bool   `json:"previous_process_stopped"`
+		RunID       string `json:"run_id"`
+		Feedback    string `json:"feedback"`
+		Stopped     bool   `json:"previous_process_stopped"`
+		HoldVersion int64  `json:"hold_version"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
@@ -583,6 +654,34 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := r.PathValue("action")
+	if action == "publication_hold" || action == "release_publication" {
+		if (task.state.Job.State == "cancelled" || task.state.Job.State == "interrupted") && !input.Stopped {
+			writeError(w, 409, errors.New("confirm the previous process stopped before changing publication access"))
+			return
+		}
+		if task.state.Job.State == "running" {
+			writeError(w, 409, errors.New("cancel running work and confirm it stopped before changing publication access"))
+			return
+		}
+		if input.HoldVersion != task.state.Job.HoldVersion {
+			writeError(w, 409, errors.New("publication hold changed; reload before continuing"))
+			return
+		}
+		if action == "release_publication" && task.state.Job.PublicationHold == "" {
+			writeError(w, 409, errors.New("job is not held"))
+			return
+		}
+		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: action, Feedback: input.Feedback}); err != nil {
+			writeError(w, 409, err)
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "accepted"})
+		return
+	}
+	if task.state.Job.PublicationHold != "" && action != "cancel" {
+		writeError(w, 409, errors.New("publication is held; release it explicitly before resuming work"))
+		return
+	}
 	if action == "complete_merge" {
 		f := task.state.Job.Workflow.Factory
 		var raw []byte
@@ -681,7 +780,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !p.Factory || !p.Workflows || !p.Reviews {
+	if !p.Factory || !p.Workflows {
 		writeJSON(w, 200, protocol.PollResponse{})
 		return
 	}
@@ -706,6 +805,9 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		task := s.tasks[id]
 		state := task.state
+		if (state.Job.Recipe == "single" && !p.SingleAgent) || (state.Job.Recipe != "single" && !p.Reviews) {
+			continue
+		}
 		if state.Job.State == "queued" && repositories[state.Job.Repository] && task.issue.Number > 0 {
 			issue, err := s.client.GetTask(r.Context(), task.repo, task.issue.Number)
 			if err != nil {
@@ -733,18 +835,18 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			}
 			state = task.state
 		}
-		if task.issue.State != "open" || state.Job.State != "queued" || !repositories[state.Job.Repository] {
+		if state.Job.PublicationHold != "" || task.issue.State != "open" || state.Job.State != "queued" || !repositories[state.Job.Repository] {
 			continue
 		}
 		role := state.Role
 		capable := true
-		for _, stage := range []string{"triage", "spec", "implement", "review"} {
-			command, err := s.command(r.Context(), task.repo, stage)
+		for _, stage := range state.Job.Workflow.Steps {
+			command, err := s.jobCommand(r.Context(), task, stage)
 			if err != nil {
 				writeError(w, 502, err)
 				return
 			}
-			if !executors[command.Executor] || !supportsModel(p.Models, command.Executor, command.Model) || (stage == "review" && !readonly[command.Executor]) {
+			if !executors[command.Executor] || !supportsModel(p.Models, command.Executor, command.Model) || ((stage == "review" || stage == "triage" || state.Job.Recipe == "answer") && !readonly[command.Executor]) {
 				capable = false
 				break
 			}
@@ -752,7 +854,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		if !capable {
 			continue
 		}
-		command, err := s.command(r.Context(), task.repo, role)
+		command, err := s.jobCommand(r.Context(), task, role)
 		if err != nil {
 			writeError(w, 502, err)
 			return
@@ -812,7 +914,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(issueURL, "local:") {
 			issueURL = ""
 		}
-		spec := protocol.RunSpec{ID: run.ID, JobID: id, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, GitHubRepository: task.repo, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Role: role, SpecURL: f.SpecURL, IssueURL: issueURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
+		spec := protocol.RunSpec{ID: run.ID, JobID: id, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, GitHubRepository: task.repo, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Recipe: state.Job.Recipe, Role: role, SpecURL: f.SpecURL, IssueURL: issueURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
 		s.liveMu.Lock()
 		s.leases[run.ID] = &githubLease{spec: spec, instance: p.InstanceID, last: time.Now()}
 		s.liveMu.Unlock()
@@ -940,6 +1042,10 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task.state = current
+	if current.Job.PublicationHold != "" {
+		writeError(w, 409, errors.New("job publication is held"))
+		return
+	}
 	for _, run := range current.Job.Runs {
 		if run.ID == id && run.Outcome != "" {
 			s.deleteLease(id)
@@ -979,4 +1085,22 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deleteLease(id)
 	w.WriteHeader(204)
+}
+
+func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, role string) (config.ResolvedCommand, error) {
+	command, err := s.command(ctx, task.repo, role)
+	if err == nil && (task.state.Job.Recipe == "answer" || role == "triage") {
+		review, reviewErr := s.command(ctx, task.repo, "review")
+		if reviewErr != nil {
+			return command, reviewErr
+		}
+		command.Executor = review.Executor
+		command.Model = review.Model
+		if task.state.Job.Recipe == "answer" {
+			command.Prompt = "Answer the request without changing files, making commits, or publishing to GitHub. If changes or files are needed, return blocked. Return the factory triage JSON contract with resolved=true only for a complete answer.\nTask: {{machinist.prompt}}"
+		}
+		sum := sha256.Sum256([]byte(command.Prompt))
+		command.Hash = hex.EncodeToString(sum[:])
+	}
+	return command, err
 }

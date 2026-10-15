@@ -136,6 +136,7 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	request := protocol.PollRequest{
+		SingleAgent:       true,
 		Factory:           true,
 		HealthChecks:      true,
 		ReadOnlyExecutors: w.readOnlyExecutors(),
@@ -200,7 +201,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 				return completion
 			}
 		}
-		if spec.Factory.Role == "review" && !w.config.Executors[spec.Executor].ReadOnly {
+		if (spec.Factory.Role == "review" || spec.Factory.Role == "triage" || spec.Factory.Recipe == "answer") && !w.config.Executors[spec.Executor].ReadOnly {
 			completion.Error = "factory review requires a read-only executor"
 			return completion
 		}
@@ -235,9 +236,21 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	if spec.Factory != nil {
 		prepareInputs = nil
 	}
+	answerHead := ""
+	if spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+		answerHead, err = answerWorkspaceState(repositoryCommand(ctx, repository))
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+	}
+	agentEnvironment := commandEnvironment(ctx)
+	if spec.Factory != nil && (spec.Factory.Role == "triage" || spec.Factory.Role == "review") {
+		agentEnvironment = []string{"GH_TOKEN=", "GITHUB_TOKEN=", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0="}
+	}
 	result, runErr := runner.Execute(ctx, runner.Options{
 		Factory:        spec.Factory,
-		Environment:    commandEnvironment(ctx),
+		Environment:    agentEnvironment,
 		ReviewEvidence: reviewEvidence,
 		Revision:       spec.Revision,
 		Workflow:       spec.Workflow, JobID: spec.JobID,
@@ -250,7 +263,17 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,
 	})
-	if runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec") && result.StepResult != nil && result.StepResult.Outcome == "complete" {
+	if spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
+		if (stateErr != nil || after != answerHead) && (spec.Factory.Recipe != "single" || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
+			completion.State = "succeeded"
+			completion.ExitCode = 0
+			blocked := protocol.StepResult{Outcome: "blocked", Summary: "The task changed files without valid PR delivery; preserve the work and deliver the requested changes through the assigned PR", Factory: &protocol.FactoryResult{Version: 1, Role: spec.Factory.Role, Report: "Workspace/delivery validation failed"}}
+			completion.Result, _ = json.Marshal(map[string]any{"step_result": blocked})
+			return completion
+		}
+	}
+	if runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec") && result.StepResult != nil && result.StepResult.Outcome == "complete" && (spec.Factory.Recipe != "single" || (result.StepResult.Factory != nil && result.StepResult.Factory.PRURL != "")) {
 		if err := validateImplementationEvidence(repositoryCommand(ctx, repository), result.StepResult.Factory); err != nil {
 			runErr = err
 			result.State = runner.StateFailed

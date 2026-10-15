@@ -15,6 +15,7 @@ import (
 const GitHubFactoryMarker = "<!-- machinist:v1 -->\n"
 
 type GitHubFactoryEvent struct {
+	Recipe     string               `json:"recipe,omitempty"`
 	Version    int                  `json:"version"`
 	Previous   int64                `json:"previous"`
 	Kind       string               `json:"kind"`
@@ -31,6 +32,7 @@ type GitHubFactoryEvent struct {
 }
 
 type GitHubFactoryState struct {
+	FixedRecipe     bool
 	Job             Job
 	LastEventID     int64
 	Role            string
@@ -70,15 +72,53 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			return nil, fmt.Errorf("journal comment %d has unsupported version or broken chain", comment.ID)
 		}
 		if event.Kind == "created" {
-			if s.LastEventID != 0 || event.Role != "triage" {
+			recipe := event.Recipe
+			if recipe == "" {
+				recipe = "factory"
+			}
+			if recipe != "factory" && recipe != "direct" && recipe != "answer" && recipe != "single" {
+				return nil, fmt.Errorf("invalid job recipe")
+			}
+			first := "triage"
+			if recipe == "direct" || recipe == "single" {
+				first = "implement"
+			}
+			if s.LastEventID != 0 || event.Role != first {
 				return nil, fmt.Errorf("invalid factory creation")
 			}
 			s.LastEventID = comment.ID
-			s.queue(issue.HTMLURL, "triage", "queued")
+			s.FixedRecipe = event.Recipe != ""
+			s.Job.Recipe = recipe
+			s.Job.Workflow.Name = recipe
+			if recipe == "direct" || recipe == "single" {
+				s.Job.Workflow.Steps = []string{"implement", "review"}
+			}
+			if recipe == "single" {
+				s.Job.Workflow.Steps = []string{"implement"}
+			}
+			if recipe == "answer" {
+				s.Job.Workflow.Steps = []string{"triage"}
+			}
+			s.queue(issue.HTMLURL, first, "queued")
 			continue
 		}
 		if s.LastEventID == 0 || len(s.Job.Runs) == 0 {
 			return nil, fmt.Errorf("factory journal has no creation")
+		}
+		if event.Kind == "publication_hold" || event.Kind == "release_publication" {
+			if event.Kind == "publication_hold" {
+				if strings.TrimSpace(event.Feedback) == "" {
+					return nil, fmt.Errorf("hold reason required")
+				}
+				s.Job.PublicationHold = event.Feedback
+				s.Job.HoldVersion = comment.ID
+			} else {
+				s.Job.PublicationHold = ""
+				s.Job.HoldVersion = comment.ID
+			}
+			s.LastEventID = comment.ID
+			s.Job.UpdatedAt = comment.CreatedAt
+			continue
 		}
 		run := &s.Job.Runs[len(s.Job.Runs)-1]
 		if event.RunID != run.ID {
@@ -126,6 +166,10 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			run.Report = result.Factory.Report
 			run.GitHubURL = fmt.Sprintf("%s#issuecomment-%d", issue.HTMLURL, comment.ID)
 			run.CompletedAt = comment.CreatedAt
+			if !run.StartedAt.IsZero() {
+				duration := max(int64(0), comment.CreatedAt.Sub(run.StartedAt).Milliseconds())
+				run.DurationMillis = &duration
+			}
 			run.Outcome = result.Outcome
 			run.Summary = result.Summary
 			run.State = "succeeded"
@@ -164,7 +208,10 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			s.Feedback = event.Feedback
 			s.queue(issue.HTMLURL, s.Role, "queued")
 		case "request_changes":
-			if s.Job.State != "awaiting_approval" && s.Job.State != "awaiting_merge" && s.Job.State != "blocked" {
+			if s.Job.Recipe == "answer" {
+				return nil, fmt.Errorf("Answer jobs use retry for feedback and cannot route into delivery")
+			}
+			if s.Job.State != "awaiting_approval" && s.Job.State != "awaiting_merge" && s.Job.State != "blocked" && !(s.Job.State == "failed" && s.Role == "review" && s.Job.Workflow.Factory.PRURL != "") {
 				return nil, ErrWorkflowAction
 			}
 			if strings.TrimSpace(event.Feedback) == "" {
@@ -233,7 +280,11 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 	switch s.Role {
 	case "triage":
 		s.SuggestedLabels = append([]string(nil), f.Labels...)
-		if f.Resolved {
+		if s.Job.Recipe == "answer" && (!f.Resolved || f.NeedsSpec || f.PRURL != "" || f.SpecURL != "" || f.HeadSHA != "" || f.Branch != "") {
+			s.block("Answer jobs cannot deliver files or commits. Start a delivery job instead.")
+		} else if s.FixedRecipe && s.Job.Recipe != "answer" && f.Resolved {
+			s.block("Delivery jobs require a pull request; use an Answer job for questions")
+		} else if f.Resolved {
 			s.Job.State = "succeeded"
 		} else if f.NeedsSpec {
 			s.queue(url, "spec", "queued")
@@ -255,6 +306,10 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 		progress.Branch = f.Branch
 		s.queue(url, "implement", "awaiting_approval")
 	case "implement":
+		if s.Job.Recipe == "single" && progress.PRURL == "" && f.PRURL == "" && f.HeadSHA == "" && f.Branch == "" {
+			s.Job.State = "succeeded"
+			return nil
+		}
 		if f.PRURL == "" || f.HeadSHA == "" || strings.TrimSpace(f.Branch) == "" {
 			s.block("Implementation must report PR, head SHA and branch")
 			return nil
@@ -272,7 +327,11 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 		progress.Branch = f.Branch
 		progress.Verdict = ""
 		progress.Findings = nil
-		s.queue(url, "review", "queued")
+		if s.Job.Recipe == "single" {
+			s.Job.State = "awaiting_merge"
+		} else {
+			s.queue(url, "review", "queued")
+		}
 	case "review":
 		if f.PRURL != progress.PRURL || f.HeadSHA != progress.HeadSHA || f.Verdict == "" {
 			s.block("Review must identify current PR and exact head")

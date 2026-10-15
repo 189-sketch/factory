@@ -106,3 +106,21 @@ Start with [your first task workflow](docs/task-guide.md): create a task from an
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and pull-request expectations. Security issues should follow [SECURITY.md](SECURITY.md).
 
 Machinist is released under the [MIT License](LICENSE).
+
+### Local jobs
+
+**New run** offers two modes. **Standard pipeline** runs Triage, optional Spec,
+Build, independent Review, and human merge. **Single agent** runs one operational
+task or automation without a separate reviewer. Requested repository changes
+still use PR delivery and human merge; unchanged operational tasks return a result.
+There is no custom workflow editor. The compact table includes stage progress dots.
+
+API clients set `recipe` to `factory` or `single` and supply a stable
+`client_request_id`. Repeating the same request after a lost response returns the
+same job. A changed payload with that ID returns 409. Existing
+`workflow: "factory"` submissions remain compatible.
+
+On upgrade, the app snapshots `factory.db` into `jobs.db` and archives the old
+store. Back up the full private runtime directory, including worker outputs.
+Imported blocked jobs are held private until explicitly reviewed and released.
+See [local job behavior](docs/local-factory/local-jobs.md).

@@ -297,3 +297,18 @@ func (b *evidenceBuffer) Write(p []byte) (int, error) {
 	}
 	return b.Buffer.Write(p)
 }
+
+func answerWorkspaceState(command evidenceCommand) (string, error) {
+	head, err := command("git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	status, err := command("git", "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(string(status)) != "" {
+		return "", fmt.Errorf("Answer job requires a clean workspace and cannot create files")
+	}
+	return strings.TrimSpace(string(head)), nil
+}

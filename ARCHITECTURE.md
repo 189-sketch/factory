@@ -1,6 +1,6 @@
 # Architecture
 
-Machinist is a local foreman for Triage, Spec, Implement, and Review. Its agents
+Machinist runs local agent jobs. The Standard pipeline uses Triage, optional Spec, Build and independent Review. Single-agent mode performs one task without a separate reviewer. Its agents
 run through the user's Codex or Claude Code CLI on this computer or a VM. A
 GitHub App connects selected repositories. No hosted agent service is required.
 
@@ -58,7 +58,9 @@ are hashed. A stage result advances the deterministic reducer. Database events
 are internal implementation data, even where compatibility types retain older
 GitHub-oriented names.
 
-Factory runtime data sits beside the configured worker token, normally under
+Jobs use one process-locked SQLite store, `jobs.db`, beside the configured worker token. The first launch snapshots the former `factory.db`, preserves IDs, events, prompts and hashed receipts, then retires it under `archive/factory-v1.db`. Existing blocked work receives an explicit publication hold. Worker outputs remain in place and must be included in runtime backups. Legacy direct/sequence `machinist.db` stores remain separate and unchanged. New submission receipts and initial recipe events are atomic, so repeating a client request ID returns the same job after response loss or restart. Reusing an ID for a different request fails.
+
+Factory runtime data normally lives under
 `~/.machinist/server`. Onboarding settings, credentials, temporary checks, and
 managed checkouts live below that directory. They are not placed beside source
 prompt definitions. Credentials use mode 0600 and their directory mode 0700.
@@ -79,7 +81,7 @@ forward is initiated on the VM toward the foreman's SSH host; that requires SSH
 reachability to the foreman. The app never opens a public listener or enables SSH.
 The VM keeps its own GitHub and provider authentication.
 
-Triage can answer an informational request or route code work onward. Spec pushes
+A job fixes its built-in mode at creation: `factory` for the Standard pipeline or `single` for one task runner. No arbitrary workflow is offered. Historical direct/answer jobs retain their recorded transitions for recovery but cannot be newly submitted. Triage and Review use restricted read-only executors with host-collected evidence. Standard delivery always starts at Triage, which requests Spec only for consequential decisions. Single-agent tasks may return an operational result directly; repository changes require verified PR delivery, with no independent review claimed. Both modes wait for human merge when a PR exists. Spec pushes
 one tracked specification and draft PR, then pauses for approval of that attempt.
 Implement reuses the branch and PR. Independent Review checks the exact published
 head using bounded host-collected evidence. Findings trigger at most three repair
@@ -99,7 +101,11 @@ contracts. Previous GitHub event comments remain historical and are not deleted
 or treated as the active database. Re-adopt a linked issue explicitly to start a
 new local task. There is no automatic migration of old comment journals.
 
+A publication hold survives retries and prompt edits. Held jobs are never dispatched, and no status or label content is written to GitHub for them. A dedicated operator release action must name the current hold version. Running work must first be cancelled and stopped before changing publication access; already issued GitHub writes cannot be undone.
+
 One foreman owns a local factory database. Multiple trusted workers can connect.
+The UI uses a compact runs table and grouped sidebar. Kubernetes, PostgreSQL, a conversational Foreman, versioned custom roles, and a credential-free publisher remain planned. The current trusted local/VM compatibility worker still receives per-run GitHub credentials.
+
 Cross-machine foreman replication, hosted token relays, push webhooks, automatic
 CI repair, merge polling, and live output streaming are not included.
 

@@ -18,3 +18,7 @@ test("factory navigation routes remain addressable", () => {
     assert.deepEqual(routeFromHash(`#/${view}`), { view, jobID: "" });
   }
 });
+
+test("removed workflow configuration routes return to runs",()=>{
+ for(const hash of ["#/workflows","#/commands"]) assert.deepEqual(routeFromHash(hash),{view:"runs",jobID:""});
+});

@@ -61,3 +61,18 @@ func TestReadOnlyReviewReturnsResultWithoutWritingFile(t *testing.T) {
 		t.Fatalf("result %#v", result.StepResult)
 	}
 }
+
+func TestNativeFactoryMessagePresentation(t *testing.T) {
+	body := `{"outcome":"complete","summary":"PONG","factory":{"version":1,"role":"triage","resolved":true,"report":"PONG"}}`
+	for _, message := range []string{body, "```json\n" + body + "\n```", "```\n" + body + "\n```"} {
+		result, err := parseFactoryMessage(message)
+		if err != nil || result.Summary != "PONG" {
+			t.Fatalf("valid native result rejected: %v", err)
+		}
+	}
+	for _, message := range []string{"Here is the result: " + body, "```json\n" + body + "\n```\nextra", "```json\n" + body, "```json\n" + body + body + "\n```", strings.Repeat(" ", 16385) + body} {
+		if _, err := parseFactoryMessage(message); err == nil {
+			t.Fatal("ambiguous or oversized result accepted")
+		}
+	}
+}

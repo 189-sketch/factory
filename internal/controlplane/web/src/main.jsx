@@ -1,20 +1,22 @@
 import { Onboarding } from "./onboarding.jsx";
 import { TaskDetail } from "./task-detail.jsx";
+import { StageProgress, stageLabel } from "./stage-progress.jsx";
 import { State, friendlyName, relativeTime } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, Inbox, Settings, Search, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Sun, Table2, TimerReset, X } from "lucide-react";
+import "@fontsource-variable/inter";
+import { Activity, Bot, Inbox, Settings, Search, GitBranch, Moon, Play, Plus, Server, Sun, X } from "lucide-react";
 import { Analytics } from "@/analytics";
-import { AgentsPage, CommandsPage, WorkersPage } from "@/catalog";
+import { AgentsPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { currentRun, filterJobs, jobCounts, jobDisplayTitle } from "@/runs-board";
 import { createStatusLoader } from "@/status-loader";
+import { formatDurationMillis } from "./run-metrics.js";
 import { TriggersPage } from "@/triggers";
 import "./styles.css";
 
@@ -37,8 +39,9 @@ function App() {
   const [search, setSearch] = useState("");
   const [inboxID, setInboxID] = useState("");
   const [filter, setFilter] = useState("all");
-  const [runsView, setRunsView] = useState("table");
-  const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") === "dark");
+  const [recipe, setRecipe] = useState("factory");
+  const submission = useRef(null);
+  const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
   const view = status.onboarding?.required ? "setup" : route.view;
   const statusLoader = useRef(null);
@@ -111,10 +114,14 @@ function App() {
     setSubmitting(true);
     setSubmitError("");
     try {
+      const payload = { repository, model: model.trim(), ...(selection.startsWith("workflow:") ? { workflow: selection.slice(9), title: title || prompt.trim().split("\n")[0].slice(0,100), source_url: sourceURL || (/^https?:\/\/\S+$/.test(prompt.trim()) ? prompt.trim() : ""), spec: /^https?:\/\/\S+$/.test(prompt.trim()) ? "" : prompt } : { command: selection.slice(8), prompt }) };
+      if (["local", "github"].includes(status.state_backend)) payload.recipe = recipe;
+      const fingerprint = JSON.stringify(payload);
+      if (!submission.current || submission.current.fingerprint !== fingerprint) submission.current = { fingerprint, id: crypto.randomUUID() };
       const response = await fetch("/api/v1/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Machinist-CSRF": status.csrf_token },
-        body: JSON.stringify({ repository, model: model.trim(), ...(selection.startsWith("workflow:") ? { workflow: selection.slice(9),title: title || prompt.trim().split("\n")[0].slice(0,100),source_url:sourceURL || (/^https?:\/\/\S+$/.test(prompt.trim()) ? prompt.trim() : ""),spec:/^https?:\/\/\S+$/.test(prompt.trim()) ? "" : prompt } : { command: selection.slice(8),prompt }) }),
+        body: JSON.stringify({ ...payload, client_request_id: submission.current.id }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -122,7 +129,7 @@ function App() {
       }
       localStorage.setItem("machinist-workflow",selection); localStorage.setItem("machinist-repository",repository);
       const created = await response.json();
-      setPrompt(""); setTitle(""); setSourceURL("");
+      setPrompt(""); setTitle(""); setSourceURL(""); submission.current = null;
       setComposerOpen(false);
       await statusLoader.current.refresh();
       window.location.hash = `#/runs/${created.id}`;
@@ -138,7 +145,7 @@ function App() {
     try {
       const response = await fetch(`/api/v1/jobs/${encodeURIComponent(job.id)}/${action}`, {
         method: "POST", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": status.csrf_token },
-        body: JSON.stringify({ run_id: job.runs.at(-1)?.id, previous_process_stopped: stopped, feedback }),
+        body: JSON.stringify({ run_id: job.runs.at(-1)?.id, previous_process_stopped: stopped, feedback, hold_version: job.hold_version || 0 }),
       });
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to update job"); }
       await statusLoader.current.refresh();
@@ -172,12 +179,14 @@ function App() {
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
         <div className="brand-lockup flex h-10 items-center gap-3 px-1">
           <MachinistMark />
-          <span className="brand-wordmark">machinist</span>
+          <span className="brand-wordmark">Machinist</span>
         </div>
-        <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
-          <button className="nav-item new-task-nav w-full" disabled={view === "setup"} onClick={() => { setComposerOpen(true); window.location.hash = "#/runs"; }}><Plus className="size-4" /><span>New task</span></button>
-          {[["inbox", Inbox, "Inbox", attentionJobs.length], ["runs", Activity, "Runs"], ["agents", Bot, "Agents"], ["automations", TimerReset, "Automations"]].map(([page, Icon, label, count]) => <a key={page} href={`#/${page}`} aria-current={view === page || (page === "runs" && view === "task") ? "page" : undefined} className={cn("nav-item", (view === page || (page === "runs" && view === "task")) && "nav-item-active")}><Icon className="size-4" /><span>{label}</span>{count > 0 && <span className="ml-auto text-xs">{count}</span>}</a>)}
-          <a href="#/settings" className={cn("nav-item settings-nav", ["settings", "workers"].includes(view) && "nav-item-active")} aria-current={["settings", "workers"].includes(view) ? "page" : undefined}><Settings className="size-4" /><span>Settings</span></a>
+        <nav className="primary-nav" aria-label="Primary">
+          <span className="nav-group">Work</span>
+          {[["runs", Activity, "Runs"], ["inbox", Inbox, "Inbox", attentionJobs.length]].map(([page, Icon, label, count]) => <a key={page} href={`#/${page}`} aria-current={view === page || (page === "runs" && view === "task") ? "page" : undefined} className={cn("nav-item", (view === page || (page === "runs" && view === "task")) && "nav-item-active")}><Icon className="size-4" /><span>{label}</span>{count > 0 && <span className="nav-count">{count}</span>}</a>)}
+          <span className="nav-group">Infrastructure</span>
+          {[["repositories", GitBranch, "Repositories"], ["agents", Bot, "Agents"], ["runners", Server, "Runners"]].map(([page,Icon,label]) => <a key={page} href={`#/${page}`} aria-current={view === page ? "page" : undefined} className={cn("nav-item", view === page && "nav-item-active")}><Icon className="size-4" /><span>{label}</span></a>)}
+          <a href="#/settings" className={cn("nav-item settings-nav", ["settings", "workers", "automations", "triggers"].includes(view) && "nav-item-active")} aria-current={view === "settings" ? "page" : undefined}><Settings className="size-4" /><span>Settings</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
           <div className="nav-item" title={`${connectedWorkers} connected · ${status.workers.length} registered`}><Server className="size-4 shrink-0" /><span className="min-w-0 truncate whitespace-nowrap">{connectedWorkers ? `${connectedWorkers} worker${connectedWorkers === 1 ? "" : "s"} online` : "No workers online"}</span></div>
@@ -191,14 +200,15 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["settings", "workers"].includes(view) ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-          <PageHeading title="Runs" description="Your tasks, from first brief to reviewed pull request.">
+        <div className="runtime-bar" role="status"><span><i className={connectedWorkers ? "runtime-online" : ""} />{statusError ? "Connection lost" : connectedWorkers ? "Connected" : "No runner online"}</span><span>{status.jobs.filter(job => job.state === "running").length} running</span><span>{status.jobs.filter(job => job.state === "queued").length} queued</span><span className="runtime-location">{status.onboarding?.selection?.host === "vm" ? "VM" : "Local"}</span></div>
+        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
+          <PageHeading title="Runs" description="Agent jobs across your repositories.">
             <div className="flex items-center gap-2">
-              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
+              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
             </div>
           </PageHeading>
 
-          {composerOpen && <RunComposer stateBackend={status.state_backend} title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer recipe={recipe} setRecipe={setRecipe} stateBackend={status.state_backend} title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
@@ -211,16 +221,12 @@ function App() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">
                 <p className="text-xs text-muted-foreground">{counts.all} task{counts.all === 1 ? "" : "s"}</p>
-                <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Runs view">
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "board"} onClick={() => setRunsView("board")}><LayoutDashboard className="size-3.5" />Board</Button>
-                  <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "table"} onClick={() => setRunsView("table")}><Table2 className="size-3.5" />List</Button>
-                </div>
+
               </div>
             </div>
 
-            {runsView === "board" ? <RunBoard jobs={searchedJobs} /> : <Card className="overflow-hidden">
-              {searchedJobs.length ? searchedJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
-            </Card>}
+            {searchedJobs.length ? <div className="runs-table" role="table" aria-label="Runs"><div className="run-grid run-table-head" role="row">{["State", "Task", "Progress", "Stage", "Repository", "Target", "Duration", "Delivery"].map(label => <span role="columnheader" key={label}>{label}</span>)}</div>{searchedJobs.map(job => <RunRow key={job.id} job={job} />)}</div> : <EmptyRuns filtered={filter !== "all" || Boolean(search)} openComposer={() => setComposerOpen(true)} />}
+
           </section>
 
         </div>}
@@ -229,56 +235,48 @@ function App() {
   );
 }
 
-function RunComposer({ stateBackend,title,setTitle,sourceURL,setSourceURL,choices,repositories,selection,setSelection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
+function RunComposer({ recipe,setRecipe,stateBackend,title,setTitle,sourceURL,setSourceURL,choices,repositories,selection,setSelection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
   const specHintID=React.useId();
   const isTask=selection.startsWith("workflow:");
   return <Card className="overflow-hidden border-primary/25">
-    <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New task</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></div>
+    <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></div>
     <form onSubmit={submit} className="space-y-5 p-5">
+      {["local", "github"].includes(stateBackend) && <label className="block"><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="factory">Standard pipeline · Triage → optional Spec → Build → Review</option><option value="single">Single agent · one task, no separate review</option></select></label>}
       <label className="block space-y-2"><span className="text-sm font-medium">What do you want done?</span><textarea autoFocus aria-describedby={specHintID} className="field-control min-h-32 resize-y" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a change or paste an issue link…" required={!sourceURL.trim() || !isTask} /></label>
       <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{["github", "local"].includes(stateBackend) ? "Tasks run locally. Paste a GitHub issue link to connect existing work. Specs and pull requests live on GitHub; internal logs stay on your execution host." : "Describe the outcome and how to check it, or paste a GitHub issue. Agents run through your local or remote worker."}</p>
       <label className="block"><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
-      {selection === "workflow:factory" && <div className="factory-route"><span className="text-sm font-medium">Automatic agent routing</span><p className="mt-2 text-sm text-muted-foreground">Triage → Spec when needed → Implement → Review</p><p className="mt-1 text-xs text-muted-foreground">You approve specifications and decide when to merge. Review findings return to implementation.</p></div>}
-      <details><summary className="cursor-pointer text-sm text-muted-foreground">Advanced settings</summary><div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <label><span className="field-label">Workflow</span><select className="field-control" value={selection} onChange={e=>setSelection(e.target.value)} required>{choices.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
+      {selection === "workflow:factory" && (!["local", "github"].includes(stateBackend) || recipe === "factory") && <div className="factory-route"><span className="text-sm font-medium">Automatic agent routing</span><p className="mt-2 text-sm text-muted-foreground">Triage → Spec when needed → Build → Review</p><p className="mt-1 text-xs text-muted-foreground">You approve specifications and decide when to merge. Review findings return to implementation.</p></div>}
+      <section><h3 className="text-sm font-medium">Details</h3><div className="mt-4 grid gap-4 sm:grid-cols-2">
+
         {!["github", "local"].includes(stateBackend) && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}
         {isTask && <><label><span className="field-label">Title</span><input className="field-control" value={title} onChange={e=>setTitle(e.target.value)} maxLength={512} placeholder="From your instructions" /></label><label><span className="field-label">Source link</span><input type="url" className="field-control" value={sourceURL} onChange={e=>setSourceURL(e.target.value)} placeholder="https://github.com/…" /></label></>}
-      </div></details>
-      {!choices.length && <p role="alert" className="text-sm text-danger">Configure a workflow before starting a task.</p>}
+      </div></section>
+      {!choices.length && <p role="alert" className="text-sm text-danger">Complete setup before starting a run.</p>}
       <div className="flex justify-end"><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></div>
     </form>
   </Card>;
 }
 
-function RunBoard({ jobs }) {
-  const groupedJobs = groupJobsByBoardColumn(jobs);
-  return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <section key={column.id} className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`board-${column.id}`}>
-      <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
-        <div className="min-w-0"><h2 id={`board-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-        <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${groupedJobs[column.id].length} visible ${column.title.toLowerCase()} runs`}>{groupedJobs[column.id].length}</Badge>
-      </header>
-      <div className="grid min-w-0 gap-2 p-2">
-        {groupedJobs[column.id].length ? groupedJobs[column.id].map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
-      </div>
-    </section>)}
+function RunRow({ job }) {
+  const title = jobDisplayTitle(job);
+  const run = currentRun(job);
+  const progress = job.workflow?.factory;
+  const duration = run?.duration_millis ?? (run?.state === "running" && run.started_at ? Math.max(0, Date.now() - Date.parse(run.started_at)) : undefined);
+  const agent = run?.executor?.replace(/-review$/, "");
+  return <div className="run-grid run-data-row" role="row">
+    <span role="cell" className="run-state"><State value={job.state} compact /></span>
+    <span role="cell"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="run-title" aria-label={`Open task ${title}`}><strong>{title}</strong><small>{({single:"Single agent",direct:"Deliver",factory:"Standard",answer:"Answer"}[job.recipe] || friendlyName(job.workflow?.name || job.command))}</small></a><span className="run-mobile-progress"><StageProgress job={job} /></span></span>
+    <span role="cell" className="run-progress"><StageProgress job={job} /></span>
+    <span role="cell" className="run-agent">{job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(run?.command || job.command)}<small>{agent === "codex" ? "Codex" : agent === "claude" ? "Claude Code" : agent || "Waiting"}</small></span>
+    <span role="cell" className="run-repository" title={job.repository}>{job.repository}</span>
+    <span role="cell" className="run-target">{run?.worker_name || "Waiting"}</span>
+    <span role="cell" className="run-duration">{duration === undefined ? "—" : formatDurationMillis(duration)}</span>
+    <span role="cell" className="run-delivery">{job.publication_hold ? "Private" : progress?.pr_url ? <a href={progress.pr_url} target="_blank" rel="noreferrer">PR #{progress.pr_url.split("/").at(-1)}</a> : "—"}</span>
   </div>;
 }
 
-function RunCard({ job }) {
-  const title = jobDisplayTitle(job);
-  const run = currentRun(job);
-  return <Card className="overflow-hidden"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="block min-w-0 space-y-3 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Open task ${title}`}>
-    <p className="line-clamp-2 text-sm font-medium leading-5">{title}</p>
-    <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
-    <State value={job.state} />
-  </a></Card>;
-}
-
-function RunRow({ job }) {
-  const title=jobDisplayTitle(job);
-  const run=currentRun(job);
-  return <article className="border-b border-border last:border-b-0"><a href={`#/runs/${encodeURIComponent(job.id)}`} className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-muted/35" aria-label={`Open task ${title}`}><div className="min-w-0"><p className="truncate text-sm font-medium">{title}</p><p className="mt-1 text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p></div><div className="flex shrink-0 flex-col items-end gap-1"><State value={job.state} /><time className="text-xs text-muted-foreground" dateTime={job.created_at}>{relativeTime(job.created_at)}</time></div></a></article>;
+function RepositoriesPage({ status }) {
+ return <section className="runs-page"><PageHeading title="Repositories" description="Repositories connected through your GitHub App."><Button asChild variant="outline"><a href="#/setup">Manage connection</a></Button></PageHeading><div className="repository-list">{status.repositories.length ? status.repositories.map(repository => <article key={repository}><GitBranch className="size-4" />{status.repository_mappings?.[repository] ? <a href={`https://github.com/${status.repository_mappings[repository]}`} target="_blank" rel="noreferrer">{status.repository_mappings[repository]}</a> : <span>{repository}</span>}<span>Configured</span></article>) : <p>No repositories connected. Complete setup to start a run.</p>}</div></section>;
 }
 
 function EmptyRuns({ filtered, openComposer }) {
@@ -286,10 +284,7 @@ function EmptyRuns({ filtered, openComposer }) {
 }
 
 function MachinistMark() {
-  return <svg className="machinist-mark" viewBox="0 0 64 48" aria-hidden="true">
-    <path className="machinist-mark-piece-a" d="M8 40V18C8 11 12 7 18 7s10 4 10 11v10h4" />
-    <path className="machinist-mark-piece-b" d="M32 28h4V18c0-7 4-11 10-11s10 4 10 11v22" />
-  </svg>;
+  return <svg className="machinist-mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="4" fill="currentColor" /><path d="M6 17V7l6 6 6-6v10" fill="none" stroke="var(--sidebar)" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" /></svg>;
 }
 
 function selectionChoices(status) {
