@@ -44,6 +44,7 @@ type Store struct {
 }
 
 type Job struct {
+	StateBackend     string            `json:"state_backend,omitempty"`
 	Task             *protocol.Task    `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
 	ID               string            `json:"id"`
@@ -61,6 +62,8 @@ type Job struct {
 }
 
 type Run struct {
+	Report         string             `json:"report,omitempty"`
+	GitHubURL      string             `json:"github_url,omitempty"`
 	Revision       *protocol.Revision `json:"revision,omitempty"`
 	ReviewedRunID  string             `json:"reviewed_run_id,omitempty"`
 	Step           *int               `json:"step,omitempty"`

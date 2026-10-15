@@ -47,8 +47,9 @@ type ControlPlane struct {
 }
 
 type Executor struct {
-	Command []string          `toml:"command"`
-	Models  map[string]string `toml:"models"`
+	ReadOnly bool              `toml:"read_only"`
+	Command  []string          `toml:"command"`
+	Models   map[string]string `toml:"models"`
 }
 
 func (e Executor) supportsModel() bool {
@@ -60,6 +61,7 @@ type Repository struct {
 }
 
 type Server struct {
+	State             string `toml:"state"`
 	Listen            string `toml:"listen"`
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
@@ -133,6 +135,7 @@ type ResolvedTrigger struct {
 }
 
 type Command struct {
+	Model      string `toml:"model"`
 	Executor   string `toml:"executor"`
 	PromptFile string `toml:"prompt_file"`
 	Timeout    string `toml:"timeout"`
@@ -401,6 +404,7 @@ func resolveCommand(definitionPath, name string, command Command) (ResolvedComma
 	resolved := ResolvedCommand{
 		Name:       name,
 		Executor:   command.Executor,
+		Model:      command.Model,
 		Prompt:     prompt,
 		Timeout:    timeout,
 		Definition: definitionPath,
@@ -430,6 +434,11 @@ func RenderPrompt(command ResolvedCommand, prompt string) (ResolvedCommand, erro
 	}
 	command.Prompt = strings.ReplaceAll(command.Prompt, promptParameter, prompt)
 	return command, nil
+}
+
+// ValidatePromptParameters validates editable command templates using the definition rules.
+func ValidatePromptParameters(commandName, prompt string) error {
+	return validatePromptParameters(commandName, prompt)
 }
 
 func validatePromptParameters(commandName, prompt string) error {
@@ -524,10 +533,15 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 }
 
 func applyServerDefaults(server Server) (Server, error) {
+	if server.State != "" && server.State != "sqlite" && server.State != "github" {
+		return Server{}, errors.New("server state must be github or sqlite")
+	}
 	if server.Listen == "" {
 		server.Listen = "127.0.0.1:7331"
 	}
-	if server.Database == "" {
+	if server.State == "github" {
+		server.Database = ""
+	} else if server.Database == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return Server{}, fmt.Errorf("find user home directory: %w", err)

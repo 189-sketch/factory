@@ -38,18 +38,20 @@ const (
 )
 
 type Options struct {
-	Revision      *protocol.Revision
-	Task          *protocol.Task
-	PrepareInputs func(context.Context, string) (map[string]string, error)
-	Workflow      bool
-	JobID         string
-	RunID         string
-	ArtifactKey   string
-	Command       config.ResolvedCommand
-	Repository    string
-	DataDirectory string
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ReviewEvidence string
+	Factory        *protocol.FactoryContext
+	Revision       *protocol.Revision
+	Task           *protocol.Task
+	PrepareInputs  func(context.Context, string) (map[string]string, error)
+	Workflow       bool
+	JobID          string
+	RunID          string
+	ArtifactKey    string
+	Command        config.ResolvedCommand
+	Repository     string
+	DataDirectory  string
+	Stdout         io.Writer
+	Stderr         io.Writer
 }
 
 type Result struct {
@@ -152,6 +154,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
 	_, claudeAgent := claudeCommandInfo(options.Command.Executor, executorCommand)
 	agentExecutor := codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
+	if options.Factory != nil && newUsageCollector(options.Command.Executor, executorCommand) == nil {
+		return completeFailure(&result, log, runDirectory, fmt.Errorf("factory stages require a structured Codex or Claude Code executor"))
+	}
 	outputDirectory := ""
 	scratchDirectory := ""
 	if options.Task != nil {
@@ -164,7 +169,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 			return completeFailure(&result, log, runDirectory, err)
 		}
 		inputs := map[string]string{}
-		if options.PrepareInputs != nil {
+		if options.PrepareInputs != nil && options.Factory == nil {
 			var err error
 			inputs, err = options.PrepareInputs(ctx, filepath.Join(runDirectory, "inputs"))
 			if err != nil {
@@ -216,9 +221,18 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if options.Workflow {
 		resultPath := filepath.Join(runDirectory, "step-result.json")
 		command.Env = append(command.Env, "MACHINIST_STEP_RESULT_PATH="+resultPath, "MACHINIST_JOB_ID="+options.JobID)
-		if agentExecutor {
+		if agentExecutor && options.Factory == nil {
 			options.Command.Prompt += "\n\nMachinist workflow contract: perform the work above, then write a JSON object to the file named by the MACHINIST_STEP_RESULT_PATH environment variable. Use exactly the fields outcome (complete, blocked, or failed) and summary (a nonempty explanation). MACHINIST_OUTPUT_DIR is the published task folder: save only requested deliverables and files needed by later stages there. Every file there is uploaded and shown to the user. Use MACHINIST_SCRATCH_DIR for temporary clones, helper scripts, caches, raw command logs, and other working files; scratch files are not published or carried forward. Summarize verification in the final report; publish raw logs only when requested or needed to explain a failure. Do not report complete if work remains blocked. The next step starts only after complete. Reconcile existing issue/PR work before repeating side effects; this may be a retry.\n"
 		}
+	}
+	if options.Factory != nil {
+		body, err := json.Marshal(map[string]string{"role": options.Factory.Role, "pr_url": options.Factory.PRURL, "head_sha": options.Factory.HeadSHA, "branch": options.Factory.Branch})
+		if err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
+		command.Env = append(command.Env, "MACHINIST_FACTORY_CONTEXT="+string(body))
+		options.Command.Prompt += options.ReviewEvidence
+		options.Command.Prompt += factoryPrompt(options.Factory, repository)
 	}
 	configureProcess(command)
 
@@ -285,6 +299,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
 	if options.Workflow && state == StateSucceeded {
 		step, err := readStepResult(filepath.Join(runDirectory, "step-result.json"))
+		// Factory stages return their contract as the final agent message;
+		// the host reads it without granting the agent filesystem write access.
+		if options.Factory != nil && usageCollector != nil {
+			step, err = protocol.ParseStepResult([]byte(usageCollector.lastMessage()))
+		}
 		if err != nil {
 			state, exitCode, outcome = StateFailed, 1, err
 		} else {

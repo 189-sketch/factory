@@ -422,6 +422,10 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
+		if definition.Workflows[input.Workflow].Mode == "factory" {
+			writeError(response, 400, errors.New("factory workflows require server.state = github"))
+			return
+		}
 		steps, err := definition.ResolveTaskWorkflow(input.Workflow, input.Model)
 		if err != nil {
 			writeError(response, http.StatusBadRequest, err)
@@ -453,7 +457,9 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
-	command.Model = input.Model
+	if input.Model != "" {
+		command.Model = input.Model
+	}
 	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)

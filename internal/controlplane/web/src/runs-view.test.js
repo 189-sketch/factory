@@ -9,7 +9,7 @@ const jobs = [
   { id: "job_succeeded", state: "succeeded", prompt: "Succeeded fixture", repository: "example/repo", command: "codex", created_at: "2026-01-01T00:00:00Z", runs: [{ id: "run_succeeded", state: "succeeded", command: "codex" }] },
 ];
 
-test("runs default to board view and share filters when switching views", async (context) => {
+test("runs default to list view and share filters when switching views", async (context) => {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/runs" });
   const priorGlobals = new Map();
   for (const name of ["window", "document", "navigator", "localStorage", "Event", "MouseEvent"]) {
@@ -28,8 +28,15 @@ test("runs default to board view and share filters when switching views", async 
     ],
   };
   const interruptedJob = { ...detailJob, id: "job_interrupted", state: "interrupted", workflow: { name: "build", steps: ["build"], current_step: 0 }, runs: [{ id: "interrupted", command: "build", state: "interrupted" }] };
+  const otherInterruptedJob = { ...interruptedJob, id: "job_interrupted_other", task: { title: "Other interrupted task", spec: "Inspect existing work" }, runs: [{ id: "other-interrupted", command: "build", state: "interrupted" }] };
+  const humanDecisionJob = { ...detailJob, id: "job_human_decision", state: "blocked", workflow: { name: "factory", steps: ["triage", "spec", "implement", "review"], current_step: 3, factory: { verdict: "human_decision_needed" } }, runs: [{ id: "human-review", command: "review", state: "succeeded", outcome: "complete", summary: "Please decide how to handle the public API." }] };
+  const githubJob = { ...detailJob, id: "github-issue", state_backend: "github", task: { title: "GitHub journal task", source_url: "https://github.com/example/repo/issues/1", spec: "Build it" }, runs: [{ id: "github-report", command: "triage", outcome: "complete", state: "succeeded", summary: "Researched the request. Read the stage on GitHub.", report: "Full researched handoff stored on GitHub", github_url: "https://github.com/example/repo/issues/1#issuecomment-2" }] };
   let cancelled = false;
+  let savedPrompt;
   globalThis.fetch = async (url, options) => {
+    if (url === "/api/v1/definitions") return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
+    if (url === "/api/v1/factory/agents/triage" && options?.method === "PUT") { savedPrompt = JSON.parse(options.body); return { ok: true, json: async () => ({ hash: "new-hash" }) }; }
+
     if (url.endsWith("/cancel") && options?.method === "POST") {
       cancelled = true;
       interruptedJob.state = "cancelled";
@@ -43,7 +50,7 @@ test("runs default to board view and share filters when switching views", async 
       ] };
     }
     if (url.endsWith("/content")) return { ok: true, text: async () => "<script>literal file text</script>" };
-    return { ok: true, json: async () => ({ jobs: [...jobs, detailJob, interruptedJob], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
+    return { ok: true, json: async () => ({ jobs: [...jobs, detailJob, interruptedJob, otherInterruptedJob, humanDecisionJob, githubJob, { ...otherInterruptedJob, id: "job_interrupted_second", task: { title: "Second interrupted task" }, runs: [{ id: "second-interrupted", command: "build", state: "interrupted" }] }], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
   };
 
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
@@ -64,9 +71,9 @@ test("runs default to board view and share filters when switching views", async 
   mountedRoot = (await server.ssrLoadModule("/src/main.jsx")).appRoot;
   await eventually(() => assert.match(document.body.textContent, /Failed fixture/));
 
-  assert.equal(button("Board").getAttribute("aria-pressed"), "true");
+  assert.equal(button("Board").getAttribute("aria-pressed"), "false");
   assert.ok(document.querySelector('a[href="#/runs/job_failed"]'), "board links to task");
-  assert.equal(button("List").getAttribute("aria-pressed"), "false");
+  assert.equal(button("List").getAttribute("aria-pressed"), "true");
 
   button("Board").click();
   await eventually(() => assert.equal(button("Board").getAttribute("aria-pressed"), "true"));
@@ -94,11 +101,11 @@ test("runs default to board view and share filters when switching views", async 
   for (const text of ["test-executor", "test-model", "test-worker", "Not reported", "Delete task", "Exit code"]) {
     assert.ok(details.textContent.includes(text), `details include ${text}`);
   }
-  tab("History").click();
-  await eventually(() => assert.equal(tab("History").getAttribute("aria-selected"), "true"));
+  tab("Timeline").click();
+  await eventually(() => assert.equal(tab("Timeline").getAttribute("aria-selected"), "true"));
   assert.match(document.querySelector('[role="tabpanel"]:not([hidden])').textContent, /plan.md/);
-  tab("Files").click();
-  await eventually(() => assert.equal(tab("Files").getAttribute("aria-selected"), "true"));
+  tab("Artifacts").click();
+  await eventually(() => assert.equal(tab("Artifacts").getAttribute("aria-selected"), "true"));
   document.querySelector('[role="tabpanel"]:not([hidden]) [aria-label="View result.md"]').click();
   await eventually(() => assert.match(document.querySelector('[role="tabpanel"]:not([hidden])').textContent, /<script>literal file text<\/script>/));
   assert.equal(document.querySelectorAll("script").length, 0, "preview renders text, not markup");
@@ -109,6 +116,53 @@ test("runs default to board view and share filters when switching views", async 
   await eventually(() => assert.equal(cancelled, true));
   await eventually(() => assert.equal(button("Delete task").disabled, false));
   await eventually(() => assert.equal([...document.querySelectorAll("button")].find(el => el.textContent === "Cancel task"), undefined));
+
+  window.location.hash = "#/inbox";
+  await eventually(() => assert.ok(document.querySelector('[aria-label="Inbox tasks"]')));
+  assert.match(document.querySelector('[aria-label="Inbox tasks"]').textContent, /Failed fixture/);
+  assert.doesNotMatch(document.querySelector('[aria-label="Inbox tasks"]').textContent, /Succeeded fixture/);
+  // Stop confirmation and feedback belong only to the selected task attempt.
+  interruptedJob.state = "interrupted";
+  const inboxSelection = title => [...document.querySelectorAll(".inbox-row")].find(row => row.textContent.includes(title));
+  inboxSelection("Other interrupted task").click();
+  await eventually(() => assert.ok(document.querySelector('.inbox-detail input[type="checkbox"]')));
+  const confirmation = document.querySelector('.inbox-detail input[type="checkbox"]');
+  confirmation.click();
+  await eventually(() => assert.equal(confirmation.checked, true));
+  const feedbackField = document.querySelector(".inbox-detail textarea");
+  Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(feedbackField, "Context only for task A");
+  feedbackField.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  await eventually(() => assert.equal(feedbackField.value, "Context only for task A"));
+  inboxSelection("Second interrupted task").click();
+  await eventually(() => assert.equal(document.querySelector(".inbox-detail textarea").value, ""));
+  assert.equal(document.querySelector('.inbox-detail input[type="checkbox"]').checked, false);
+  inboxSelection("Other interrupted task").click();
+  await eventually(() => assert.equal(document.querySelector('.inbox-detail input[type="checkbox"]').checked, false));
+  assert.equal(document.querySelector(".inbox-detail textarea").value, "");
+  window.location.hash = "#/runs/job_human_decision";
+  await eventually(() => assert.ok([...document.querySelectorAll("button")].find(element => element.textContent === "Request changes")));
+  assert.ok([...document.querySelectorAll("button")].find(element => element.textContent === "Retry review"));
+  assert.equal([...document.querySelectorAll("button")].some(element => element.textContent.includes("Approve and start")), false);
+  const requestsBeforeGitHubTask = artifactRequests;
+  window.location.hash = "#/runs/github-issue";
+  await eventually(() => assert.match(document.body.textContent, /Researched the request. Read the stage on GitHub/));
+  assert.doesNotMatch(document.body.textContent, /Full researched handoff stored on GitHub/);
+  assert.doesNotMatch(document.body.textContent, /triage\.md|spec\.md|implementation\.md/);
+  assert.equal(artifactRequests, requestsBeforeGitHubTask, "GitHub reports never load local artifacts");
+  assert.ok(document.querySelector('a[href="https://github.com/example/repo/issues/1#issuecomment-2"]'));
+  assert.equal([...document.querySelectorAll("button")].some(element => element.textContent === "Delete task"), false);
+  assert.equal([...document.querySelectorAll('[role="tab"]')].some(element => ["Artifacts", "Handoffs"].includes(element.textContent)), false);
+  window.location.hash = "#/agents";
+  await eventually(() => assert.ok(document.querySelector('[aria-label="Factory agents"]')));
+  await eventually(() => assert.equal(document.querySelector("textarea").value, "triage original prompt"));
+  assert.equal(button("Save prompt").disabled, true);
+  const textarea = document.querySelector("textarea");
+  Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Updated triage prompt");
+  textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+  await eventually(() => assert.equal(button("Save prompt").disabled, false));
+  button("Save prompt").click();
+  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
+  await eventually(() => assert.match(document.body.textContent, /Saved. Future attempts use this version/));
 
 });
 

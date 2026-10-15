@@ -3,15 +3,17 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
-	SharedOutputs bool                `json:"shared_outputs,omitempty"`
-	Reviews       bool                `json:"reviews,omitempty"`
-	Artifacts     bool                `json:"artifacts,omitempty"`
-	Workflows     bool                `json:"workflows,omitempty"`
-	InstanceID    string              `json:"instance_id"`
-	Name          string              `json:"name"`
-	Executors     []string            `json:"executors"`
-	Repositories  []string            `json:"repositories"`
-	Models        map[string][]string `json:"models,omitempty"`
+	Factory           bool                `json:"factory,omitempty"`
+	ReadOnlyExecutors []string            `json:"read_only_executors,omitempty"`
+	SharedOutputs     bool                `json:"shared_outputs,omitempty"`
+	Reviews           bool                `json:"reviews,omitempty"`
+	Artifacts         bool                `json:"artifacts,omitempty"`
+	Workflows         bool                `json:"workflows,omitempty"`
+	InstanceID        string              `json:"instance_id"`
+	Name              string              `json:"name"`
+	Executors         []string            `json:"executors"`
+	Repositories      []string            `json:"repositories"`
+	Models            map[string][]string `json:"models,omitempty"`
 }
 
 type PollResponse struct {
@@ -19,6 +21,7 @@ type PollResponse struct {
 }
 
 type RunSpec struct {
+	Factory         *FactoryContext     `json:"factory,omitempty"`
 	Revision        *Revision           `json:"revision,omitempty"`
 	Task            *Task               `json:"task,omitempty"`
 	Inputs          map[string]Artifact `json:"inputs,omitempty"`

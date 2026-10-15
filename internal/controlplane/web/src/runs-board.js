@@ -11,7 +11,7 @@ const failedStates = new Set(["failed", "timed_out"]);
 export function boardColumnForState(state) {
   if (state === "queued") return "queued";
   if (state === "running") return "running";
-  if (["blocked", "awaiting_approval", "interrupted"].includes(state)) return "attention";
+  if (["blocked", "awaiting_approval", "awaiting_merge", "interrupted"].includes(state)) return "attention";
   return "finished";
 }
 
@@ -51,7 +51,8 @@ export function currentRun(job) {
 
 export function jobDisplayTitle(job) {
   const title = typeof job.github_issue_title === "string" ? job.github_issue_title.trim() : "";
-  return job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  const value = job.task?.title || title || job.task?.spec || job.task?.source_url || job.prompt || job.id;
+  return String(value).split("\n")[0].slice(0, 120);
 }
 
 export function githubIssueReference(job) {

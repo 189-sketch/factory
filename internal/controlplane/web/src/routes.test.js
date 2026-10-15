@@ -12,3 +12,9 @@ test("routeFromHash falls back to runs for incomplete or malformed routes", () =
   assert.deepEqual(routeFromHash("#/runs/%E0%A4%A"), { view: "runs", jobID: "" });
   assert.deepEqual(routeFromHash("#/unknown"), { view: "runs", jobID: "" });
 });
+
+test("factory navigation routes remain addressable", () => {
+  for (const view of ["inbox", "agents", "automations", "settings"]) {
+    assert.deepEqual(routeFromHash(`#/${view}`), { view, jobID: "" });
+  }
+});

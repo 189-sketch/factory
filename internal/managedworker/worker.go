@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -134,15 +135,17 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	request := protocol.PollRequest{
-		SharedOutputs: true,
-		Reviews:       true,
-		Workflows:     true,
-		Artifacts:     true,
-		InstanceID:    w.instanceID,
-		Name:          w.config.Name,
-		Executors:     w.config.ExecutorNames(),
-		Repositories:  w.config.RepositoryNames(),
-		Models:        w.config.ModelCapabilities(),
+		Factory:           true,
+		ReadOnlyExecutors: w.readOnlyExecutors(),
+		SharedOutputs:     true,
+		Reviews:           true,
+		Workflows:         true,
+		Artifacts:         true,
+		InstanceID:        w.instanceID,
+		Name:              w.config.Name,
+		Executors:         w.config.ExecutorNames(),
+		Repositories:      w.config.RepositoryNames(),
+		Models:            w.config.ModelCapabilities(),
 	}
 	var response protocol.PollResponse
 	if err := w.client.Post(ctx, "/api/v1/workers/poll", request, &response); err != nil {
@@ -158,6 +161,23 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
+	if spec.Factory != nil {
+		if spec.Task != nil && spec.Task.SourceURL != "" {
+			if err := validateSourceRepository(repositoryCommand(ctx, repository), spec.Task.SourceURL); err != nil {
+				completion.Error = err.Error()
+				return completion
+			}
+		}
+		if spec.Factory.Role == "review" && !w.config.Executors[spec.Executor].ReadOnly {
+			completion.Error = "factory review requires a read-only executor"
+			return completion
+		}
+		repository, err = w.factoryWorkspace(ctx, repository, spec)
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+	}
 	command, err := w.config.ResolveCommandModel(config.ResolvedCommand{
 		Name:       spec.Command,
 		Executor:   spec.Executor,
@@ -170,10 +190,25 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
+	var reviewEvidence string
+	if spec.Factory != nil && spec.Factory.Role == "review" {
+		evidence, err := collectReviewEvidence(repositoryCommand(ctx, repository), spec.Factory)
+		if err != nil {
+			completion.Error = err.Error()
+			return completion
+		}
+		reviewEvidence = evidence
+	}
+	prepareInputs := w.prepareInputs(spec)
+	if spec.Factory != nil {
+		prepareInputs = nil
+	}
 	result, runErr := runner.Execute(ctx, runner.Options{
-		Revision: spec.Revision,
-		Workflow: spec.Workflow, JobID: spec.JobID,
-		Task: spec.Task, PrepareInputs: w.prepareInputs(spec),
+		Factory:        spec.Factory,
+		ReviewEvidence: reviewEvidence,
+		Revision:       spec.Revision,
+		Workflow:       spec.Workflow, JobID: spec.JobID,
+		Task: spec.Task, PrepareInputs: prepareInputs,
 		RunID:         spec.ID,
 		ArtifactKey:   spec.LeaseToken,
 		Command:       command,
@@ -182,15 +217,25 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,
 	})
+	if runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec") && result.StepResult != nil && result.StepResult.Outcome == "complete" {
+		if err := validateImplementationEvidence(repositoryCommand(ctx, repository), result.StepResult.Factory); err != nil {
+			runErr = err
+			result.State = runner.StateFailed
+			result.ExitCode = 1
+		}
+	}
 	if result.ID != "" {
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
+		if runErr != nil && spec.Factory != nil {
+			completion.Result, _ = json.Marshal(result)
+		}
 		if events, readErr := os.ReadFile(result.EventsPath); readErr == nil {
 			completion.Events = string(events)
 		}
 	}
-	if spec.Task != nil && result.EventsPath != "" {
+	if spec.Factory == nil && spec.Task != nil && result.EventsPath != "" {
 		ids, err := w.publishOutputs(ctx, spec, filepath.Join(filepath.Dir(result.EventsPath), "outputs"))
 		completion.Artifacts = ids
 		if err != nil {
@@ -246,4 +291,14 @@ func randomID(prefix string, byteCount int) (string, error) {
 		return "", err
 	}
 	return prefix + "_" + hex.EncodeToString(body), nil
+}
+
+func (w *Worker) readOnlyExecutors() []string {
+	var names []string
+	for _, name := range w.config.ExecutorNames() {
+		if w.config.Executors[name].ReadOnly {
+			names = append(names, name)
+		}
+	}
+	return names
 }

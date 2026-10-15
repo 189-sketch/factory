@@ -3,9 +3,9 @@ import { State, friendlyName, relativeTime } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Sun, Table2, TimerReset, X } from "lucide-react";
+import { Activity, BarChart3, Bot, Inbox, Settings, Search, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Sun, Table2, TimerReset, X } from "lucide-react";
 import { Analytics } from "@/analytics";
-import { CommandsPage, WorkersPage } from "@/catalog";
+import { AgentsPage, CommandsPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -33,9 +33,11 @@ function App() {
   const [deletingJob, setDeletingJob] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [inboxID, setInboxID] = useState("");
   const [filter, setFilter] = useState("all");
-  const [runsView, setRunsView] = useState("board");
-  const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
+  const [runsView, setRunsView] = useState("table");
+  const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") === "dark");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
   const view = route.view;
   const statusLoader = useRef(null);
@@ -55,7 +57,7 @@ function App() {
       setStatusError("");
       setStatusLoaded(true);
       const available = new Set(selectionChoices(next).map((choice) => choice.value));
-      setSelection((current) => available.has(current) ? current : available.has(localStorage.getItem("machinist-workflow")) ? localStorage.getItem("machinist-workflow") : firstSelection(next));
+      setSelection((current) => available.has(current) ? current : available.has("workflow:factory") ? "workflow:factory" : available.has(localStorage.getItem("machinist-workflow")) ? localStorage.getItem("machinist-workflow") : firstSelection(next));
       const availableRepositories = next.repositories || [];
       setRepository((current) => availableRepositories.includes(current) ? current : availableRepositories.includes(localStorage.getItem("machinist-repository")) ? localStorage.getItem("machinist-repository") : availableRepositories[0] || "");
     },
@@ -97,6 +99,9 @@ function App() {
   const counts = useMemo(() => jobCounts(status.jobs), [status.jobs]);
   const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
 
+  const attentionJobs = status.jobs.filter(job => ["awaiting_approval", "awaiting_merge", "blocked", "interrupted", "failed", "timed_out"].includes(job.state));
+  const inboxJob = attentionJobs.find(job => job.id === inboxID) || attentionJobs[0];
+  const searchedJobs = visibleJobs.filter(job => `${jobDisplayTitle(job)} ${job.repository} ${currentRun(job)?.command || ""}`.toLowerCase().includes(search.toLowerCase()));
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
 
@@ -169,11 +174,9 @@ function App() {
           <span className="brand-wordmark">machinist</span>
         </div>
         <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
-          <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Tasks</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
-          <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
-          <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
-          <a href="#/triggers" aria-current={view === "triggers" ? "page" : undefined} className={cn("nav-item", view === "triggers" && "nav-item-active")}><TimerReset className="size-4" /><span>Triggers</span><span className="ml-auto text-xs text-muted-foreground">{status.triggers?.length || 0}</span></a>
-          <a href="#/workflows" aria-current={["commands", "workflows"].includes(view) ? "page" : undefined} className={cn("nav-item", ["commands", "workflows"].includes(view) && "nav-item-active")}><Bot className="size-4" /><span>Workflows</span></a>
+          <button className="nav-item new-task-nav w-full" onClick={() => { setComposerOpen(true); window.location.hash = "#/runs"; }}><Plus className="size-4" /><span>New task</span></button>
+          {[["inbox", Inbox, "Inbox", attentionJobs.length], ["runs", Activity, "Runs"], ["agents", Bot, "Agents"], ["automations", TimerReset, "Automations"]].map(([page, Icon, label, count]) => <a key={page} href={`#/${page}`} aria-current={view === page || (page === "runs" && view === "task") ? "page" : undefined} className={cn("nav-item", (view === page || (page === "runs" && view === "task")) && "nav-item-active")}><Icon className="size-4" /><span>{label}</span>{count > 0 && <span className="ml-auto text-xs">{count}</span>}</a>)}
+          <a href="#/settings" className={cn("nav-item settings-nav", ["settings", "workers"].includes(view) && "nav-item-active")} aria-current={["settings", "workers"].includes(view) ? "page" : undefined}><Settings className="size-4" /><span>Settings</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
           <div className="nav-item" title={`${connectedWorkers} connected · ${status.workers.length} registered`}><Server className="size-4 shrink-0" /><span className="min-w-0 truncate whitespace-nowrap">{connectedWorkers ? `${connectedWorkers} worker${connectedWorkers === 1 ? "" : "s"} online` : "No workers online"}</span></div>
@@ -187,17 +190,18 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
-          <PageHeading title="Tasks" description="Describe the work. Review the result.">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["settings", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+          <PageHeading title="Runs" description="Your tasks, from first brief to reviewed pull request.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
             </div>
           </PageHeading>
 
-          {composerOpen && <RunComposer title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer stateBackend={status.state_backend} title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
+            <label className="run-search"><Search className="size-4" /><input aria-label="Search runs" placeholder="Search runs…" value={search} onChange={event => setSearch(event.target.value)} /></label>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter runs">
                 {[["all", "All"], ["active", "Active"], ["failed", "Failed"], ["succeeded", "Succeeded"]].map(([value, label]) => (
@@ -213,8 +217,8 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? <RunBoard jobs={visibleJobs} /> : <Card className="overflow-hidden">
-              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
+            {runsView === "board" ? <RunBoard jobs={searchedJobs} /> : <Card className="overflow-hidden">
+              {searchedJobs.length ? searchedJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
 
@@ -224,22 +228,21 @@ function App() {
   );
 }
 
-function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositories,selection,setSelection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
+function RunComposer({ stateBackend,title,setTitle,sourceURL,setSourceURL,choices,repositories,selection,setSelection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
   const specHintID=React.useId();
   const isTask=selection.startsWith("workflow:");
   return <Card className="overflow-hidden border-primary/25">
     <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New task</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></div>
     <form onSubmit={submit} className="space-y-5 p-5">
       <label className="block space-y-2"><span className="text-sm font-medium">What do you want done?</span><textarea autoFocus aria-describedby={specHintID} className="field-control min-h-32 resize-y" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a change or paste an issue link…" required={!sourceURL.trim() || !isTask} /></label>
-      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{isTask ? <>This is your task’s spec: describe what to build and what counts as done. Prompt templates reference it as <code>{"{{task.spec}}"}</code>. A link on its own is saved as the source instead. <a href="#/workflows" className="text-primary underline">Template variables</a></> : "Write the instructions for this command. Its prompt template receives them as {{machinist.prompt}}."}</p>
-      <section className="text-sm">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <label><span className="field-label">{isTask ? "Workflow" : "Command"}</span><select className="field-control" value={selection} onChange={e=>setSelection(e.target.value)} required>{choices.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
-          <label><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
-          {isTask && <><label><span className="field-label">Title · optional</span><input className="field-control" value={title} onChange={e=>setTitle(e.target.value)} maxLength={512} placeholder="From your instructions by default" /><span className="mt-1 block text-xs text-muted-foreground">Template: <code>{"{{task.title}}"}</code></span></label><label><span className="field-label">Source link · optional</span><input type="url" className="field-control" value={sourceURL} onChange={e=>setSourceURL(e.target.value)} placeholder="https://github.com/…" /><span className="mt-1 block text-xs text-muted-foreground">Template: <code>{"{{task.source_url}}"}</code></span></label></>}
-          <label><span className="field-label">Model · optional</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Workflow default" /></label>
-        </div>
-      </section>
+      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{stateBackend === "github" ? "Creates a GitHub issue, or adopts the linked issue. Stage reports and decisions stay in GitHub; agents execute on your local host or remote VM." : "Describe the outcome and how to check it, or paste a GitHub issue. Agents run through your local or remote worker."}</p>
+      <label className="block"><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
+      {selection === "workflow:factory" && <div className="factory-route"><span className="text-sm font-medium">Automatic agent routing</span><p className="mt-2 text-sm text-muted-foreground">Triage → Spec when needed → Implement → Review</p><p className="mt-1 text-xs text-muted-foreground">You approve specifications and decide when to merge. Review findings return to implementation.</p></div>}
+      <details><summary className="cursor-pointer text-sm text-muted-foreground">Advanced settings</summary><div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label><span className="field-label">Workflow</span><select className="field-control" value={selection} onChange={e=>setSelection(e.target.value)} required>{choices.map(c=><option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
+        {stateBackend !== "github" && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}
+        {isTask && <><label><span className="field-label">Title</span><input className="field-control" value={title} onChange={e=>setTitle(e.target.value)} maxLength={512} placeholder="From your instructions" /></label><label><span className="field-label">Source link</span><input type="url" className="field-control" value={sourceURL} onChange={e=>setSourceURL(e.target.value)} placeholder="https://github.com/…" /></label></>}
+      </div></details>
       {!choices.length && <p role="alert" className="text-sm text-danger">Configure a workflow before starting a task.</p>}
       <div className="flex justify-end"><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></div>
     </form>
@@ -292,7 +295,7 @@ function selectionChoices(status) {
  const workflows=status.workflows || [];
  return workflows.length ? workflows.map(name=>({value:`workflow:${name}`,label:friendlyName(name)})) : (status.commands || []).map(name=>({value:`command:${name}`,label:friendlyName(name)}));
 }
-function firstSelection(status) { return selectionChoices(status)[0]?.value || ""; }
+function firstSelection(status) { return status.workflows?.includes("factory") ? "workflow:factory" : selectionChoices(status)[0]?.value || ""; }
 function shortId(id) { const [, value = id] = id.split("_", 2); return value.slice(0, 8); }
 export const appRoot = createRoot(document.getElementById("root"));
 appRoot.render(<App />);

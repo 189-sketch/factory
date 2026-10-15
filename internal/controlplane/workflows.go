@@ -48,9 +48,10 @@ const workflowSchema = `
  step INTEGER NOT NULL, outcome TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '');`
 
 type WorkflowProgress struct {
-	Name        string   `json:"name"`
-	Steps       []string `json:"steps"`
-	CurrentStep int      `json:"current_step"`
+	Factory     *FactoryProgress `json:"factory,omitempty"`
+	Name        string           `json:"name"`
+	Steps       []string         `json:"steps"`
+	CurrentStep int              `json:"current_step"`
 }
 
 func (s *Store) createWorkflowJob(ctx context.Context, prompt, repository, name string, steps []config.WorkflowStep, task *protocol.Task) (string, error) {

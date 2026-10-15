@@ -40,3 +40,8 @@ test("GitHub issue titles are preferred over prompts and hashes", () => {
   assert.equal(githubIssueReference(job), "#7");
   assert.equal(jobDisplayTitle({ id: "job_12345678", prompt: "Run an audit" }), "Run an audit");
 });
+
+test("run titles remain concise when instructions are long", () => {
+  assert.equal(jobDisplayTitle({ task: { spec: "Fix the queue\nAcceptance: preserve leases" }, runs: [] }), "Fix the queue");
+  assert.equal(jobDisplayTitle({ prompt: "x".repeat(300), runs: [] }).length, 120);
+});

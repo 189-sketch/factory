@@ -405,7 +405,7 @@ func TestExampleCommandDefinitionsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := []string{"audit", "task-to-pr"}
+	names := []string{"audit", "task-to-pr", "triage", "spec", "implement", "review"}
 	if len(definitions.Commands) != len(names) {
 		t.Fatalf("example commands = %#v, want %v", definitions.Commands, names)
 	}
@@ -454,5 +454,33 @@ func TestLoadConfigRejectsRemovedShepherdSchedules(t *testing.T) {
 	_, err := LoadDefinitions(path)
 	if err == nil || !strings.Contains(err.Error(), "shepherd schedules were removed") {
 		t.Fatalf("error = %v, want removed shepherd schedule guidance", err)
+	}
+}
+
+func TestServerStateStorageSelection(t *testing.T) {
+	for _, state := range []string{"", "sqlite", "github"} {
+		t.Run(state, func(t *testing.T) {
+			directory := t.TempDir()
+			server, err := applyServerDefaults(Server{State: state, WorkerTokenFile: "token", configDir: directory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == "github" && server.Database != "" {
+				t.Fatalf("GitHub mode resolved a local database: %s", server.Database)
+			}
+			if state != "github" && !filepath.IsAbs(server.Database) {
+				t.Fatalf("legacy database not resolved: %s", server.Database)
+			}
+			if server.WorkerTokenFile != filepath.Join(directory, "token") {
+				t.Fatalf("token path: %s", server.WorkerTokenFile)
+			}
+		})
+	}
+	if _, err := applyServerDefaults(Server{State: "unknown", WorkerTokenFile: "token"}); err == nil {
+		t.Fatal("accepted unknown state backend")
+	}
+	server, err := applyServerDefaults(Server{State: "github", Database: "~/ignored.db", WorkerTokenFile: "token", configDir: t.TempDir()})
+	if err != nil || server.Database != "" {
+		t.Fatalf("GitHub mode retained database: %+v %v", server, err)
 	}
 }

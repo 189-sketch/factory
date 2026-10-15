@@ -1,10 +1,42 @@
 [server]
 listen = "127.0.0.1:7331"
-database = "~/.machinist/server/machinist.db"
+state = "github"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
 
-# Take a task or GitHub issue to a reviewed pull request.
+# Four specialists run through the deterministic local factory foreman.
+# Use executor "claude" for Claude Code; review requires "claude-review".
+# The worker may run on this host or on a configured remote machine.
+[workflows.factory]
+mode = "factory"
+steps = [
+  { id = "triage", command = "triage" },
+  { id = "spec", command = "spec" },
+  { id = "implement", command = "implement" },
+  { id = "review", command = "review" },
+]
+
+[commands.triage]
+executor = "codex"
+prompt_file = "prompts/triage.md"
+timeout = "30m"
+
+[commands.spec]
+executor = "codex"
+prompt_file = "prompts/spec.md"
+timeout = "30m"
+
+[commands.implement]
+executor = "codex"
+prompt_file = "prompts/implement.md"
+timeout = "120m"
+
+[commands.review]
+executor = "codex-review"
+prompt_file = "prompts/review.md"
+timeout = "45m"
+
+# Legacy direct command: take a task or GitHub issue to a reviewed pull request.
 [commands.task-to-pr]
 executor = "codex"
 prompt_file = "prompts/task-to-pr.md"

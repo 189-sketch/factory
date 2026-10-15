@@ -21,3 +21,21 @@ test("successful task marks all stages complete", () => {
   const view = taskPresentation({ state: "succeeded", runs: [{ id: "done" }], workflow: { steps: ["plan", "build"], current_step: 1 } });
   assert.ok(view.stages.every(s => s.complete && !s.current));
 });
+
+test("factory skips absent stages without claiming they completed", () => {
+  const workflow = { steps: ["triage", "spec", "implement", "review"], current_step: 2, factory: {} };
+  const view = taskPresentation({ state: "running", workflow, runs: [{ command: "triage", outcome: "complete" }, { command: "implement", state: "running" }] });
+  assert.deepEqual(view.stages.map(stage => [stage.complete, stage.current, stage.skipped]), [[true, false, false], [false, false, true], [false, true, false], [false, false, false]]);
+});
+
+test("factory review completion binds accepted handoff and remains incomplete during repair", () => {
+  const workflow = { steps: ["triage", "spec", "implement", "review"], current_step: 2, factory: { verdict: "revision_needed" } };
+  const runs = [{ command: "triage", outcome: "complete" }, { command: "implement", outcome: "complete" }, { command: "review", outcome: "complete" }, { command: "implement", state: "running" }];
+  const repair = taskPresentation({ state: "running", workflow, runs });
+  assert.equal(repair.stages[2].complete, false);
+  assert.equal(repair.stages[3].complete, false);
+  const handoff = taskPresentation({ state: "awaiting_merge", workflow: { ...workflow, current_step: 3, factory: { verdict: "accepted" } }, runs });
+  assert.equal(handoff.stages[3].complete, true);
+  assert.equal(handoff.stages[3].current, false);
+  assert.equal(handoff.stages[1].skipped, true);
+});

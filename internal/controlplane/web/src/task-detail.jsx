@@ -25,6 +25,8 @@ export function TaskDetail({
   onWorkflowAction,
 }) {
   const artifacts = useTaskArtifacts(job, csrfToken);
+  const githubState = job?.state_backend === "github";
+  const factoryTask = githubState || Boolean(job?.workflow?.factory);
   if (!job)
     return (
       <div className="p-8">
@@ -41,7 +43,7 @@ export function TaskDetail({
   const { result, history, stages } = taskPresentation(job);
   const reviewing = job.state === "awaiting_approval";
   return (
-    <div className="mx-auto max-w-[1000px] space-y-7 p-4 sm:p-6 lg:p-8">
+    <div className="mx-auto max-w-[1200px] space-y-7 p-4 sm:p-6 lg:p-8">
       <header className="space-y-4">
         <Button asChild variant="ghost" size="sm" className="-ml-3">
           <a href="#/runs">
@@ -108,6 +110,7 @@ export function TaskDetail({
                   <span className="text-xs">{index + 1}</span>
                 )}
                 {friendlyName(stage.name)}
+                {stage.skipped && <span className="text-xs text-muted-foreground">Skipped</span>}
                 {stage.current && (
                   <span className="text-xs text-muted-foreground">
                     {reviewing ? "Awaiting approval" : stateLabel(job.state)}
@@ -124,7 +127,7 @@ export function TaskDetail({
         items={[
           {
             id: "result",
-            label: "Result",
+            label: "Activity",
             content: (
               <Card
                 className="space-y-5 p-5 sm:p-6"
@@ -146,7 +149,9 @@ export function TaskDetail({
                     {result.error}
                   </p>
                 )}
-                {result && job.task && (
+                {factoryTask && result?.github_url && <a className="block text-sm text-primary underline" href={result.github_url} target="_blank" rel="noreferrer">Open stage on GitHub</a>}
+                {job.workflow?.factory?.spec_url && <a className="block text-sm text-primary underline" href={job.workflow.factory.spec_url} target="_blank" rel="noreferrer">Open spec on GitHub</a>}
+                {result && job.task && !factoryTask && (
                   <Artifacts
                     key={result.id}
                     artifacts={artifacts}
@@ -165,11 +170,11 @@ export function TaskDetail({
               </Card>
             ),
           },
-          ...(job.task && lastCompleted
+          ...(job.task && lastCompleted && !factoryTask
             ? [
                 {
                   id: "files",
-                  label: "Files",
+                  label: "Artifacts",
                   content: (
                     <Artifacts
                       artifacts={artifacts}
@@ -184,7 +189,7 @@ export function TaskDetail({
             ? [
                 {
                   id: "history",
-                  label: "History",
+                  label: "Timeline",
                   content: (
                     <ol className="space-y-4">
                       {history.map((run) => (
@@ -214,13 +219,14 @@ export function TaskDetail({
                           {run.error && run.error !== run.summary && (
                             <p className="text-danger">{run.error}</p>
                           )}
-                          {job.task && (
+                          {job.task && !factoryTask && (
                             <Artifacts
                               artifacts={artifacts}
                               runID={run.id}
                               csrfToken={csrfToken}
                             />
                           )}
+                          {run.github_url && <a className="block text-sm text-primary underline" href={run.github_url} target="_blank" rel="noreferrer">Open stage on GitHub</a>}
                           <ExecutionDetails run={run} />
                         </li>
                       ))}
@@ -229,6 +235,11 @@ export function TaskDetail({
                 },
               ]
             : []),
+          {
+            id: "agents",
+            label: "Agents",
+            content: <div className="divide-y divide-border">{job.runs.map(run => <article key={run.id} className="py-4"><div className="flex flex-wrap justify-between gap-3"><h2 className="text-sm font-medium">{friendlyName(run.command)}</h2><State value={run.state} /></div><ExecutionDetails run={run} /><details className="mt-3 text-xs"><summary className="cursor-pointer text-muted-foreground">Prompt snapshot</summary><pre className="mt-3 overflow-auto whitespace-pre-wrap break-words font-mono leading-6">{run.prompt || "Prompt snapshot is not reported for this attempt. View the current agent definition in Agents."}</pre></details></article>)}</div>,
+          },
           {
             id: "instructions",
             label: "Instructions",
@@ -275,13 +286,13 @@ export function TaskDetail({
                       value={formatTimestamp(job.updated_at)}
                     />
                   </dl>
-                  <Button
+                  {githubState ? <Button asChild variant="outline"><a href={job.task?.source_url} target="_blank" rel="noreferrer">Open issue</a></Button> : <Button
                     variant="outline"
                     disabled={!terminal || deleting}
                     onClick={() => onDelete(job)}
                   >
                     {deleting ? "Deleting…" : "Delete task"}
-                  </Button>
+                  </Button>}
                 </section>
               </div>
             ),
@@ -355,7 +366,7 @@ function TaskActions({ job, result, onAction }) {
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const latest = job.runs.at(-1);
-  const prURL = (result || latest)?.summary?.match(
+  const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(
     /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/,
   )?.[0];
   const action = async (name) => {
@@ -365,12 +376,13 @@ function TaskActions({ job, result, onAction }) {
         job,
         name,
         stopped,
-        name === "request_changes" ? feedback : "",
+        ["request_changes", "retry"].includes(name) ? feedback : "",
       );
     } finally {
       setBusy(false);
     }
   };
+  const humanDecision = job.state === "blocked" && job.workflow?.factory?.verdict === "human_decision_needed";
   const retry = ["blocked", "failed", "interrupted", "cancelled"].includes(
     job.state,
   );
@@ -383,16 +395,16 @@ function TaskActions({ job, result, onAction }) {
           </a>
         </Button>
       )}
-      {job.state === "awaiting_approval" && (
+      {(["awaiting_approval", "awaiting_merge"].includes(job.state) || humanDecision) && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-2">
-            <Button
+            {!humanDecision && <Button
               disabled={busy || requesting}
-              onClick={() => action("approve")}
+              onClick={() => action(job.state === "awaiting_merge" ? "complete_merge" : "approve")}
             >
-              Approve and start {friendlyName(latest?.command).toLowerCase()}
-            </Button>
-            {latest?.reviewed_run_id && (
+              {job.state === "awaiting_merge" ? "Check merge status" : `Approve and start ${friendlyName(latest?.command).toLowerCase()}`}
+            </Button>}
+            {(latest?.reviewed_run_id || job.state === "awaiting_merge" || humanDecision) && (
               <Button
                 variant="outline"
                 disabled={busy}
@@ -436,6 +448,9 @@ function TaskActions({ job, result, onAction }) {
           )}
         </div>
       )}
+      {job.state === "awaiting_merge" && <p className="text-sm text-muted-foreground">Independent review is complete. Inspect the pull request and CI checks on GitHub, then merge when ready. Machinist verifies the merge before completing this task.</p>}
+      {humanDecision && <p className="text-sm text-muted-foreground">The reviewer needs your judgment. Request changes to send your decision to implementation, or retry review after resolving the question.</p>}
+      {retry && !requesting && <label className="block"><span className="field-label">Reply or recovery context · optional</span><textarea className="field-control min-h-24" value={feedback} onChange={event => setFeedback(event.target.value)} maxLength={4000} placeholder="Answer the agent’s question or explain what changed." /></label>}
       {job.state === "blocked" && (
         <p className="text-sm text-muted-foreground">
           Update the issue or resolve the blocker, then retry this step.
@@ -452,7 +467,7 @@ function TaskActions({ job, result, onAction }) {
           inspect existing work before continuing.
         </label>
       )}
-      {["queued", "running", "awaiting_approval", "blocked", "interrupted"].includes(
+      {["queued", "running", "awaiting_approval", "awaiting_merge", "blocked", "interrupted"].includes(
         job.state,
       ) && (
         <Button
@@ -490,6 +505,8 @@ function resultTitle(job, result) {
       return `${command} in progress`;
     case "queued":
       return `${command} queued`;
+    case "awaiting_merge":
+      return "Pull request ready for your review";
     case "succeeded":
       return "Task complete";
     default:

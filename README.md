@@ -45,7 +45,7 @@ mkdir -p ./bin && go build -o ./bin/machinist ./cmd/machinist
 ./bin/machinist init
 ```
 
-`init` writes `~/.machinist/config.toml` with two commands, `task-to-pr` and `audit`.
+`init` installs the four factory specialists plus direct `task-to-pr` and `audit` commands in `~/.machinist/config.toml`.
 Each is a prompt, an executor, and a timeout:
 
 ```toml
@@ -63,6 +63,12 @@ Run it directly:
 ```
 
 ## How execution works
+
+For the four-specialist pipeline and its Warp-style Inbox, Runs, Agents, and
+Automations UI, start with [the local factory guide](docs/local-factory/README.md).
+Triage can skip Spec, specifications wait for approval, and independent review
+findings return to the same implementation branch and pull request. Agents run
+through your Codex or Claude Code executors on a local host or remote VM.
 
 For a direct run, Machinist maps the configured command name to a fixed executable and uses the path supplied with `--repo` as the working directory. Managed submissions instead resolve an approved repository name from the worker configuration. In both cases, Machinist renders the prompt, sends it on standard input, streams stdout and stderr, and applies one overall timeout and cancellation. Exit code 0 succeeds; every non-zero exit code fails.
 

@@ -245,6 +245,15 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if serverConfig.State == "github" {
+				server, err := controlplane.NewGitHubFactoryServer(machinistConfig.Path(), token, serverConfig.ConcurrentJobLimit())
+				if err != nil {
+					return err
+				}
+				return server.Serve(command.Context(), serverConfig.Listen, func(address net.Addr) {
+					fmt.Fprintf(options.stderr, "machinist: GitHub factory listening on http://%s\n", address)
+				})
+			}
 			store, err := controlplane.OpenStore(serverConfig.Database)
 			if err != nil {
 				return err
