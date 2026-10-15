@@ -130,6 +130,10 @@ func (s *GitHubFactoryServer) Serve(ctx context.Context, listen string, onListen
 	if onListening != nil {
 		onListening(listener.Addr())
 	}
+	scheduleCtx, stopSchedules := context.WithCancel(ctx)
+	schedulesDone := make(chan struct{})
+	go func() { defer close(schedulesDone); s.serveAutomations(scheduleCtx) }()
+	defer func() { stopSchedules(); <-schedulesDone }()
 	server := &http.Server{Handler: s.handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
@@ -164,6 +168,11 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
 	mux.HandleFunc("PUT /api/v1/factory/agents/{name}", s.auth.authorizeSubmission(s.savePrompt))
+	mux.HandleFunc("GET /api/v1/automations", s.listAutomations)
+	mux.HandleFunc("POST /api/v1/automations", s.auth.authorizeSubmission(s.saveAutomation))
+	mux.HandleFunc("PUT /api/v1/automations/{id}", s.auth.authorizeSubmission(s.saveAutomation))
+	mux.HandleFunc("DELETE /api/v1/automations/{id}", s.auth.authorizeSubmission(s.deleteAutomation))
+	mux.HandleFunc("POST /api/v1/automations/{id}/run", s.auth.authorizeSubmission(s.runAutomation))
 	mux.HandleFunc("POST /api/v1/jobs", s.auth.authorizeSubmission(s.submit))
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.auth.authorizeSubmission(s.action))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.auth.authorizeWorker(s.poll))
@@ -348,7 +357,12 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 			onboardingState = data
 		}
 	}
-	writeJSON(w, 200, map[string]any{"onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
+	automations, err := s.local.automations(r.Context())
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"automations": automations, "onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
 }
 func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, catalogResponse{Workflows: []string{"factory"}, Commands: []string{}, Repositories: s.repositoryNames()})
@@ -755,6 +769,12 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, 400, errors.New("unknown task action"))
 		return
+	}
+	if action == "retry" || action == "approve" || action == "request_changes" {
+		if err := s.guardAutomationRetry(r.Context(), task, input.Stopped); err != nil {
+			writeError(w, 409, err)
+			return
+		}
 	}
 	if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: action, RunID: input.RunID, Role: task.state.Role, Feedback: input.Feedback, Stopped: input.Stopped}); err != nil {
 		writeError(w, 409, err)

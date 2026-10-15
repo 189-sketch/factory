@@ -44,6 +44,7 @@ func openFactoryLocalStore(path string) (*factoryLocalStore, error) {
  CREATE TABLE IF NOT EXISTS factory_receipts (run TEXT PRIMARY KEY, instance TEXT NOT NULL, token TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS job_requests (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, task TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS store_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS factory_automations (id TEXT PRIMARY KEY, body TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS factory_prompts (repository TEXT NOT NULL, role TEXT NOT NULL, prompt TEXT NOT NULL, hash TEXT NOT NULL, PRIMARY KEY(repository,role));`)
 	if err != nil {
 		db.Close()
@@ -76,15 +77,22 @@ func (s *factoryLocalStore) create(ctx context.Context, task localFactoryTask) e
 	return s.createRequest(ctx, task, "", "", "import")
 }
 func (s *factoryLocalStore) createRequest(ctx context.Context, task localFactoryTask, requestID, fingerprint, recipe string) error {
-	raw, err := json.Marshal(task.issue)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err = createFactoryRequest(ctx, tx, task, requestID, fingerprint, recipe); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func createFactoryRequest(ctx context.Context, tx *sql.Tx, task localFactoryTask, requestID, fingerprint, recipe string) error {
+	raw, err := json.Marshal(task.issue)
+	if err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO factory_tasks(url,issue,repository,alias) VALUES(?,?,?,?) ON CONFLICT(url) DO NOTHING`, task.issue.HTMLURL, string(raw), task.repository, task.alias)
 	if err != nil {
 		return err
@@ -104,7 +112,7 @@ func (s *factoryLocalStore) createRequest(ctx context.Context, task localFactory
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 func (s *factoryLocalStore) comments(ctx context.Context, url string) ([]GitHubComment, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,body,created FROM factory_events WHERE task=? ORDER BY id`, url)

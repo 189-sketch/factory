@@ -106,8 +106,9 @@ Old GitHub journal comments are not deleted or imported automatically. They rema
 historical. Re-adopt an issue explicitly to begin a new local task. This avoids
 silently resuming work while migrating away from comment-based persistence.
 
-Automatic CI/review follow-ups, merge polling, webhook relays, live streaming, and
-an automation editor remain outside this slice.
+Saved [automations](automations.md) run a single agent on demand or on a schedule,
+from the repository root. Automatic CI/review follow-ups, merge polling, webhook
+relays and live log streaming remain outside this slice.
 
 ### Issue labels
 

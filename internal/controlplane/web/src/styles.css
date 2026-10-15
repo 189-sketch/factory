@@ -309,3 +309,32 @@ a { text-underline-offset: 3px; }
 .markdown-prompt code {font-family:var(--font-mono);font-size:.9em;}
 .markdown-prompt a {color:var(--info);text-decoration:underline;}
 @media(max-width:640px){.composer-options{grid-template-columns:1fr;}}
+
+/* Saved jobs share the compact Runs surface and existing control styles. */
+.automation-list { border-block:1px solid var(--border); }
+.automation-row { display:grid;grid-template-columns:minmax(0,1fr) minmax(10rem,.6fr) auto;gap:1.25rem;align-items:center;padding:1rem 0;border-bottom:1px solid var(--border); }
+.automation-row:last-child { border-bottom:0; }
+.automation-info h2,.automation-empty h2,.automation-editor h2 {font-size:14px;font-weight:600;}
+.automation-info p,.automation-result {font-size:12px;color:var(--muted-foreground);line-height:1.7;overflow-wrap:anywhere;}
+.automation-info p {margin-top:.15rem;}
+.automation-schedule {display:flex;align-items:center;gap:.4rem;}
+.automation-result {display:flex;align-items:flex-start;gap:.3rem;flex-direction:column;}
+.automation-result a,.automation-notice a,.automation-empty a {color:var(--primary);text-decoration:underline;}
+.automation-actions {display:flex;align-items:center;gap:.35rem;}
+.automation-footnote {max-width:76ch;font-size:12px;line-height:1.7;color:var(--muted-foreground);margin-top:1.25rem;}
+.automation-empty {padding:3rem 0;max-width:52ch;}
+.automation-empty p {font-size:14px;line-height:1.7;color:var(--muted-foreground);margin-top:.5rem;}
+.automation-editor {max-width:56rem;border:1px solid var(--border);border-radius:8px;margin-bottom:1.5rem;}
+.automation-editor header {display:flex;align-items:center;justify-content:space-between;padding:.5rem 1rem;border-bottom:1px solid var(--border);}
+.automation-editor form {display:grid;gap:1rem;padding:1rem;}
+.automation-editor label {display:grid;gap:.4rem;font-size:12px;font-weight:500;}
+.automation-editor input,.automation-editor select,.automation-editor textarea {border:1px solid var(--border);background:var(--background);color:var(--foreground);border-radius:6px;padding:.6rem .75rem;width:100%;min-width:0;font-size:13px;font-weight:400;}
+.automation-editor textarea {resize:vertical;line-height:1.65;}
+.automation-editor input::placeholder,.automation-editor textarea::placeholder {color:var(--muted-foreground);}
+.automation-fields {display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+.automation-editor footer {display:flex;align-items:center;flex-wrap:wrap;gap:.75rem;justify-content:space-between;border-top:1px solid var(--border);padding-top:1rem;}
+.automation-delete {display:flex;gap:.4rem;align-items:center;flex-wrap:wrap;font-size:12px;}
+.automation-save {display:flex;gap:.5rem;margin-left:auto;}
+.automation-error {color:var(--danger);font-size:13px;margin-bottom:1rem;}
+.automation-notice {font-size:13px;margin-bottom:1rem;}
+@media(max-width:767px){.app-sidebar nav{grid-template-columns:repeat(5,minmax(0,1fr));}.app-sidebar nav .nav-item[href="#/agents"],.app-sidebar nav .nav-item[href="#/runners"]{display:none;}.automation-row{grid-template-columns:minmax(0,1fr);gap:.75rem;}.automation-result{flex-direction:row;flex-wrap:wrap;gap:.5rem;}.automation-actions{flex-wrap:wrap;}.automation-fields{grid-template-columns:minmax(0,1fr);}}
