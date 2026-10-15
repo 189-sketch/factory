@@ -8,14 +8,16 @@ import (
 )
 
 type FactoryContext struct {
-	Recipe   string `json:"recipe,omitempty"`
-	SpecURL  string `json:"spec_url,omitempty"`
-	Context  string `json:"context,omitempty"`
-	IssueURL string `json:"issue_url,omitempty"`
-	Role     string `json:"role"`
-	PRURL    string `json:"pr_url,omitempty"`
-	HeadSHA  string `json:"head_sha,omitempty"`
-	Branch   string `json:"branch,omitempty"`
+	CommitOnly bool   `json:"commit_only,omitempty"`
+	SpecPath   string `json:"spec_path,omitempty"`
+	Recipe     string `json:"recipe,omitempty"`
+	SpecURL    string `json:"spec_url,omitempty"`
+	Context    string `json:"context,omitempty"`
+	IssueURL   string `json:"issue_url,omitempty"`
+	Role       string `json:"role"`
+	PRURL      string `json:"pr_url,omitempty"`
+	HeadSHA    string `json:"head_sha,omitempty"`
+	Branch     string `json:"branch,omitempty"`
 }
 
 type Finding struct {

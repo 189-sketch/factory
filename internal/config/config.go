@@ -33,6 +33,7 @@ const (
 )
 
 type Worker struct {
+	Kubernetes    *Kubernetes           `toml:"kubernetes"`
 	Name          string                `toml:"name"`
 	DataDirectory string                `toml:"data_directory"`
 	ControlPlane  ControlPlane          `toml:"control_plane"`
@@ -61,11 +62,12 @@ type Repository struct {
 }
 
 type Server struct {
-	State             string `toml:"state"`
-	Listen            string `toml:"listen"`
-	Database          string `toml:"database"`
-	WorkerTokenFile   string `toml:"worker_token_file"`
-	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
+	Kubernetes        *Kubernetes `toml:"kubernetes"`
+	State             string      `toml:"state"`
+	Listen            string      `toml:"listen"`
+	Database          string      `toml:"database"`
+	WorkerTokenFile   string      `toml:"worker_token_file"`
+	MaxConcurrentJobs *int        `toml:"max_concurrent_jobs"`
 	configDir         string
 }
 

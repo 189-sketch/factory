@@ -3,6 +3,7 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
+	Runtime           string              `json:"runtime,omitempty"`
 	SingleAgent       bool                `json:"single_agent,omitempty"`
 	HealthChecks      bool                `json:"health_checks,omitempty"`
 	Factory           bool                `json:"factory,omitempty"`

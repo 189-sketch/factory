@@ -104,7 +104,38 @@ new local task. There is no automatic migration of old comment journals.
 A publication hold survives retries and prompt edits. Held jobs are never dispatched, and no status or label content is written to GitHub for them. A dedicated operator release action must name the current hold version. Running work must first be cancelled and stopped before changing publication access; already issued GitHub writes cannot be undone.
 
 One foreman owns a local factory database. Multiple trusted workers can connect.
-The UI uses a compact runs table and grouped sidebar. Kubernetes, PostgreSQL, a conversational Foreman, versioned custom roles, and a credential-free publisher remain planned. The current trusted local/VM compatibility worker still receives per-run GitHub credentials.
+The UI uses a compact runs table and grouped sidebar. Inbox clearing is a durable
+notification preference, not task deletion; later workflow activity resurfaces it.
+Role prompts and embedded execution contracts use Markdown. PostgreSQL, a
+conversational Foreman and versioned custom roles remain planned. The current
+trusted local/VM compatibility worker still receives per-run GitHub credentials.
+
+## Kubernetes execution
+
+An optional Kubernetes connector runs beside the existing local control plane.
+It uses an explicit kubectl context and a fixed, digest-pinned gVisor Job per
+attempt. It sends Git objects and execution context, never host credentials or a
+worker bearer. The agent receives a dedicated native Codex account cache and no
+GitHub or cluster token. Triage/Review source is mounted read-only. An enforced
+network boundary permits only cluster DNS and an allowlisted HTTPS CONNECT proxy;
+credential-free preparation probes this before the agent starts.
+
+A cluster lock serializes native auth-cache refresh. Completion retains the
+refreshed Secret with a resource-version check. Cancellation requests native
+shutdown, attempts cache retention, and deletes the Job in the foreground. Unlock
+requires Pod absence. Uncertain execution/cache persistence keeps the lock and
+requires operator recovery; jobs never retry themselves or fall back to local/API
+execution. A restarted local control plane resumes its connector, not an old
+attempt. Existing interrupted-attempt confirmation still applies.
+
+For this target, the trusted connector validates bounded candidate bundles in a
+bare repository and publishes the assigned fast-forward branch and PR. It never
+runs candidate source in that publisher. Publication checks the active lease and
+reconciles the assigned remote branch after a lost response. This retains the
+existing single-owner local lease model; durable distributed leases, a separate
+publication gateway and a cloud control plane remain future work. The database
+and GitHub App connection do not move into agent Pods. See the
+[Kubernetes runner guide](docs/local-factory/kubernetes.md).
 
 Cross-machine foreman replication, hosted token relays, push webhooks, automatic
 CI repair, merge polling, and live output streaming are not included.

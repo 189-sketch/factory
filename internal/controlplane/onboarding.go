@@ -50,6 +50,7 @@ type LocalWorker interface {
 }
 type LocalWorkerFactory func(config.Worker) (LocalWorker, error)
 type setupHealth struct {
+	runtime  string
 	spec     protocol.RunSpec
 	instance string
 	result   setupCheck
@@ -157,7 +158,11 @@ func (o *onboarding) status(ctx context.Context) (map[string]any, error) {
 		worker["tunnel"] = "ssh -N -L 17341:127.0.0.1:" + u + " " + target
 	}
 	ready := github.Connected && state.Selection.Repository != "" && state.Selection.Agent != "" && state.Check.State == "passed"
-	return map[string]any{"required": !state.Finished || !ready, "github": github, "repositories": repos, "selection": state.Selection, "agents": agents, "worker": worker, "ready": ready, "check": state.Check}, nil
+	kubernetes := false
+	if definition, err := config.LoadConfig(o.server.definitionPath); err == nil {
+		kubernetes = definition.Server.Kubernetes != nil
+	}
+	return map[string]any{"kubernetes": kubernetes, "required": !state.Finished || !ready, "github": github, "repositories": repos, "selection": state.Selection, "agents": agents, "worker": worker, "ready": ready, "check": state.Check}, nil
 }
 func urlForLocal(base string) (string, error) {
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(base, "http://"))
@@ -266,7 +271,7 @@ func (s *GitHubFactoryServer) onboardingAction(w http.ResponseWriter, r *http.Re
 			err = errors.New("connect GitHub and pass the connection check first")
 			break
 		}
-		if state.Selection.Host == "local" {
+		if state.Selection.Host == "local" || state.Selection.Host == "kubernetes" {
 			err = o.startWorker()
 			if err != nil {
 				break
@@ -423,8 +428,23 @@ func (o *onboarding) selectAgent(agent, host string) error {
 	if agent != "codex" && agent != "claude" {
 		return errors.New("select Codex or Claude Code")
 	}
-	if host != "local" && host != "remote" {
-		return errors.New("select this computer or remote VM")
+	if host != "local" && host != "remote" && host != "kubernetes" {
+		return errors.New("select this computer, remote VM or Kubernetes")
+	}
+	if host == "kubernetes" {
+		definition, err := config.LoadConfig(o.server.definitionPath)
+		if err != nil {
+			return err
+		}
+		if definition.Server.Kubernetes == nil {
+			return errors.New("configure server.kubernetes before selecting the cluster runner")
+		}
+		if err = definition.Server.Kubernetes.Validate(); err != nil {
+			return err
+		}
+		if agent != "codex" {
+			return errors.New("the Kubernetes runner currently uses Codex subscription authentication")
+		}
 	}
 	if host == "local" {
 		if _, err := exec.LookPath(agent); err != nil {
@@ -460,11 +480,23 @@ func (o *onboarding) workerConfig(selection setupSelection) (config.Worker, erro
 	if err := os.WriteFile(tokenPath, []byte(o.server.auth.workerToken), 0600); err != nil {
 		return config.Worker{}, err
 	}
-	return config.Worker{Name: "machinist-local", DataDirectory: filepath.Join(o.dir, "worker"), ControlPlane: config.ControlPlane{URL: base, TokenFile: tokenPath}, Executors: setupExecutors(selection.Agent), Repositories: map[string]config.Repository{selection.Repository: {Path: selection.Path}}}, nil
+	cfg := config.Worker{Name: "machinist-local", DataDirectory: filepath.Join(o.dir, "worker"), ControlPlane: config.ControlPlane{URL: base, TokenFile: tokenPath}, Executors: setupExecutors(selection.Agent), Repositories: map[string]config.Repository{selection.Repository: {Path: selection.Path}}}
+	if selection.Host == "kubernetes" {
+		definition, err := config.LoadConfig(o.server.definitionPath)
+		if err != nil {
+			return cfg, err
+		}
+		if definition.Server.Kubernetes == nil {
+			return cfg, errors.New("Kubernetes runner configuration is missing")
+		}
+		cfg.Kubernetes = definition.Server.Kubernetes
+		cfg.Name = "machinist-kubernetes"
+	}
+	return cfg, nil
 }
 func (o *onboarding) startWorker() error {
 	state := o.snapshot()
-	if state.Selection.Host != "local" {
+	if state.Selection.Host != "local" && state.Selection.Host != "kubernetes" {
 		return nil
 	}
 	o.mu.Lock()
@@ -534,6 +566,10 @@ func (o *onboarding) startWorker() error {
 func (o *onboarding) stopWorker() {
 	o.mu.Lock()
 	cancel, done := o.cancel, o.done
+	timeout := 5 * time.Second
+	if o.settings.Selection.Host == "kubernetes" {
+		timeout = 50 * time.Second
+	}
 	o.cancel = nil
 	o.done = nil
 	o.mu.Unlock()
@@ -541,12 +577,16 @@ func (o *onboarding) stopWorker() {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(timeout):
 		}
 	}
 }
 func (o *onboarding) checkAgent(ctx context.Context, selection setupSelection) setupCheck {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	timeout := 60 * time.Second
+	if selection.Host == "kubernetes" {
+		timeout = 15 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if selection.Host == "local" {
 		for _, program := range []string{"git", "gh", selection.Agent} {
@@ -565,7 +605,12 @@ func (o *onboarding) checkAgent(ctx context.Context, selection setupSelection) s
 	if _, err := o.connection.API(ctx, "GET", "/repos/"+selection.Repository, nil); err != nil {
 		return setupCheck{"failed", "GitHub repository access failed. Reconnect or update the App installation."}
 	}
-	if selection.Host == "remote" {
+	if selection.Host == "remote" || selection.Host == "kubernetes" {
+		if selection.Host == "kubernetes" {
+			if err := o.startWorker(); err != nil {
+				return setupCheck{"failed", err.Error()}
+			}
+		}
 		return o.checkRemote(ctx, selection)
 	}
 	token, err := o.connection.Token(ctx)
@@ -588,13 +633,31 @@ func (o *onboarding) checkAgent(ctx context.Context, selection setupSelection) s
 }
 func (o *onboarding) checkRemote(ctx context.Context, selection setupSelection) setupCheck {
 	connected := false
-	for _, w := range o.server.liveWorkers() {
-		if time.Since(w.LastSeenAt) < workerAvailabilityWindow && slices.Contains(w.Repositories, selection.Repository) && slices.Contains(w.Executors, selection.Agent) && slices.Contains(w.ReadOnlyExecutors, selection.Agent+"-review") {
-			connected = true
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, w := range o.server.liveWorkers() {
+			expected := "machinist-local"
+			if selection.Host == "kubernetes" {
+				expected = "machinist-kubernetes"
+			}
+			if selection.Host == "kubernetes" && w.Name != expected {
+				continue
+			}
+			if time.Since(w.LastSeenAt) < workerAvailabilityWindow && slices.Contains(w.Repositories, selection.Repository) && slices.Contains(w.Executors, selection.Agent) && slices.Contains(w.ReadOnlyExecutors, selection.Agent+"-review") {
+				connected = true
+			}
+		}
+		if connected || selection.Host != "kubernetes" || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return setupCheck{"failed", "Runner connection check was cancelled."}
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	if !connected {
-		return setupCheck{"failed", "No matching VM worker is connected. Start the SSH tunnel and worker, then retry."}
+		return setupCheck{"failed", "No matching runner is connected. Check the selected execution target and retry."}
 	}
 	id, err := randomID("run", 12)
 	if err != nil {
@@ -605,6 +668,9 @@ func (o *onboarding) checkRemote(ctx context.Context, selection setupSelection) 
 		return setupCheck{"failed", err.Error()}
 	}
 	h := &setupHealth{spec: protocol.RunSpec{ID: id, Command: "connection-check", Executor: selection.Agent + "-review", Repository: selection.Repository, HealthCheck: true, GitHubRepository: selection.Repository, RenderedPrompt: "Reply exactly PONG. Do not use tools, read files, or change anything.", TimeoutMillis: 45000, LeaseToken: token}, done: make(chan struct{})}
+	if selection.Host == "kubernetes" {
+		h.runtime = "kubernetes"
+	}
 	o.mu.Lock()
 	if o.health != nil {
 		o.mu.Unlock()
@@ -631,6 +697,9 @@ func (o *onboarding) claimHealth(p protocol.PollRequest) *protocol.RunSpec {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	h := o.health
+	if h != nil && h.runtime != "" && p.Runtime != h.runtime {
+		return nil
+	}
 	if h == nil || !p.HealthChecks || !slices.Contains(p.Repositories, h.spec.Repository) || !slices.Contains(p.ReadOnlyExecutors, h.spec.Executor) {
 		return nil
 	}
@@ -691,7 +760,7 @@ func (o *onboarding) listening(address net.Addr) {
 				o.settings.Check = setupCheck{"failed", "GitHub access needs to be reconnected."}
 				_ = o.saveLocked()
 				o.mu.Unlock()
-			} else if state.Selection.Host == "local" {
+			} else if state.Selection.Host == "local" || state.Selection.Host == "kubernetes" {
 				if err := o.startWorker(); err != nil {
 					o.mu.Lock()
 					o.settings.Finished = false

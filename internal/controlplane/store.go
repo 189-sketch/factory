@@ -46,6 +46,7 @@ type Store struct {
 type Job struct {
 	Recipe           string            `json:"recipe,omitempty"`
 	PublicationHold  string            `json:"publication_hold,omitempty"`
+	InboxCleared     bool              `json:"inbox_cleared,omitempty"`
 	HoldVersion      int64             `json:"hold_version,omitempty"`
 	StateBackend     string            `json:"state_backend,omitempty"`
 	Task             *protocol.Task    `json:"task,omitempty"`

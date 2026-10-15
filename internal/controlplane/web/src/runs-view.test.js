@@ -156,6 +156,8 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   window.location.hash = "#/agents";
   await eventually(() => assert.ok(document.querySelector('[aria-label="Factory agents"]')));
   await eventually(() => assert.equal(document.querySelector("textarea").value, "triage original prompt"));
+  assert.ok(document.querySelector(".markdown-prompt"), "prompt has a Markdown reading view");
+  button("Edit prompt").click();
   assert.equal(button("Save prompt").disabled, true);
   const textarea = document.querySelector("textarea");
   Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Updated triage prompt");

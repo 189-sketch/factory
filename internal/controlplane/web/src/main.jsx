@@ -26,8 +26,6 @@ function App() {
   const [selection, setSelection] = useState("");
   const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
- const [title,setTitle]=useState("");
- const [sourceURL,setSourceURL]=useState("");
   const [model, setModel] = useState("");
   const [statusError, setStatusError] = useState("");
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -103,7 +101,7 @@ function App() {
   const counts = useMemo(() => jobCounts(status.jobs), [status.jobs]);
   const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
 
-  const attentionJobs = status.jobs.filter(job => ["awaiting_approval", "awaiting_merge", "blocked", "interrupted", "failed", "timed_out"].includes(job.state));
+  const attentionJobs = status.jobs.filter(job => !job.inbox_cleared && ["awaiting_approval", "awaiting_merge", "blocked", "interrupted", "failed", "timed_out"].includes(job.state));
   const inboxJob = attentionJobs.find(job => job.id === inboxID) || attentionJobs[0];
   const searchedJobs = visibleJobs.filter(job => `${jobDisplayTitle(job)} ${job.repository} ${currentRun(job)?.command || ""}`.toLowerCase().includes(search.toLowerCase()));
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
@@ -114,7 +112,7 @@ function App() {
     setSubmitting(true);
     setSubmitError("");
     try {
-      const payload = { repository, model: model.trim(), ...(selection.startsWith("workflow:") ? { workflow: selection.slice(9), title: title || prompt.trim().split("\n")[0].slice(0,100), source_url: sourceURL || (/^https?:\/\/\S+$/.test(prompt.trim()) ? prompt.trim() : ""), spec: /^https?:\/\/\S+$/.test(prompt.trim()) ? "" : prompt } : { command: selection.slice(8), prompt }) };
+      const payload = { repository, model: model.trim(), ...(selection.startsWith("workflow:") ? { workflow: selection.slice(9), title: prompt.trim().split("\n")[0].replace(/^#+\s*/, "").slice(0,100), source_url: (/^https?:\/\/\S+$/.test(prompt.trim()) ? prompt.trim() : ""), spec: /^https?:\/\/\S+$/.test(prompt.trim()) ? "" : prompt } : { command: selection.slice(8), prompt }) };
       if (["local", "github"].includes(status.state_backend)) payload.recipe = recipe;
       const fingerprint = JSON.stringify(payload);
       if (!submission.current || submission.current.fingerprint !== fingerprint) submission.current = { fingerprint, id: crypto.randomUUID() };
@@ -129,7 +127,7 @@ function App() {
       }
       localStorage.setItem("machinist-workflow",selection); localStorage.setItem("machinist-repository",repository);
       const created = await response.json();
-      setPrompt(""); setTitle(""); setSourceURL(""); submission.current = null;
+      setPrompt(""); submission.current = null;
       setComposerOpen(false);
       await statusLoader.current.refresh();
       window.location.hash = `#/runs/${created.id}`;
@@ -200,15 +198,15 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        <div className="runtime-bar" role="status"><span><i className={connectedWorkers ? "runtime-online" : ""} />{statusError ? "Connection lost" : connectedWorkers ? "Connected" : "No runner online"}</span><span>{status.jobs.filter(job => job.state === "running").length} running</span><span>{status.jobs.filter(job => job.state === "queued").length} queued</span><span className="runtime-location">{status.onboarding?.selection?.host === "vm" ? "VM" : "Local"}</span></div>
-        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
+        <div className="runtime-bar" role="status"><span><i className={connectedWorkers ? "runtime-online" : ""} />{statusError ? "Connection lost" : connectedWorkers ? "Connected" : "No runner online"}</span><span>{status.jobs.filter(job => job.state === "running").length} running</span><span>{status.jobs.filter(job => job.state === "queued").length} queued</span><span className="runtime-location">{({remote:"VM",kubernetes:"Kubernetes",local:"Local"}[status.onboarding?.selection?.host] || "Local")}</span></div>
+        {view === "setup" ? <Onboarding csrfToken={status.csrf_token} onReady={() => statusLoader.current.refresh()} /> : view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : ["runners", "workers"].includes(view) ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "repositories" ? <RepositoriesPage status={status} /> : view === "settings" ? <div><div className="settings-connection-link"><h1>Settings</h1><a href="#/setup">GitHub connection and setup</a></div><div className="settings-links"><a href="#/runners">Runners and connections</a><a href="#/automations">Automations</a><a href="#/agents">Agent prompts</a></div></div> : ["triggers", "automations"].includes(view) ? <TriggersPage stateBackend={status.state_backend} triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : view === "agents" ? <AgentsPage csrfToken={status.csrf_token} repositories={status.repositories} stateBackend={status.state_backend} /> : view === "inbox" ? <div className="inbox-page"><PageHeading title="Inbox" description="Decisions and updates that need your attention." /><div className={cn("inbox-split", inboxID && "inbox-has-selection")}><section aria-label="Inbox tasks" className="inbox-list">{attentionJobs.length ? attentionJobs.map(job => <button key={job.id} onClick={() => setInboxID(job.id)} className={cn("inbox-row", inboxJob?.id === job.id && "inbox-row-selected")}><span className="block text-sm font-medium">{jobDisplayTitle(job)}</span><span className="mt-2 block text-xs text-muted-foreground">{job.repository} · {friendlyName(job.state)}</span><time className="mt-1 block text-xs text-muted-foreground">{relativeTime(job.updated_at || job.created_at)}</time></button>) : <div className="p-8 text-sm text-muted-foreground">You’re all caught up. Tasks that need a decision will appear here.</div>}</section>{inboxJob && <section className="inbox-detail" aria-label="Selected inbox task"><div className="inbox-actions"><button className="inbox-back" onClick={() => setInboxID("")}>Back to inbox</button><Button variant="outline" onClick={() => workflowAction(inboxJob, "clear_inbox")}>Clear from inbox</Button></div><TaskDetail key={`${inboxJob.id}:${inboxJob.runs.at(-1)?.id}:${inboxJob.state}`} csrfToken={status.csrf_token} job={inboxJob} loaded={statusLoaded} error={taskActionError} deleting={deletingJob === inboxJob.id} onDelete={deleteJob} onWorkflowAction={workflowAction} /></section>}</div>{statusError && <p role="alert">{statusError}</p>}</div> : <div className="runs-page">
           <PageHeading title="Runs" description="Agent jobs across your repositories.">
             <div className="flex items-center gap-2">
-              <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>
+              {!composerOpen && <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New run</Button>}
             </div>
           </PageHeading>
 
-          {composerOpen && <RunComposer recipe={recipe} setRecipe={setRecipe} stateBackend={status.state_backend} title={title} setTitle={setTitle} sourceURL={sourceURL} setSourceURL={setSourceURL} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
+          {composerOpen && <RunComposer recipe={recipe} setRecipe={setRecipe} stateBackend={status.state_backend} choices={choices} repositories={repositories} selection={selection} setSelection={setSelection} repository={repository} setRepository={setRepository} prompt={prompt} setPrompt={setPrompt} model={model} setModel={setModel} submitting={submitting} submit={submit} close={() => setComposerOpen(false)} />}
           {(statusError || submitError) && <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{submitError || statusError}</div>}
 
           <section>
@@ -235,24 +233,19 @@ function App() {
   );
 }
 
-function RunComposer({ recipe,setRecipe,stateBackend,title,setTitle,sourceURL,setSourceURL,choices,repositories,selection,setSelection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
-  const specHintID=React.useId();
-  const isTask=selection.startsWith("workflow:");
-  return <Card className="overflow-hidden border-primary/25">
-    <div className="flex items-center justify-between border-b border-border px-5 py-3"><h2 className="text-sm font-semibold">New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></div>
-    <form onSubmit={submit} className="space-y-5 p-5">
-      {["local", "github"].includes(stateBackend) && <label className="block"><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="factory">Standard pipeline · Triage → optional Spec → Build → Review</option><option value="single">Single agent · one task, no separate review</option></select></label>}
-      <label className="block space-y-2"><span className="text-sm font-medium">What do you want done?</span><textarea autoFocus aria-describedby={specHintID} className="field-control min-h-32 resize-y" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a change or paste an issue link…" required={!sourceURL.trim() || !isTask} /></label>
-      <p id={specHintID} className="text-xs leading-5 text-muted-foreground">{["github", "local"].includes(stateBackend) ? "Tasks run locally. Paste a GitHub issue link to connect existing work. Specs and pull requests live on GitHub; internal logs stay on your execution host." : "Describe the outcome and how to check it, or paste a GitHub issue. Agents run through your local or remote worker."}</p>
-      <label className="block"><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
-      {selection === "workflow:factory" && (!["local", "github"].includes(stateBackend) || recipe === "factory") && <div className="factory-route"><span className="text-sm font-medium">Automatic agent routing</span><p className="mt-2 text-sm text-muted-foreground">Triage → Spec when needed → Build → Review</p><p className="mt-1 text-xs text-muted-foreground">You approve specifications and decide when to merge. Review findings return to implementation.</p></div>}
-      <section><h3 className="text-sm font-medium">Details</h3><div className="mt-4 grid gap-4 sm:grid-cols-2">
-
-        {!["github", "local"].includes(stateBackend) && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}
-        {isTask && <><label><span className="field-label">Title</span><input className="field-control" value={title} onChange={e=>setTitle(e.target.value)} maxLength={512} placeholder="From your instructions" /></label><label><span className="field-label">Source link</span><input type="url" className="field-control" value={sourceURL} onChange={e=>setSourceURL(e.target.value)} placeholder="https://github.com/…" /></label></>}
-      </div></section>
+function RunComposer({ recipe,setRecipe,stateBackend,choices,repositories,selection,repository,setRepository,prompt,setPrompt,model,setModel,submitting,submit,close }) {
+  const hintID=React.useId();
+  const taskMode=["local", "github"].includes(stateBackend);
+  return <Card className="run-composer">
+    <header className="composer-heading"><h2>New run</h2><Button variant="ghost" size="icon" onClick={close} aria-label="Close new task form"><X className="size-4" /></Button></header>
+    <form onSubmit={submit} className="composer-form">
+      <label><span className="field-label">What do you want done?</span><textarea autoFocus aria-describedby={hintID} className="field-control composer-prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a task or paste a GitHub issue link…" required /></label>
+      <div className="composer-options"><label><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
+      {taskMode && <label><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="factory">Standard pipeline</option><option value="single">Single agent</option></select></label>}
+      {!taskMode && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}</div>
+      <p id={hintID} className="composer-hint">{recipe === "single" ? "One agent completes the task. No separate review." : "Triage → optional Spec → Build → Review. You decide when to merge."}</p>
       {!choices.length && <p role="alert" className="text-sm text-danger">Complete setup before starting a run.</p>}
-      <div className="flex justify-end"><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></div>
+      <footer><Button variant="ghost" type="button" onClick={close}>Cancel</Button><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start task"}<Play className="size-3.5" /></Button></footer>
     </form>
   </Card>;
 }

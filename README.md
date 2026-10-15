@@ -124,3 +124,10 @@ On upgrade, the app snapshots `factory.db` into `jobs.db` and archives the old
 store. Back up the full private runtime directory, including worker outputs.
 Imported blocked jobs are held private until explicitly reviewed and released.
 See [local job behavior](docs/local-factory/local-jobs.md).
+
+### Kubernetes runners
+
+Keep the control plane local or on a VM and run individual agent attempts in
+gVisor Kubernetes Jobs. The first target supports a dedicated Codex subscription
+login, serialized refresh, restricted egress and trusted GitHub PR publication.
+See [Kubernetes setup and recovery](docs/local-factory/kubernetes.md).

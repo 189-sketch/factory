@@ -105,6 +105,12 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 		if s.LastEventID == 0 || len(s.Job.Runs) == 0 {
 			return nil, fmt.Errorf("factory journal has no creation")
 		}
+		if event.Kind == "clear_inbox" {
+			s.Job.InboxCleared = true
+			s.LastEventID = comment.ID
+			continue
+		}
+		s.Job.InboxCleared = false
 		if event.Kind == "publication_hold" || event.Kind == "release_publication" {
 			if event.Kind == "publication_hold" {
 				if strings.TrimSpace(event.Feedback) == "" {

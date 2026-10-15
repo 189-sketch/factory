@@ -275,7 +275,9 @@ func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event
 	if err != nil {
 		return err
 	}
-	s.publishTaskStatus(ctx, task)
+	if event.Kind != "clear_inbox" {
+		s.publishTaskStatus(ctx, task)
+	}
 	return nil
 }
 
@@ -654,6 +656,14 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := r.PathValue("action")
+	if action == "clear_inbox" {
+		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: "clear_inbox"}); err != nil {
+			writeError(w, 409, err)
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "accepted"})
+		return
+	}
 	if action == "publication_hold" || action == "release_publication" {
 		if (task.state.Job.State == "cancelled" || task.state.Job.State == "interrupted") && !input.Stopped {
 			writeError(w, 409, errors.New("confirm the previous process stopped before changing publication access"))
@@ -763,6 +773,10 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	if s.setup != nil {
 		if check := s.setup.claimHealth(p); check != nil {
 			writeJSON(w, 200, protocol.PollResponse{Run: check})
+			return
+		}
+		if (s.setup.snapshot().Selection.Host == "kubernetes") != (p.Runtime == "kubernetes") {
+			writeJSON(w, 200, protocol.PollResponse{})
 			return
 		}
 		if !s.setup.snapshot().Finished {

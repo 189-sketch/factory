@@ -9,7 +9,7 @@ export function State({ value, compact = false }) {
     queued: "border-border bg-muted text-muted-foreground",
     blocked: "border-warning/25 bg-warning/10 text-warning",
     awaiting_approval: "border-warning/25 bg-warning/10 text-warning",
-    awaiting_merge: "border-warning/25 bg-warning/10 text-warning",
+    awaiting_merge: "border-info/25 bg-info/10 text-info",
     interrupted: "border-warning/25 bg-warning/10 text-warning",
     succeeded: "border-success/25 bg-success/10 text-success",
     failed: "border-danger/25 bg-danger/10 text-danger",
