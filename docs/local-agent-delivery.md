@@ -1,97 +1,77 @@
-# How Machinist delivers work with your local agent
+# Deliver work with your local agent
 
-> **Prerelease notice.** This guide describes the local factory preview from the
-> `codex/local-factory` branch in
-> [PR #514](https://github.com/owainlewis/machinist/pull/514). Until that PR is
-> merged, these instructions apply only to that preview. The features below,
-> including GitHub App sign-in, guided setup, the built-in Triage, Spec, Implement,
-> and Review flow, and **Check merge status**, are not on `main` yet. See
-> [Current setup on main](#current-setup-on-main) for how `main` works today.
-
-In the preview, Machinist runs your own coding agent, Codex or Claude Code, on a
-computer you control. It connects the repositories you choose through a GitHub
-App, keeps its internal working notes private, and delivers each task as one pull
-request that is reviewed independently and merged by a person.
-
-There is no Machinist cloud account and no hosted agent execution.
+Machinist runs your own coding agent on a computer you control and turns a task
+into one pull request. This guide explains where the agent runs, how it reaches
+GitHub, what stays private, and how the shipped `task-to-pr` command delivers
+work.
 
 ## Your agent runs on your host or VM
 
-During setup you pick the coding CLI and where it runs:
+Machinist runs on your machine. A command maps to a fixed executable on the
+worker, such as Codex or Claude Code. Machinist sends the rendered prompt on
+standard input and runs it in the repository's directory.
 
-- **This computer.** Machinist starts a local worker after setup completes.
-- **Remote VM.** You install Machinist, Git, GitHub CLI, and the coding CLI on the
-  VM and sign in there. The VM worker reaches Machinist through an SSH tunnel that
-  you run. Machinist does not provision the VM or enable SSH.
+- **This computer.** Build Machinist, run `machinist init`, and run a command
+  with `machinist run`. See the [quick start](../README.md#quick-start).
+- **A remote VM.** Run the control plane and worker as services on a VM you own.
+  See [VM deployment](vm-deployment.md).
 
-Sign in to the coding CLI on the host where it runs. The agent uses that host's
-login, and model selection defaults to the CLI's own default.
+Sign in to the coding CLI on the host where it runs. Do not copy credential
+files from another computer.
 
-Setup ends with a real health check: the agent must answer PING with PONG. This
-check creates no issue, commit, or PR.
+## GitHub access uses the host's own logins
 
-## Repositories connect through a GitHub App
+Machinist does not hold GitHub credentials for you. The agent uses the GitHub
+CLI and Git credentials on the host:
 
-You sign in with the Machinist Local GitHub App and install it only on the
-repositories you choose. You do not paste a token or client secret. Machinist
-checks the App's permissions and your write access before it uses a repository.
+- GitHub CLI authentication (`gh auth login`) for issues, pull requests,
+  comments, and checks.
+- A Git credential, such as a GitHub SSH key created on that host, for clone,
+  fetch, and push.
 
-The App asks for Contents, Issues, and Pull requests read/write, Checks and Commit
-statuses read, and the mandatory Metadata read. It does not ask for repository
-administration, organization administration, secrets, or workflow editing.
+Use a GitHub identity with access to only the repositories the worker needs.
+Managed tasks can use only the repositories named in the worker configuration,
+such as `[repositories.my_repo]` in `~/.machinist/worker.toml`.
 
-App tokens are stored locally in a private directory. Local agent processes get a
-refreshed token through their environment, limited to the selected repository.
-Tokens are never written to remote URLs, command arguments, or issue comments. A
-remote VM does not receive this token; it uses its own GitHub credentials.
+## Prompts and run history stay local
 
-## Internal prompts and handoffs stay private
+The control plane stores jobs, rendered prompts, runs, and workflow attempts in
+a local SQLite database. By default it is `~/.machinist/server/machinist.db`. Saved task
+files are kept on the same server's disk. See
+[configuration](configuration.md#artifact-storage-directory).
 
-Machinist keeps scheduling, prompt snapshots, attempts, approvals, feedback, and
-the handoffs between stages in a local database on the foreman host.
-
-These are never posted to GitHub:
-
-- Agent prompts
-- Execution events and logs
-- Internal handoffs between Triage, Spec, Implement, and Review
-
-A linked issue gets one short status comment, updated in place. You can start a
-task from a plain request with no issue at all, and Machinist will not create one.
+Machinist does not post prompts or run logs to GitHub. What reaches GitHub is
+what your command's agent pushes or posts.
 
 ## One pull request per task
 
-A task moves through Triage, an optional Spec with your approval, Implement, and
-independent Review. Plain questions and health checks can finish in Triage with no
-PR.
+`machinist init` writes `~/.machinist/config.toml` with a `task-to-pr` command.
+Its prompt, [`examples/prompts/task-to-pr.md`](../examples/prompts/task-to-pr.md),
+tells the agent to:
 
-Everything the task asks for is committed on the task's branch and delivered in a
-single pull request. That includes code, and also requested documents such as
-reports, guides, and HTML pages. A published spec uses the same branch and PR.
-Work is never delivered only as a local file.
+1. Read the issue or plain request and the repository instructions.
+2. Work on an isolated branch, or reuse the existing branch and pull request for
+   the task.
+3. Commit the change, push the branch, and create or update one pull request.
+   For an issue, the body includes `Fixes #<issue-number>`.
+
+A requested document is part of the change, so it is committed on the branch
+and delivered in the same pull request as code would be.
 
 ## Independent review and human merge
 
-After Implement finishes, a separate Review run inspects the exact pushed commit
-without changing files. If it finds problems, they go back to Implement on the
-same PR, for at most three repair rounds.
+Before pushing, `task-to-pr` asks a fresh read-only subagent to review the
+change and repeats until the change is approved. After pushing, it waits for CI
+and automated reviews, fixes valid findings, and stops after three repair rounds.
 
-Machinist never merges. When you are satisfied with the PR and its CI, merge it on
-GitHub yourself. **Check merge status** then confirms that the reviewed commit was
-the one merged before the task is marked complete.
+The prompt says never to merge. You review the pull request and merge it on
+GitHub yourself.
 
-## Current setup on main
+Machinist runs the steps you configure. It does not add review or merging to
+every task. To split work into separate stages or add an approval before a
+step, configure a [workflow](workflows.md). Merging stays with a person unless
+you add a merge policy, such as the
+[classify-then-merge example](../examples/workflows/risk_delivery/README.md).
 
-Until PR #514 is merged, `main` works differently:
-
-- You build Machinist and run `machinist init`, which writes
-  `~/.machinist/config.toml` with commands such as `task-to-pr`. You run them with
-  `machinist run` or through configured workflows. See the
-  [README](../README.md#quick-start) and [workflows](workflows.md).
-- There is no GitHub App. GitHub access uses the GitHub CLI and Git credentials
-  you set up on the host. See [VM deployment](vm-deployment.md).
-- There is no built-in Triage, Spec, Implement, and Review flow and no **Check
-  merge status** button. You define your own commands and workflow steps, such as
-  the [staged example](../examples/workflows/staged/config.toml). The example
-  `task-to-pr` prompt opens one pull request, stops after three repair rounds, and
-  never merges.
+A local factory with GitHub App sign-in is in preview in
+[PR #514](https://github.com/owainlewis/machinist/pull/514) and is not on `main`.
