@@ -42,6 +42,8 @@ func TestCommandDiagnosticsAreBoundedAndSafe(t *testing.T) {
 		{"unauthorized", "error: You must be logged in to the server (Unauthorized)", "authentication failed", false},
 		{"forbidden", "Error from server (Forbidden): private-user cannot get secrets", "RBAC", false},
 		{"namespace", `Error from server (NotFound): namespaces "private-runners" not found`, "namespace does not exist", false},
+		{"secret-named-executable", `Error from server (NotFound): secrets "executable" not found`, "does not exist", true},
+		{"secret-named-context", `Error from server (NotFound): secrets "context" not found`, "does not exist", true},
 		{"missing", "Error from server (NotFound): runtimeclasses.node.k8s.io gvisor not found", "does not exist", true},
 		{"network", "Unable to connect to the server: dial tcp: no such host", "connectivity", false},
 		{"plugin", "getting credentials: exec: executable gke-gcloud-auth-plugin not found", "plugin is missing", false},

@@ -52,13 +52,13 @@ func diagnoseCommand(output string) (string, bool, int) {
 	switch {
 	case strings.Contains(text, "reauthentication failed") || strings.Contains(text, "gcloud auth login"):
 		return "Google Cloud login has expired or is unavailable; run gcloud auth login on the runner host using the same CLOUDSDK_CONFIG as Machinist, then retry", false, 5
-	case strings.Contains(text, "executable") && (strings.Contains(text, "not found") || strings.Contains(text, "no such file")):
+	case strings.Contains(text, "getting credentials: exec: executable ") && (strings.Contains(text, "not found") || strings.Contains(text, "no such file")):
 		return "the kubeconfig credential plugin is missing; install the cloud provider's authentication plugin on the runner host", false, 4
 	case strings.Contains(text, "(unauthorized)") || strings.Contains(text, "you must be logged in") || strings.Contains(text, "getting credentials"):
 		return "cluster authentication failed; refresh the runner host's Kubernetes credentials, then retry", false, 3
 	case strings.Contains(text, "(forbidden)"):
 		return "the runner identity lacks Kubernetes permission; check its cluster RBAC and cloud IAM access", false, 3
-	case strings.Contains(text, "context") && (strings.Contains(text, "does not exist") || strings.Contains(text, "not found")) || strings.Contains(text, "error loading config file"):
+	case strings.Contains(text, "error: context ") && (strings.Contains(text, "does not exist") || strings.Contains(text, "not found")) || strings.Contains(text, "error loading config file"):
 		return "the configured Kubernetes context or kubeconfig is unavailable; check the runner configuration", false, 2
 	case strings.Contains(text, "unable to connect to the server") || strings.Contains(text, "i/o timeout") || strings.Contains(text, "no such host") || strings.Contains(text, "connection refused") || strings.Contains(text, "x509:") || strings.Contains(text, "tls handshake timeout"):
 		return "the Kubernetes API is unreachable or its certificate is invalid; check runner connectivity and cluster certificates", false, 2
