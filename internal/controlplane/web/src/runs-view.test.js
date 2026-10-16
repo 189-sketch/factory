@@ -54,7 +54,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
       ] };
     }
     if (url.endsWith("/content")) return { ok: true, text: async () => "<script>literal file text</script>" };
-    return { ok: true, json: async () => ({ state_backend: "local", jobs: [...jobs, detailJob, interruptedJob, otherInterruptedJob, humanDecisionJob, pendingReviewJob, githubJob, { ...otherInterruptedJob, id: "job_interrupted_second", task: { title: "Second interrupted task" }, runs: [{ id: "second-interrupted", command: "build", state: "interrupted" }] }], workers: [], commands: [], repositories: ["example/repo"], triggers: [], csrf_token: "test" }) };
+    return { ok: true, json: async () => ({ state_backend: "local", jobs: [...jobs, detailJob, interruptedJob, otherInterruptedJob, humanDecisionJob, pendingReviewJob, githubJob, { ...otherInterruptedJob, id: "job_interrupted_second", task: { title: "Second interrupted task" }, runs: [{ id: "second-interrupted", command: "build", state: "interrupted" }] }], workers: [], commands: [], workflows: ["factory"], repositories: ["example/repo"], triggers: [], csrf_token: "test" }) };
   };
 
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
@@ -184,6 +184,8 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   assert.equal([...document.querySelectorAll(".inbox-row")].some(el=>el.textContent.startsWith("Other interrupted task")),false);
   window.location.hash = "#/runs";
   await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "New run")));
+  // Polling adds a project without removing the selected repository or workflow.
+  // A retry can then exercise the same submission regardless of machine speed.
   const submissions = [];
   globalThis.fetch = async (url, options) => {
     if (url === "/api/v1/jobs") {
@@ -191,7 +193,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
       if (submissions.length === 1) throw new Error("Response lost after submission");
       return {ok:true,json:async()=>({id:"job_created"})};
     }
-    return {ok:true,json:async()=>({jobs,workers:[],commands:[],workflows:["factory"],repositories:["repository-alias"],repository_mappings:{"repository-alias":"owner/canonical"},state_backend:"local",csrf_token:"test"})};
+    return {ok:true,json:async()=>({jobs,workers:[],commands:[],workflows:["factory"],repositories:["example/repo","repository-alias"],repository_mappings:{"repository-alias":"owner/canonical"},state_backend:"local",csrf_token:"test"})};
   };
   button("New run").click();
   await eventually(()=>assert.ok(document.querySelector("form textarea")));
