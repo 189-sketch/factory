@@ -128,6 +128,48 @@ func TestUpdateReportsCurrentVersionWithoutDownloadingAssets(t *testing.T) {
 	}
 }
 
+func TestReplaceExecutablePreservesSymlinks(t *testing.T) {
+	for _, relative := range []bool{false, true} {
+		t.Run(fmt.Sprintf("relative=%t", relative), func(t *testing.T) {
+			directory := t.TempDir()
+			target := filepath.Join(directory, "machinist-real")
+			if err := os.WriteFile(target, []byte("old machinist"), 0o751); err != nil {
+				t.Fatal(err)
+			}
+			linkTarget := target
+			if relative {
+				linkTarget = filepath.Base(target)
+			}
+			link := filepath.Join(directory, "machinist")
+			if err := os.Symlink(linkTarget, link); err != nil {
+				t.Fatal(err)
+			}
+			if err := replaceExecutable(link, []byte("new machinist")); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{target, link} {
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != "new machinist" {
+					t.Errorf("binary at %s = %q, want new machinist", path, got)
+				}
+			}
+			if got, err := os.Readlink(link); err != nil || got != linkTarget {
+				t.Errorf("symlink = %q, %v; want %q", got, err, linkTarget)
+			}
+			info, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o751 {
+				t.Errorf("permissions = %o, want 751", got)
+			}
+		})
+	}
+}
+
 func testArchive(t *testing.T, binary []byte) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
