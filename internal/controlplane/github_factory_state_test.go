@@ -22,7 +22,9 @@ func newJournal(t *testing.T) *journalFixture {
 }
 func (j *journalFixture) add(e GitHubFactoryEvent) {
 	j.t.Helper()
-	e.Version = 1
+	if e.Version == 0 {
+		e.Version = 1
+	}
 	if j.state != nil {
 		e.Previous = j.state.LastEventID
 		if e.RunID == "" {
@@ -264,5 +266,41 @@ func TestCancelPreservesAcceptedReviewHistory(t *testing.T) {
 	j.add(GitHubFactoryEvent{Kind: "cancel"})
 	if j.state.Job.State != "cancelled" || j.state.Job.Runs[len(j.state.Job.Runs)-1].State != "succeeded" {
 		t.Fatal("cancellation overwrote completed review")
+	}
+}
+
+func TestV1TriageAnswersRetainHistoricalTransitions(t *testing.T) {
+	for _, action := range []string{"retry", "cancel", "request_changes"} {
+		t.Run(action, func(t *testing.T) {
+			j := &journalFixture{t: t, issue: GitHubIssue{HTMLURL: "local:legacy-answer", Title: "PING", Body: "PING"}}
+			j.add(GitHubFactoryEvent{Kind: "created", Role: "triage", Recipe: "factory"})
+			j.finish(protocol.FactoryResult{Resolved: true})
+			if j.state.Job.State != "blocked" {
+				t.Fatal("rewrote a historical blocked answer")
+			}
+			j.add(GitHubFactoryEvent{Kind: action, Feedback: "Continue"})
+			if action == "cancel" {
+				if j.state.Job.State != "cancelled" {
+					t.Fatal("lost cancellation")
+				}
+				return
+			}
+			role := j.state.Role
+			j.add(GitHubFactoryEvent{Kind: "started", Role: role, Prompt: "Exact prompt", PromptHash: "hash"})
+			if j.state.Job.State != "running" {
+				t.Fatal("lost subsequent attempt")
+			}
+			if action == "retry" {
+				j.add(GitHubFactoryEvent{Version: 2, Kind: "completed", Role: role, Result: &protocol.StepResult{Outcome: "complete", Summary: "PONG", Factory: &protocol.FactoryResult{Version: 1, Role: role, Report: "PONG", Resolved: true}}})
+				if j.state.Job.State != "succeeded" {
+					t.Fatal("retry did not use corrected answer routing")
+				}
+			}
+		})
+	}
+	j := newJournal(t)
+	j.finish(protocol.FactoryResult{Resolved: true, PRURL: "https://github.com/owner/repo/pull/1"})
+	if j.state.Job.State != "succeeded" {
+		t.Fatal("rewrote legacy implicit-factory answer semantics")
 	}
 }

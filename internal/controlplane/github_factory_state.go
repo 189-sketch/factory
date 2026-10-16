@@ -37,7 +37,7 @@ type GitHubFactoryEvent struct {
 
 type GitHubFactoryState struct {
 	CancelledFrom   string
-	FixedRecipe     bool
+	FixedRecipe     bool // Preserve the original routing rules when replaying v1 completions.
 	Job             Job
 	LastEventID     int64
 	Role            string
@@ -73,7 +73,8 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 		if err := dec.Decode(new(any)); err != io.EOF {
 			return nil, fmt.Errorf("journal comment %d contains trailing data", comment.ID)
 		}
-		if event.Version != 1 || event.Previous != s.LastEventID || comment.ID <= s.LastEventID {
+		supported := event.Version == 1 || (event.Version == 2 && (event.Kind == "completed" || event.Kind == "completion"))
+		if !supported || event.Previous != s.LastEventID || comment.ID <= s.LastEventID {
 			return nil, fmt.Errorf("journal comment %d has unsupported version or broken chain", comment.ID)
 		}
 		if event.Kind == "created" {
@@ -207,7 +208,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 				s.Job.State = result.Outcome
 				continue
 			}
-			if err = s.complete(issue.HTMLURL, result); err != nil {
+			if err = s.complete(issue.HTMLURL, result, event.Version); err != nil {
 				return nil, err
 			}
 		case "interrupted":
@@ -304,7 +305,7 @@ func (s *GitHubFactoryState) repair(url string) {
 	s.Job.Workflow.Factory.RepairRound++
 	s.queue(url, "implement", "queued")
 }
-func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) error {
+func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, version int) error {
 	f := result.Factory
 	if f == nil || f.Role != s.Role {
 		return fmt.Errorf("completion requires matching factory role")
@@ -313,10 +314,13 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult) e
 	switch s.Role {
 	case "triage":
 		s.SuggestedLabels = append([]string(nil), f.Labels...)
-		if s.Job.Recipe == "answer" && (!f.Resolved || f.NeedsSpec || f.PRURL != "" || f.SpecURL != "" || f.HeadSHA != "" || f.Branch != "") {
+		hasDelivery := f.PRURL != "" || f.SpecURL != "" || f.HeadSHA != "" || f.Branch != ""
+		if s.Job.Recipe == "answer" && (!f.Resolved || f.NeedsSpec || hasDelivery) {
 			s.block("Answer jobs cannot deliver files or commits. Start a delivery job instead.")
-		} else if s.FixedRecipe && s.Job.Recipe != "answer" && f.Resolved {
+		} else if version == 1 && s.FixedRecipe && s.Job.Recipe != "answer" && f.Resolved {
 			s.block("Delivery jobs require a pull request; use an Answer job for questions")
+		} else if version >= 2 && f.Resolved && hasDelivery {
+			s.block("Triage cannot finish an answer with delivery metadata; requested files and code changes must continue through Build")
 		} else if f.Resolved {
 			s.Job.State = "succeeded"
 		} else if f.NeedsSpec {
