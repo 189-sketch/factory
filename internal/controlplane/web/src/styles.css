@@ -248,7 +248,6 @@ a { text-underline-offset: 3px; }
  .run-title strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 }
 
-.brand-lockup { gap: 10px; }
 .stage-progress { position: relative; display: inline-flex; align-items: center; gap: 7px; padding: 6px 0; cursor: default; }
 .stage-dot { width: 8px; height: 8px; border: 1px solid var(--muted-foreground); border-radius: 50%; flex-shrink: 0; }
 .stage-dot-complete { background: var(--success); border-color: var(--success); }
@@ -265,7 +264,6 @@ a { text-underline-offset: 3px; }
 @media (max-width: 767px) { .run-mobile-progress { display: block; } .run-mobile-progress .stage-progress { padding-top: 8px; } }
 
 .brand-wordmark { font-family: var(--font-sans); font-size: 15px; font-weight: 600; letter-spacing: -.025em; }
-.machinist-mark { width: 24px; height: 24px; color: var(--foreground); }
 .nav-item { position: relative; display: flex; height: 35px; flex-shrink: 0; align-items: center; gap: 10px; border-radius: 4px; padding: 0 10px; color: var(--muted-foreground); font-size: 13px; line-height: 20px; transition: color .15s ease, background .15s ease; }
 .task-actions { display: grid; gap: 16px; }
 .action-hint { color: var(--muted-foreground); font-size: 13px; line-height: 1.65; }

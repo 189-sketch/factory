@@ -195,8 +195,7 @@ function App() {
   return (
     <div className="app-shell min-h-screen bg-background text-foreground md:flex">
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
-        <div className="brand-lockup flex h-10 items-center gap-3 px-1">
-          <MachinistMark />
+        <div className="flex h-10 items-center px-1">
           <span className="brand-wordmark">Machinist</span>
         </div>
         <nav className="primary-nav" aria-label="Primary">
@@ -290,10 +289,6 @@ function RunRow({ job }) {
 
 function EmptyRuns({ filtered, openComposer }) {
   return <div className="grid place-items-center px-6 py-16 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground"><GitBranch className="size-5" /></span><h3 className="mt-3 text-sm font-semibold">{filtered ? "No matching tasks" : "No tasks yet"}</h3><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{filtered ? "Try a different state filter." : "Describe the work or paste an issue link to get started."}</p>{!filtered && <Button variant="outline" size="sm" className="mt-4" onClick={openComposer}><Plus className="size-3.5" />New run</Button>}</div>;
-}
-
-function MachinistMark() {
-  return <svg className="machinist-mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="4" fill="currentColor" /><path d="M6 17V7l6 6 6-6v10" fill="none" stroke="var(--sidebar)" strokeWidth="1.7" strokeLinecap="square" strokeLinejoin="miter" /></svg>;
 }
 
 function selectionChoices(status) {
