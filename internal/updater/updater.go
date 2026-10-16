@@ -217,6 +217,13 @@ func extractBinary(archive []byte) ([]byte, error) {
 }
 
 func replaceExecutable(path string, binary []byte) error {
+	// os.Executable may return a symlink. Replace its target so other entry
+	// points use the update too, and preserve the installation's links.
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve current executable: %w", err)
+	}
+	path = resolved
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("inspect current executable: %w", err)
