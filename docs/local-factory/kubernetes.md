@@ -79,6 +79,15 @@ Both workflow modes still wait for human merge.
 
 ## Subscription credentials and failure recovery
 
+The runner host's Kubernetes credentials are separate from the Codex subscription
+Secret. If Google Cloud reports an expired login, run `gcloud auth login` on the
+host using the same `CLOUDSDK_CONFIG` as Machinist, then retry the failed run.
+Do not reinstall gVisor or reseed the Codex Secret for a cloud login failure.
+Permission errors require checking the host identity's RBAC and cloud IAM;
+missing-resource errors identify the policy, RuntimeClass, or Secret to restore.
+Command diagnostics use bounded stderr to select safe recovery advice. Raw stderr
+is never copied into the run error.
+
 A Kubernetes ConfigMap lock serializes the whole dedicated credential stream,
 including across connector processes. The native CLI refreshes its own cache.
 The connector reads that updated cache privately and updates the Secret using its

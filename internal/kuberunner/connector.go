@@ -37,9 +37,13 @@ func (c Connector) command(ctx context.Context, input io.Reader, limit int, args
 	cmd.Stdin = input
 	var out bytes.Buffer
 	cmd.Stdout = &limitedWriter{writer: &out, remaining: limit}
-	cmd.Stderr = io.Discard
+	var diagnostics commandDiagnostics
+	cmd.Stderr = &diagnostics
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("Kubernetes %s failed: %w", args[0], err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("Kubernetes command interrupted: %w", ctx.Err())
+		}
+		return nil, diagnostics.failure(err)
 	}
 	return out.Bytes(), nil
 }
@@ -73,6 +77,8 @@ func (c Connector) Login(ctx context.Context, in io.Reader, out, stderr io.Write
 	}
 	if _, err := c.get(ctx, "secret", c.Config.AuthSecret); err == nil {
 		return fmt.Errorf("Codex Secret already exists; stop its Jobs before deliberately reseeding it")
+	} else if !resourceMissing(err) {
+		return fmt.Errorf("could not verify the Codex cluster Secret: %w", err)
 	}
 	directory, err := os.MkdirTemp("", "machinist-codex-login-")
 	if err != nil {
@@ -282,15 +288,27 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 func (c Connector) ready(ctx context.Context) error {
 	for _, item := range [][2]string{{"runtimeclass", "gvisor"}, {"networkpolicy", "agent-isolation"}, {"networkpolicy", "proxy-isolation"}} {
 		if _, err := c.get(ctx, item[0], item[1]); err != nil {
-			return fmt.Errorf("Kubernetes sandbox is unavailable; install gVisor and the runner policies: %w", err)
+			if resourceMissing(err) {
+				if item[0] == "runtimeclass" {
+					return fmt.Errorf("the gvisor RuntimeClass is missing; configure gVisor on the cluster: %w", err)
+				}
+				return fmt.Errorf("runner policy %s is missing; run machinist kubernetes install: %w", item[1], err)
+			}
+			return fmt.Errorf("could not verify Kubernetes %s %s: %w", item[0], item[1], err)
 		}
 	}
 	if _, err := c.get(ctx, "secret", c.Config.AuthSecret); err != nil {
-		return fmt.Errorf("Codex cluster login is missing; run machinist kubernetes login")
+		if resourceMissing(err) {
+			return fmt.Errorf("Codex cluster login is missing; run machinist kubernetes login: %w", err)
+		}
+		return fmt.Errorf("could not verify the Codex cluster Secret: %w", err)
 	}
 	proxy, err := c.get(ctx, "deployment", "machinist-egress")
 	if err != nil {
-		return err
+		if resourceMissing(err) {
+			return fmt.Errorf("the sandbox egress proxy is missing; run machinist kubernetes install: %w", err)
+		}
+		return fmt.Errorf("could not verify the sandbox egress proxy: %w", err)
 	}
 	status, _ := proxy["status"].(map[string]any)
 	available, _ := status["availableReplicas"].(float64)
