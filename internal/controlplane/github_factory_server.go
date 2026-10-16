@@ -259,6 +259,11 @@ type factoryStatusWriter interface {
 
 func (s *GitHubFactoryServer) event(ctx context.Context, task *githubTask, event GitHubFactoryEvent) error {
 	event.Version = 1
+	// New completions permit Triage answers in the standard pipeline. Historical
+	// v1 completions retain their rules so later retries and cancellations replay.
+	if event.Kind == "completed" || event.Kind == "completion" {
+		event.Version = 2
+	}
 	event.Previous = task.state.LastEventID
 	comments, err := s.local.comments(ctx, task.issue.HTMLURL)
 	if err != nil {

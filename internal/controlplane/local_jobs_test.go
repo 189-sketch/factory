@@ -174,13 +174,67 @@ func TestAnswerFeedbackCannotSwitchIntoImplementation(t *testing.T) {
 	}
 }
 
-func TestExplicitFactoryCannotResolveWithoutDelivery(t *testing.T) {
-	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
-	id := submitRecipe(t, s, "factory", "delivery")
+func TestStandardPipelineCompletesHealthCheckInTriage(t *testing.T) {
+	client := newMemoryFactoryGitHub()
+	s := githubFactoryTestServer(t, client)
+	raw := factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"repository": "repo", "recipe": "factory", "title": "PING", "spec": "PING. Reply PONG."}, 201)
+	var created map[string]string
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatal(err)
+	}
 	run := factoryPoll(t, s)
-	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true})
-	if factoryJob(t, s, id).State != "blocked" {
-		t.Fatal("delivery job completed without PR")
+	if run == nil || run.Factory.Role != "triage" {
+		t.Fatal("health check skipped triage")
+	}
+	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: "PONG"})
+	for pass := 0; pass < 2; pass++ {
+		if pass == 1 {
+			s = restartFactoryTestServer(t, s, client)
+		}
+		job := factoryJob(t, s, created["id"])
+		if job.State != "succeeded" || len(job.Runs) != 1 || job.Runs[0].Command != "triage" || factoryPoll(t, s) != nil || client.creates != 0 {
+			t.Fatalf("health check did not finish without delivery: %+v", job)
+		}
+	}
+}
+
+func TestStandardPipelineStillRequiresPRForImplementation(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	id := submitRecipe(t, s, "factory", "code-change")
+	triage := factoryPoll(t, s)
+	factoryFinish(t, s, triage, protocol.FactoryResult{Report: "Confirmed code change; ready to build"})
+	build := factoryPoll(t, s)
+	if build == nil || build.Factory.Role != "implement" {
+		t.Fatal("triage did not route the change to Build")
+	}
+	factoryFinish(t, s, build, protocol.FactoryResult{Report: "Claimed completion without delivery"})
+	if factoryJob(t, s, id).State != "blocked" || factoryPoll(t, s) != nil {
+		t.Fatal("implementation completed without a PR")
+	}
+}
+
+func TestStandardPipelineCannotResolveWithDeliveryMetadata(t *testing.T) {
+	for _, field := range []string{"pr", "spec", "commit", "branch"} {
+		t.Run(field, func(t *testing.T) {
+			s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+			id := submitRecipe(t, s, "factory", "mixed-answer")
+			run := factoryPoll(t, s)
+			result := protocol.FactoryResult{Resolved: true, Report: "Answered"}
+			switch field {
+			case "pr":
+				result.PRURL = "https://github.com/owner/repo/pull/1"
+			case "spec":
+				result.SpecURL = "https://github.com/owner/repo/blob/main/docs/spec.md"
+			case "commit":
+				result.HeadSHA = strings.Repeat("a", 40)
+			case "branch":
+				result.Branch = "codex/task"
+			}
+			factoryFinish(t, s, run, result)
+			if factoryJob(t, s, id).State != "blocked" || factoryPoll(t, s) != nil {
+				t.Fatal("mixed answer and delivery completed")
+			}
+		})
 	}
 }
 
