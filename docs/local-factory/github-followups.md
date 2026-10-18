@@ -29,6 +29,20 @@ to assess, not permission to change workflow rules. Consumed signals are saved,
 so repeated polls and restarts do not repeat a repair. The normal limit of three
 repair rounds applies; exhausting it blocks the task for human attention.
 
+After a review repair, the operator should inspect the repaired change and resolve
+the GitHub conversation once the feedback is addressed. The follow-up watcher
+does not resolve review threads for you.
+
+### Example: recovering from a CI failure
+
+Suppose a standard job is PR ready and a test check finishes with a failure on
+the recorded PR head. Machinist picks up that failure and returns the same task
+to Build. Build investigates the failure, fixes its cause and runs the relevant
+checks; the repair then goes through independent Review. The repaired commit is
+published on the same branch and PR, which returns to PR ready. Inspect CI on the
+new head before merging. Passing checks alone do not complete the task: Machinist
+still waits for a confirmed merge with a matching recorded PR head.
+
 ## When the task completes
 
 Merge the PR on GitHub when it is ready. The follow-up watcher never merges PRs.
