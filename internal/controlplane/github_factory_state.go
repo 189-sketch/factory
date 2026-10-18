@@ -15,6 +15,7 @@ import (
 const GitHubFactoryMarker = "<!-- machinist:v1 -->\n"
 
 type GitHubFactoryEvent struct {
+	FollowupIDs    []string             `json:"followup_ids,omitempty"`
 	ExitCode       *int                 `json:"exit_code,omitempty"`
 	Error          string               `json:"error,omitempty"`
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
@@ -36,6 +37,7 @@ type GitHubFactoryEvent struct {
 }
 
 type GitHubFactoryState struct {
+	GitHubHandled   map[string]bool
 	CancelledFrom   string
 	FixedRecipe     bool // Preserve the original routing rules when replaying v1 completions.
 	Job             Job
@@ -57,7 +59,7 @@ func GitHubFactoryRunID(issueURL string, lastEventID int64, role string, repairR
 // Unrelated comments are ignored; malformed or forked trusted events fail closed.
 func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, repository string) (*GitHubFactoryState, error) {
 	sum := sha256.Sum256([]byte(issue.HTMLURL))
-	s := &GitHubFactoryState{Job: Job{ID: "github_" + hex.EncodeToString(sum[:12]), Task: &protocol.Task{Title: issue.Title, SourceURL: issue.HTMLURL, Spec: issue.Body}, Prompt: issue.Body, Repository: repository, GitHubIssueTitle: issue.Title, TriggerSubject: issue.HTMLURL, Command: "factory", State: "untracked", StateBackend: "github", CreatedAt: issue.CreatedAt, UpdatedAt: issue.UpdatedAt, Workflow: &WorkflowProgress{Name: "factory", Steps: []string{"triage", "spec", "implement", "review"}, Factory: &FactoryProgress{}}}, Reports: map[string]string{}}
+	s := &GitHubFactoryState{Job: Job{ID: "github_" + hex.EncodeToString(sum[:12]), Task: &protocol.Task{Title: issue.Title, SourceURL: issue.HTMLURL, Spec: issue.Body}, Prompt: issue.Body, Repository: repository, GitHubIssueTitle: issue.Title, TriggerSubject: issue.HTMLURL, Command: "factory", State: "untracked", StateBackend: "github", CreatedAt: issue.CreatedAt, UpdatedAt: issue.UpdatedAt, Workflow: &WorkflowProgress{Name: "factory", Steps: []string{"triage", "spec", "implement", "review"}, Factory: &FactoryProgress{}}}, Reports: map[string]string{}, GitHubHandled: map[string]bool{}}
 	ordered := append([]GitHubComment(nil), comments...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
 	for _, comment := range ordered {
@@ -263,6 +265,25 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 				run.State = "cancelled"
 			}
 			s.Job.State = "cancelled"
+		case "github_followup", "github_blocked":
+			if s.Job.State != "awaiting_merge" || s.Job.PublicationHold != "" || strings.TrimSpace(event.Feedback) == "" {
+				return nil, ErrWorkflowAction
+			}
+			s.Feedback = event.Feedback
+			if event.Kind == "github_blocked" {
+				s.block(event.Feedback)
+			} else {
+				if len(event.FollowupIDs) == 0 || len(event.FollowupIDs) > 10 {
+					return nil, fmt.Errorf("invalid GitHub follow-up signals")
+				}
+				for _, id := range event.FollowupIDs {
+					if id == "" || s.GitHubHandled[id] {
+						return nil, fmt.Errorf("duplicate GitHub follow-up")
+					}
+					s.GitHubHandled[id] = true
+				}
+				s.repair(issue.HTMLURL)
+			}
 		case "complete_merge":
 			if s.Job.State != "awaiting_merge" {
 				return nil, ErrWorkflowAction

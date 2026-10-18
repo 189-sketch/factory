@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { JSDOM } from "jsdom";
 import { createServer } from "vite";
 
-test("a retained repository prompt draft keeps its original version for conflict detection", async context => {
+test("a shared prompt draft keeps its original version for conflict detection", async context => {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/agents" });
   const globals = new Map();
   for (const name of ["window", "document", "navigator", "Event", "MouseEvent", "fetch", "IS_REACT_ACT_ENVIRONMENT"]) {
@@ -12,15 +12,15 @@ test("a retained repository prompt draft keeps its original version for conflict
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
   }
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  let firstHash = "original-a";
+  const firstHash = "original-a";
   let saved;
   globalThis.fetch = async (url, options) => {
     if (options?.method === "PUT") {
       saved = JSON.parse(options.body);
       return { ok: false, status: 409, json: async () => ({}) };
     }
-    const repository = new URL(url, dom.window.location).searchParams.get("repository");
-    return { ok: true, json: async () => ({ commands: [{ name: "triage", prompt: `# ${repository}`, hash: repository === "owner/a" ? firstHash : "original-b" }] }) };
+    assert.equal(url, "/api/v1/definitions");
+    return { ok: true, json: async () => ({ commands: [{ name: "triage", prompt: "# Triage", hash: firstHash }, { name: "spec", prompt: "# Spec", hash: "original-b" }] }) };
   };
   const server = await createServer({ server: { middlewareMode: true }, appType: "custom" });
   const { createRoot } = await import("react-dom/client");
@@ -47,21 +47,17 @@ test("a retained repository prompt draft keeps its original version for conflict
     Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(edit, "# My unsaved draft");
     edit.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
   });
-  const chooseRepository = async name => {
-    await act(async () => {
-      const select = document.querySelector("select");
-      select.value = name;
-      select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-    });
+  assert.equal(document.querySelector("select"), null, "shared agents have no repository selector");
+  const chooseRole = async name => {
+    const role = [...document.querySelectorAll(".agent-row")].find(element => element.textContent.startsWith(name));
+    await act(async () => role.click());
   };
-  await chooseRepository("owner/b");
-  firstHash = "changed-elsewhere-a";
-  await chooseRepository("owner/a");
-  // Reloading repository definitions must not rebase an older unsaved draft.
+  await chooseRole("Spec");
+  await chooseRole("Triage");
   await click("Edit prompt");
   assert.equal(document.querySelector("textarea").value, "# My unsaved draft");
   await click("Save prompt");
-  assert.equal(saved.repository, "owner/a");
+  assert.equal(Object.hasOwn(saved, "repository"), false);
   assert.equal(saved.prompt, "# My unsaved draft");
   assert.equal(saved.expected_hash, "original-a");
   assert.match(document.body.textContent, /This prompt changed elsewhere/);
@@ -73,13 +69,11 @@ test("a retained repository prompt draft keeps its original version for conflict
   });
   await click("Save prompt");
   assert.ok(document.querySelector("textarea").disabled, "cannot edit while the submitted version is being saved");
-  assert.ok(document.querySelector("select").disabled, "cannot reset the pending save by changing repository");
   for (const role of document.querySelectorAll(".agent-row")) {
     assert.ok(role.disabled, "cannot reset the pending save by changing role");
   }
   await act(async () => finishSave());
   assert.equal(document.querySelector("textarea").disabled, false);
-  assert.equal(document.querySelector("select").disabled, false);
   assert.equal(document.querySelector("textarea").value, "# My unsaved draft");
   globalThis.fetch = async () => ({ ok:true,json:async()=>({commands:[{name:"triage",prompt:"Legacy prompt"}]}) });
   await act(async()=>root.render(React.createElement(AgentsPage,{csrfToken:"test",repositories:["repo"],stateBackend:"sqlite"})));

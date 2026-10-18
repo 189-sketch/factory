@@ -171,7 +171,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Triage")).click();
   await eventually(()=>assert.equal(document.querySelector("textarea").value,"Updated triage prompt"));
   button("Save prompt").click();
-  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash", repository: "example/repo" }));
+  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
   await eventually(() => assert.match(document.body.textContent, /Saved. Future stage attempts use this Markdown version/));
 
   window.location.hash = "#/runs";

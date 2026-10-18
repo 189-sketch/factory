@@ -48,7 +48,7 @@ func TestFactoryRunRetainsPromptAndExecutionMetrics(t *testing.T) {
 func TestOversizedRenderedPromptBecomesBlocked(t *testing.T) {
 	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
 	// JSON's HTML escaping can expand an otherwise valid prompt past the event limit.
-	if _, err := s.local.savePrompt(t.Context(), "owner/repo", "triage", strings.Repeat("<", 180<<10), "", ""); err != nil {
+	if _, err := s.local.savePrompt(t.Context(), "", "triage", strings.Repeat("<", 180<<10), "", ""); err != nil {
 		t.Fatal(err)
 	}
 	factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"repository": "repo", "spec": "Check"}, 201)

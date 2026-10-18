@@ -21,17 +21,17 @@ function Loading({ description = "Loading the latest configuration." }) { return
 function Empty({ value, description = "Configuration added on the control plane will appear here." }) { return <Card><QuietState title={value} description={description} /></Card>; }
 function Failure({ value }) { return <div role="alert" className="rounded-md border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">{value}</div>; }
 
-function useDefinitions(repository = "") {
+function useDefinitions() {
   const [result, setResult] = useState({ loading: true, error: "", value: { commands: [] } });
   useEffect(() => {
     const controller = new AbortController();
     setResult(current => ({ ...current, loading: true, error: "" }));
-    fetch(`/api/v1/definitions${repository ? `?repository=${encodeURIComponent(repository)}` : ""}`, { headers: { Accept: "application/json" }, signal: controller.signal }).then(async (response) => {
+    fetch("/api/v1/definitions", { headers: { Accept: "application/json" }, signal: controller.signal }).then(async (response) => {
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || `Definitions request failed (${response.status})`); }
       return response.json();
     }).then((value) => setResult({ loading: false, error: "", value })).catch((error) => { if (error.name !== "AbortError") setResult((current) => ({ ...current, loading: false, error: error.message })); });
     return () => controller.abort();
-  }, [repository]);
+  }, []);
   return result;
 }
 
@@ -44,14 +44,12 @@ const specialistRoles = [
   ["review", "Independently check the change and return definite findings without editing it."],
 ];
 
-export function AgentsPage({ csrfToken, repositories = [], stateBackend }) {
+export function AgentsPage({ csrfToken, stateBackend }) {
   const factoryBackend = ["github", "local"].includes(stateBackend);
-  const [repository, setRepository] = useState("");
-  const selectedRepository = repositories.includes(repository) ? repository : repositories[0] || "";
-  const definitions = useDefinitions(["github", "local"].includes(stateBackend) ? selectedRepository : "");
+  const definitions = useDefinitions();
   const [selected, setSelected] = useState("triage");
   const [drafts,setDrafts]=useState({});
-  const draftKey=`${selectedRepository}:${selected}`;
+  const draftKey=selected;
   const draftState = drafts[draftKey];
   const draft = draftState?.text ?? null;
   function setDraft(value) {
@@ -68,7 +66,7 @@ export function AgentsPage({ csrfToken, repositories = [], stateBackend }) {
   async function savePrompt() {
     setSaveState("Saving…");
     try {
-      const response = await fetch(`/api/v1/factory/agents/${selected}`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": csrfToken }, body: JSON.stringify({ prompt: draft ?? savedPrompts[draftKey] ?? command?.prompt ?? "", expected_hash: draftState?.baseHash ?? savedHashes[draftKey] ?? command?.hash ?? "", ...(["github", "local"].includes(stateBackend) ? { repository: selectedRepository } : {}) }) });
+      const response = await fetch(`/api/v1/factory/agents/${selected}`, { method: "PUT", headers: { "Content-Type": "application/json", "X-Machinist-CSRF": csrfToken }, body: JSON.stringify({ prompt: draft ?? savedPrompts[draftKey] ?? command?.prompt ?? "", expected_hash: draftState?.baseHash ?? savedHashes[draftKey] ?? command?.hash ?? "" }) });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(response.status === 409 ? "This prompt changed elsewhere. Reload Agents before saving your changes." : body.error || `Unable to save prompt (${response.status})`);
       setSavedPrompts(current => ({ ...current, [draftKey]: draft ?? command?.prompt ?? "" }));
@@ -77,8 +75,8 @@ export function AgentsPage({ csrfToken, repositories = [], stateBackend }) {
       setSaveState(["github", "local"].includes(stateBackend) ? "Saved. Future stage attempts use this Markdown version." : "Saved. Future attempts use this version.");
     } catch (error) { setSaveState(error.message); }
   }
-  return <Page title="Agents" description="Four specialists. One task, one workspace, one pull request.">
-    {["github", "local"].includes(stateBackend) && <label className="block max-w-sm"><span className="field-label">Repository</span><select disabled={saveState === "Saving…"} className="field-control" value={selectedRepository} onChange={event => { setRepository(event.target.value); setSavedHashes({}); setSavedPrompts({}); setSaveState(""); }}>{!repositories.length && <option value="">No repositories configured</option>}{repositories.map(name => <option key={name}>{name}</option>)}</select></label>}
+  return <Page title="Agents" description="Reusable agent instructions. Choose the project when you start a job.">
+
     {definitions.loading ? <Loading /> : definitions.error ? <Failure value={definitions.error} /> : <div className="agent-layout">
       <section className="agent-list" aria-label="Factory agents">{specialistRoles.map(([name, purpose]) => <button disabled={saveState === "Saving…"} key={name} className={`agent-row ${selected === name ? "agent-row-selected" : ""}`} onClick={() => { setSelected(name); setSaveState(""); }} aria-pressed={selected === name}><span className="text-sm font-semibold">{displayName(name)}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{purpose}</span><span className="mt-3 block text-xs text-muted-foreground">{definitions.value.commands.find(item => item.name === name)?.executor || "Not configured"}</span></button>)}</section>
       <section className="agent-detail min-w-0"><header className="mb-6"><h2 className="text-lg font-semibold">{displayName(selected)}</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">{role[1]}</p></header><Tabs key={selected} label={`${displayName(selected)} information`} items={[
