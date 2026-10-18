@@ -286,7 +286,7 @@ func (g *ghFactoryClient) maintenanceBlob(ctx context.Context, root, revision, n
 	}
 	return errors.New("invalid document path")
 }
-func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() error) (maintenancePull, error) {
+func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() (func(), error)) (maintenancePull, error) {
 	root, err := githubRepositoryPath(repo)
 	if err != nil {
 		return maintenancePull{}, err
@@ -421,9 +421,11 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	}
 	// Recheck local cancellation, privacy and review authorization after all
 	// remote inspection, immediately before submitting the guarded merge.
-	if err = authorize(); err != nil {
+	release, err := authorize()
+	if err != nil {
 		return pr, err
 	}
+	defer release()
 	body, _ := json.Marshal(map[string]any{"sha": head, "merge_method": "squash", "merge_action": "default", "bypass_rules": false})
 	raw, err = g.api(ctx, "PUT", fmt.Sprintf("%s/pulls/%d/merge-async", root, number), body)
 	if err != nil {
