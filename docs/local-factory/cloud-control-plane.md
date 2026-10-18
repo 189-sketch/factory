@@ -1,0 +1,121 @@
+# GKE control plane
+
+Run one Machinist control plane and its built-in Kubernetes dispatcher in the
+existing runner cluster. This deployment uses SQLite on a 20 GiB persistent
+disk, one replica, and the Recreate update strategy. Do not scale it beyond one
+replica. No external database, scheduler, service-account key, or personal gcloud
+login is needed at runtime.
+
+The dispatcher uses the Pod's rotating Kubernetes service-account token through
+an explicit `in-cluster` kubeconfig. Its Role is limited to the runner namespace:
+Jobs, Pod inspection and exec, credential-stream ConfigMaps, the existing
+`codex-account` Secret, and read-only inspection of the proxy and isolation
+policies. Its only cluster-scoped permission reads the `gvisor` RuntimeClass.
+It cannot install policies or change IAM. Agent Pods still receive no Kubernetes
+token, GitHub credential, or control-plane credential.
+
+## Build and render
+
+From the repository root, build and push the control-plane image. This image
+contains Git, GitHub CLI and kubectl, but no coding agent or Google Cloud CLI. The embedded UI must
+already be built; `web/dist` is committed alongside its source.
+
+```sh
+docker buildx build --platform linux/amd64 \
+  --file deploy/kubernetes/control-plane.Dockerfile \
+  --build-arg VERSION="$(git rev-parse --short HEAD)" \
+  --tag "$CONTROL_PLANE_IMAGE" --push .
+```
+
+Set `CONTROL_PLANE_IMAGE` to your registry's image reference before building.
+Deploy using its resolved digest, not a mutable tag. Create a local Kustomize
+overlay referencing `deploy/kubernetes/control-plane` and replace the image named
+`machinist-control-plane` with that digest. Render with `kubectl kustomize` and
+validate with server-side dry-run after creating the `machinist-system` namespace.
+The runner namespace, policies, egress proxy and Codex Secret must already exist.
+
+The checked-in `deploy/kubernetes/control-plane-gke` overlay pins the deployed
+image for `machinist-prod`, `europe-west2`, cluster `machinist-runners`. After
+initial state migration, apply it with the explicit cluster context:
+
+```sh
+kubectl --context gke_machinist-prod_europe-west2_machinist-runners \
+  apply -k deploy/kubernetes/control-plane-gke
+```
+
+Update the overlay's digest after building and verifying a replacement image.
+
+## Cut over existing state
+
+1. Confirm no agent attempts are executing. Gracefully stop the local control
+   plane and check that its runner Jobs and credential-stream locks have been
+   cleaned up. Keep the original runtime directory as a private rollback copy.
+2. With the old process stopped, take a SQLite backup of `jobs.db` and preserve
+   its runtime directory, including onboarding settings, GitHub credentials,
+   checkouts, worker outputs, automation definitions, and publication holds.
+   Do not put this private archive in an image, ConfigMap, Git repository, or
+   build context. Transfer it over authenticated Kubernetes exec to a temporary
+   non-root Pod mounting `machinist-state`, then remove that Pod.
+3. Use `/var/lib/machinist` as the new runtime root. Update onboarding repository
+   paths and repair Git worktree administrative paths for the moved checkouts.
+   Keep the database's reports and events unchanged. Do not release private
+   publication holds. Keep setup unfinished during migration so no jobs admit
+   before validation.
+4. Place `config.toml`, `worker.token` and referenced prompt files in the runtime
+   root. Set `server.listen` to `127.0.0.1:7341`, `server.state` to `factory`, and
+   `server.worker_token_file` to `/var/lib/machinist/worker.token`. Configure the
+   existing runner image and credential Secret under `server.kubernetes`, using
+   `context = "in-cluster"` and `kubeconfig = "/etc/machinist/kubeconfig"`.
+   Preserve the existing runner namespace and proxy URL.
+5. Start the Deployment and use the UI to finish the existing Kubernetes setup.
+   Run its real connection check before enabling schedules. Confirm history,
+   projects, automations and holds survived. Restart the Deployment and repeat
+   the check to verify persistence and service-account access.
+
+The default deployment creates no Service, public IP, ingress or load balancer.
+It retains Machinist's loopback listener and denies Pod ingress. Authorized
+operators access it through the Kubernetes API:
+
+```sh
+kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+  port-forward deployment/machinist-control-plane 7341:7341
+```
+
+Open `http://127.0.0.1:7341`. This operator tunnel uses your Kubernetes identity;
+the running dispatcher does not. Reconnect the tunnel after replacing the Pod.
+For a public browser endpoint, add HTTPS and identity protection first. Do not
+expose the existing unauthenticated loopback API directly.
+
+## Recovery and updates
+
+Back up the persistent runtime before updates. Keep the old image digest for
+rollback. Recreate stops the old dispatcher before a replacement starts;
+the process lock also prevents concurrent access to the store. Allow its 90-second
+termination grace period for bounded sandbox cleanup. Do not force-delete an
+unreachable dispatcher or clear a credential lock until its old agent Pods are
+confirmed stopped. Follow the credential recovery procedure in
+[Kubernetes runners](kubernetes.md).
+
+For rollback to the laptop, gracefully stop the cloud Deployment first and copy
+back its latest private state. Never start both copies. Reusing the original
+pre-cutover directory after cloud activity would discard newer history and could
+repeat scheduled work.
+
+The PVC survives Deployment replacement and deletion. It is persistent storage,
+not a backup; deleting the PVC can delete its disk. Keep periodic private SQLite
+backups and runtime archives separately. This first deployment has no automatic
+backup service or public endpoint.
+
+## Verified deployment
+
+Live checks on 2026-10-18 verified the digest-pinned image on the existing
+`machinist-runners` GKE cluster. A sandbox connection check returned PONG, verified
+GitHub and agent access, and removed its Job, Pod and credential-stream lock.
+Replacing the control-plane Pod preserved all 19 existing tasks, four automations,
+the GitHub connection and the private publication hold. Its built-in dispatcher
+reconnected automatically using the Kubernetes service account.
+
+The deployed GitHub CLI authenticated and fetched paginated check results for an
+existing PR. RBAC checks allowed required dispatch operations and denied listing
+Secrets, changing policies, creating role bindings, or creating Jobs in another
+namespace. The runtime image contains no Google Cloud CLI or personal cloud login.
