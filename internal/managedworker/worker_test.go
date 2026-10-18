@@ -253,6 +253,32 @@ func TestCompletionDoesNotRetryPermanentClientError(t *testing.T) {
 	}
 }
 
+func TestCompletionAllowsSlowForemanWithoutChangingNormalTimeout(t *testing.T) {
+	var completions atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/complete") {
+			completions.Add(1)
+		}
+		time.Sleep(30 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	httpClient := server.Client()
+	httpClient.Timeout = 5 * time.Millisecond
+	w := &Worker{client: newClient(server.URL, "secret", httpClient), stderr: io.Discard}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := w.deliver(ctx, "slow-foreman", protocol.Completion{}); err != nil {
+		t.Fatal(err)
+	}
+	if completions.Load() != 1 || httpClient.Timeout != 5*time.Millisecond {
+		t.Fatal("completion retried or changed the shared polling deadline")
+	}
+	if err := w.client.Post(ctx, "/heartbeat", nil, nil); err == nil {
+		t.Fatal("normal requests lost their shorter timeout")
+	}
+}
+
 func TestManagedWorkerPollsAgainAfterCompletionConflict(t *testing.T) {
 	var polls atomic.Int32
 	polledAgain := make(chan struct{})

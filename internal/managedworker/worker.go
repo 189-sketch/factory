@@ -381,9 +381,16 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 }
 
 func (w *Worker) deliver(ctx context.Context, runID string, completion protocol.Completion) error {
+	// The foreman may reconcile a bounded batch of GitHub actions before recording
+	// completion. Keep polling/heartbeat timeouts short and honor shutdown through
+	// the request context while allowing this operation the artifact deadline.
+	client := *w.client
+	completionHTTP := *w.client.http
+	completionHTTP.Timeout = 5 * time.Minute
+	client.http = &completionHTTP
 	backoff := 250 * time.Millisecond
 	for {
-		err := w.client.Post(ctx, "/api/v1/runs/"+url.PathEscape(runID)+"/complete", completion, nil)
+		err := client.Post(ctx, "/api/v1/runs/"+url.PathEscape(runID)+"/complete", completion, nil)
 		if err == nil {
 			return nil
 		}

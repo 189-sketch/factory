@@ -45,10 +45,11 @@ type GitHubFactoryServer struct {
 	handler        http.Handler
 }
 type githubTask struct {
-	issue   GitHubIssue
-	state   *GitHubFactoryState
-	repo    string
-	receipt *factoryReceipt
+	issue               GitHubIssue
+	state               *GitHubFactoryState
+	repo                string
+	receipt             *factoryReceipt
+	maintenanceApplying bool
 }
 type githubLease struct {
 	phase    string
@@ -201,7 +202,13 @@ func (s *GitHubFactoryServer) refresh(ctx context.Context, force bool) error {
 		if err != nil {
 			return err
 		}
-		task := &githubTask{issue: record.issue, state: state, repo: record.repository}
+		// Keep task identity stable across refreshes while a maintenance action
+		// temporarily releases mu. Controls must update the same in-flight task.
+		task := s.tasks[state.Job.ID]
+		if task == nil {
+			task = &githubTask{}
+		}
+		task.issue, task.state, task.repo = record.issue, state, record.repository
 		if state.LastEventID == 0 {
 			if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "created", Role: "triage"}); err != nil {
 				return err
@@ -242,6 +249,7 @@ func (s *GitHubFactoryServer) reduceLocal(issue GitHubIssue, comments []GitHubCo
 		return nil, err
 	}
 	state.Job.StateBackend = "local"
+	state.Job.Maintenance = issue.Maintenance != nil
 	for i := range state.Job.Runs {
 		state.Job.Runs[i].GitHubURL = ""
 	}
@@ -1157,6 +1165,36 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	if step.Outcome == "complete" && step.Factory.Role != "review" && strings.TrimSpace(step.Factory.Report) == "" {
 		writeError(w, 400, errors.New("completed agent must report its GitHub handoff"))
 		return
+	}
+	if task.issue.Maintenance != nil && step.Outcome == "complete" {
+		if step.Factory.Role != "triage" || !step.Factory.Resolved || step.Factory.NeedsSpec || step.Factory.PRURL != "" || step.Factory.HeadSHA != "" || step.Factory.Branch != "" || step.Factory.SpecURL != "" {
+			writeError(w, 400, errors.New("maintenance must finish as a read-only triage answer"))
+			return
+		}
+		if task.maintenanceApplying {
+			writeError(w, 409, errors.New("maintenance completion is already being applied"))
+			return
+		}
+		task.maintenanceApplying = true
+		defer func() { task.maintenanceApplying = false }()
+		version := task.state.LastEventID
+		report, applyErr := s.completeMaintenance(r.Context(), task, step.Factory.Report)
+		if task.state.LastEventID != version || task.state.Job.PublicationHold != "" || s.liveLease(id) == nil {
+			writeError(w, 409, errors.New("maintenance task changed while applying actions"))
+			return
+		}
+		if applyErr != nil {
+			step.Outcome = "blocked"
+			report = "Maintenance could not proceed: " + applyErr.Error()
+		}
+		// Only the foreman's bounded report belongs in a maintenance completion.
+		// Outer routing labels and approval flags are unrelated to these answers.
+		step.Factory = &protocol.FactoryResult{Version: 1, Role: "triage", Resolved: applyErr == nil, Report: report}
+		step.ApprovalRequired = false
+		step.Summary = "Repository maintenance finished. See the triage report for actions and decisions."
+		if applyErr != nil {
+			step.Summary = report
+		}
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
