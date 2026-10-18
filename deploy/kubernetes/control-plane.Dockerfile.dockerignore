@@ -1,0 +1,6 @@
+.git
+.machinist
+bin
+**/node_modules
+**/auth.json
+**/*.key

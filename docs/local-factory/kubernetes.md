@@ -1,6 +1,7 @@
 # Kubernetes runners
 
-The control plane stays on your computer or VM. Its trusted connector launches
+The control plane runs on your computer, VM, or in the
+[GKE deployment](cloud-control-plane.md). Its trusted connector launches
 one standard Kubernetes Job per attempt. The agent runs in gVisor, commits locally,
 and returns a bounded Git bundle. The connector checks that commit graph and
 publishes the assigned branch and PR using the existing GitHub App connection.
