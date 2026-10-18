@@ -347,3 +347,35 @@ func TestGitHubFollowupsAcceptEquivalentUppercaseObjectIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubFollowupRepositoryURLCase(t *testing.T) {
+	g := &ghFactoryClient{api: func(_ context.Context, method, path string, body []byte) ([]byte, error) {
+		var input struct {
+			Variables struct {
+				Owner, Name string
+				Number      int
+			}
+		}
+		json.Unmarshal(body, &input)
+		if method != "POST" || path != "graphql" || input.Variables.Owner != "Acme" || input.Variables.Name != "API" || input.Variables.Number != 2 {
+			t.Fatal("unscoped query")
+		}
+		return []byte(`{"data":{"repository":{"pullRequest":{"url":"https://github.com/Acme/API/pull/2","state":"OPEN"}}}}`), nil
+	}}
+	if _, err := g.PullRequestFollowup(t.Context(), "Acme/API", "https://github.com/acme/api/pull/2"); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"https://evil.com/acme/api/pull/2", "https://github.com/acme/api/pull/02", "https://github.com/acme/api/pull/2/", "https://github.com/acme/api/pull/2?", "https://github.com/acme/api/pull/2#x", "https://github.com/acme/%61pi/pull/2", "https://github.com/acme/other/pull/2", "https://u@github.com/acme/api/pull/2"} {
+		if _, err := followupPRNumber("Acme/API", value); err == nil {
+			t.Fatal("invalid URL accepted", value)
+		}
+	}
+	s, f, id := readyFollowupTask(t)
+	f.pr.URL = "https://github.com/OWNER/REPO/pull/2"
+	f.pr.State = "MERGED"
+	f.pr.MergeCommit = &struct{ OID string }{strings.Repeat("b", 40)}
+	tickFollowups(t, s)
+	if job := factoryJob(t, s, id); job.State != "succeeded" {
+		t.Fatal("repository case blocked merge", job.State)
+	}
+}

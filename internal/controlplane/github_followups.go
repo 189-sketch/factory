@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,14 +66,34 @@ type githubFollowupReader interface {
 	PullRequestFollowup(context.Context, string, string) (githubFollowupPR, error)
 }
 
+func followupPRNumber(repo, value string) (int, error) {
+	u, err := url.Parse(value)
+	if err != nil {
+		return 0, errors.New("invalid PR URL")
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || len(parts) != 4 || parts[2] != "pull" || !strings.EqualFold(parts[0]+"/"+parts[1], repo) {
+		return 0, errors.New("follow-up requires the recorded repository PR URL")
+	}
+	number, err := strconv.Atoi(parts[3])
+	if err != nil || number < 1 || parts[3] != strconv.Itoa(number) {
+		return 0, errors.New("invalid PR number")
+	}
+	return number, nil
+}
+func sameFollowupPR(repo, left, right string) bool {
+	a, errA := followupPRNumber(repo, left)
+	b, errB := followupPRNumber(repo, right)
+	return errA == nil && errB == nil && a == b
+}
+
 func (g *ghFactoryClient) PullRequestFollowup(ctx context.Context, repo, prURL string) (githubFollowupPR, error) {
 	var pr githubFollowupPR
 	if _, err := githubRepositoryPath(repo); err != nil {
 		return pr, err
 	}
-	prefix := "https://github.com/" + repo + "/pull/"
-	number, err := strconv.Atoi(strings.TrimPrefix(prURL, prefix))
-	if !strings.HasPrefix(prURL, prefix) || err != nil || number < 1 || prURL != prefix+strconv.Itoa(number) {
+	number, err := followupPRNumber(repo, prURL)
+	if err != nil {
 		return pr, errors.New("follow-up requires the recorded repository PR URL")
 	}
 	parts := strings.Split(repo, "/")
@@ -94,7 +115,7 @@ func (g *ghFactoryClient) PullRequestFollowup(ctx context.Context, repo, prURL s
 		return pr, errors.New("GitHub follow-up data is unavailable; retrying")
 	}
 	pr = *response.Data.Repository.PullRequest
-	if pr.URL != prURL {
+	if !sameFollowupPR(repo, pr.URL, prURL) {
 		return pr, errors.New("GitHub returned a different pull request")
 	}
 	return pr, nil
@@ -258,7 +279,7 @@ func (s *GitHubFactoryServer) applyGitHubFollowup(ctx context.Context, task *git
 	state := task.state
 	progress := state.Job.Workflow.Factory
 	event := GitHubFactoryEvent{RunID: state.Job.Runs[len(state.Job.Runs)-1].ID, Role: state.Role}
-	if pr.URL != progress.PRURL {
+	if !sameFollowupPR(task.repo, pr.URL, progress.PRURL) {
 		return errors.New("GitHub PR identity changed")
 	}
 	if !strings.EqualFold(pr.HeadRefOID, progress.HeadSHA) {
