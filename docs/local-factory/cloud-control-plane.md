@@ -35,7 +35,7 @@ validate with server-side dry-run after creating the `machinist-system` namespac
 The runner namespace, policies, egress proxy and Codex Secret must already exist.
 
 The checked-in `deploy/kubernetes/control-plane-gke` overlay pins the deployed
-image for `machinist-prod`, `europe-west2`, cluster `machinist-runners`. After
+image for `machinist-prod`, `europe-west2`, cluster `machinist-runners`. For updates after
 initial state migration, apply it with the explicit cluster context:
 
 ```sh
@@ -50,24 +50,36 @@ Update the overlay's digest after building and verifying a replacement image.
 1. Confirm no agent attempts are executing. Gracefully stop the local control
    plane and check that its runner Jobs and credential-stream locks have been
    cleaned up. Keep the original runtime directory as a private rollback copy.
-2. With the old process stopped, take a SQLite backup of `jobs.db` and preserve
+2. On a fresh cluster, provision the namespace, persistent claim and dispatcher
+   resources with **zero control-plane replicas** before transferring state:
+
+   ```sh
+   kubectl --context gke_machinist-prod_europe-west2_machinist-runners \
+     apply -k deploy/kubernetes/control-plane-bootstrap
+   ```
+
+   This bootstrap overlay reuses the GKE definition and overrides only the
+   replica count. Do not apply the normal one-replica overlay yet. The temporary
+   transfer Pod binds and mounts the claim before the control plane starts.
+3. With the old process stopped, take a SQLite backup of `jobs.db` and preserve
    its runtime directory, including onboarding settings, GitHub credentials,
    checkouts, worker outputs, automation definitions, and publication holds.
    Do not put this private archive in an image, ConfigMap, Git repository, or
    build context. Transfer it over authenticated Kubernetes exec to a temporary
    non-root Pod mounting `machinist-state`, then remove that Pod.
-3. Use `/var/lib/machinist` as the new runtime root. Update onboarding repository
+4. Use `/var/lib/machinist` as the new runtime root. Update onboarding repository
    paths and repair Git worktree administrative paths for the moved checkouts.
    Keep the database's reports and events unchanged. Do not release private
    publication holds. Keep setup unfinished during migration so no jobs admit
    before validation.
-4. Place `config.toml`, `worker.token` and referenced prompt files in the runtime
+5. Place `config.toml`, `worker.token` and referenced prompt files in the runtime
    root. Set `server.listen` to `127.0.0.1:7341`, `server.state` to `factory`, and
    `server.worker_token_file` to `/var/lib/machinist/worker.token`. Configure the
    existing runner image and credential Secret under `server.kubernetes`, using
    `context = "in-cluster"` and `kubeconfig = "/etc/machinist/kubeconfig"`.
    Preserve the existing runner namespace and proxy URL.
-5. Start the Deployment and use the UI to finish the existing Kubernetes setup.
+6. After the transfer Pod is removed and the configuration is in place, apply
+   `deploy/kubernetes/control-plane-gke` to start the single replica. Use the UI to finish the existing Kubernetes setup.
    Run its real connection check before enabling schedules. Confirm history,
    projects, automations and holds survived. Restart the Deployment and repeat
    the check to verify persistence and service-account access.
