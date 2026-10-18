@@ -217,6 +217,8 @@ type maintenanceFactoryFake struct {
 	merges            int
 	remoteMerged      bool
 	loseMergeResponse bool
+	mergeError        error
+	labelError        error
 }
 
 func (f *maintenanceFactoryFake) MaintenanceSnapshot(context.Context, string) (*maintenanceSnapshot, error) {
@@ -238,10 +240,13 @@ func (f *maintenanceFactoryFake) MaintenanceItem(_ context.Context, _ string, it
 }
 func (f *maintenanceFactoryFake) AddMaintenanceLabels(_ context.Context, _ string, _ int, labels []string) error {
 	f.labels = append(f.labels, labels)
-	return nil
+	return f.labelError
 }
 func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string) (maintenancePull, error) {
 	f.merges++
+	if f.mergeError != nil {
+		return maintenancePull{}, f.mergeError
+	}
 	if f.loseMergeResponse {
 		f.remoteMerged = true
 		return maintenancePull{}, errors.New("response lost after remote merge")
@@ -301,6 +306,92 @@ func TestMaintenanceAutomationReadOnlyAdmissionCompletionAndRecovery(t *testing.
 		t.Fatal("maintenance result lost across restart")
 	}
 }
+
+func TestMaintenanceFullBatchFitsRenderedReportBudget(t *testing.T) {
+	client := maintenanceFixture()
+	client.snapshot.Items = nil
+	report := maintenanceReport{Summary: strings.Repeat("s", 616)}
+	for number := 1; number <= 20; number++ {
+		kind := "issue"
+		endpoint := "issues"
+		if number > 10 {
+			kind = "pr"
+			endpoint = "pull"
+		}
+		client.snapshot.Items = append(client.snapshot.Items, maintenanceItem{Number: number, Kind: kind, URL: fmt.Sprintf("https://github.com/owner/repo/%s/%d", endpoint, number), UpdatedAt: time.Now().UTC()})
+		report.Items = append(report.Items, maintenanceSuggestion{Number: number, Kind: kind, Labels: []string{"bug"}, Assessment: strings.Repeat("a", 245)})
+	}
+	s := githubFactoryTestServer(t, client)
+	var a factoryAutomation
+	json.Unmarshal(factoryHTTP(t, s, "POST", "/api/v1/automations", map[string]any{"kind": "repository-maintenance", "name": "Maintain full batch", "repository": "repo"}, 200), &a)
+	id := automationRun(t, s, a, "full-batch", 201)
+	run := factoryPoll(t, s)
+	raw, _ := json.Marshal(report)
+	outerLabels := make([]string, 10)
+	for i := range outerLabels {
+		outerLabels[i] = strings.Repeat(`"`, 200)
+	}
+	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: string(raw), Labels: outerLabels})
+	job := factoryJob(t, s, id)
+	if job.State != "succeeded" || len(job.Runs[0].Report) > 14000 || len(client.labels) != 20 {
+		t.Fatalf("normal full-batch report was rejected or not fully applied: state=%s, bytes=%d, label calls=%d", job.State, len(job.Runs[0].Report), len(client.labels))
+	}
+	comments, err := s.local.comments(t.Context(), s.tasks[id].issue.HTMLURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completed GitHubFactoryEvent
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(comments[len(comments)-1].Body, GitHubFactoryMarker)), &completed); err != nil {
+		t.Fatal(err)
+	}
+	if len(completed.Result.Factory.Labels) != 0 || completed.Result.ApprovalRequired {
+		t.Fatal("irrelevant outer routing fields were retained")
+	}
+	serialized, _ := json.Marshal(completed.Result)
+	if _, err := protocol.ParseStepResult(serialized); err != nil {
+		t.Fatalf("rendered completion exceeds the runner contract: %v", err)
+	}
+	// The size limit still applies before actions when JSON escaping expands
+	// otherwise short Markdown. Do not allow an invalid completion after writes.
+	client.labels = nil
+	for i := range report.Items {
+		report.Items[i].Assessment = strings.Repeat("<", 245)
+	}
+	raw, _ = json.Marshal(report)
+	_, err = s.completeMaintenance(t.Context(), &githubTask{issue: GitHubIssue{Maintenance: client.snapshot}}, string(raw))
+	if err == nil || len(client.labels) != 0 {
+		t.Fatal("escaped output exceeded its budget or actions preceded validation")
+	}
+}
+
+func TestMaintenanceMergeErrorFitsReservedJSONBudget(t *testing.T) {
+	client := maintenanceFixture()
+	s := githubFactoryTestServer(t, client)
+	source := submitRecipe(t, s, "factory", "merge-error-source")
+	triage := factoryPoll(t, s)
+	factoryFinish(t, s, triage, protocol.FactoryResult{})
+	build := factoryPoll(t, s)
+	factoryFinish(t, s, build, protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: maintenanceHead, Branch: "codex/source"})
+	review := factoryPoll(t, s)
+	factoryFinish(t, s, review, protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: maintenanceHead, Verdict: "accepted"})
+	client.mergeError = errors.New(strings.Repeat("<", 64))
+	client.labelError = errors.New("label update unavailable")
+	report := maintenanceReport{Summary: "One eligible PR", Items: []maintenanceSuggestion{{Number: 2, Kind: "pr", Assessment: "Small documentation correction", Merge: true}}}
+	raw, _ := json.Marshal(report)
+	output, err := s.completeMaintenance(t.Context(), &githubTask{issue: GitHubIssue{Maintenance: client.snapshot}}, string(raw))
+	if err != nil || client.merges != 1 || factoryJob(t, s, source).State != "awaiting_merge" {
+		t.Fatal("merge failure was not safely reported", err)
+	}
+	start := strings.Index(output, " **No labels applied:")
+	if start < 0 {
+		t.Fatal("label failure missing")
+	}
+	encoded, _ := json.Marshal(output[start:])
+	if len(encoded)-2 > 512 {
+		t.Fatalf("merge action exceeds reserved JSON budget: %d", len(encoded)-2)
+	}
+}
+
 func TestMaintenanceNeverMergesUnknownHeldSingleOrStaleWork(t *testing.T) {
 	for _, scenario := range []string{"unknown", "single", "private", "stale", "changed", "invalid report"} {
 		t.Run(scenario, func(t *testing.T) {

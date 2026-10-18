@@ -1169,7 +1169,10 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 			step.Outcome = "blocked"
 			report = "Maintenance could not proceed: " + applyErr.Error()
 		}
-		step.Factory.Report = report
+		// Only the foreman's bounded report belongs in a maintenance completion.
+		// Outer routing labels and approval flags are unrelated to these answers.
+		step.Factory = &protocol.FactoryResult{Version: 1, Role: "triage", Resolved: applyErr == nil, Report: report}
+		step.ApprovalRequired = false
 		step.Summary = "Repository maintenance finished. See the triage report for actions and decisions."
 		if applyErr != nil {
 			step.Summary = report

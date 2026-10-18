@@ -200,19 +200,6 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 	if err != nil {
 		return "", err
 	}
-	// Reserve room for every action result before any external writes. The
-	// worker and journal share a bounded step-result contract.
-	base, _ := json.Marshal(report)
-	urls := 0
-	for _, item := range snapshot.Items {
-		urls += len(item.URL)
-	}
-	for _, link := range snapshot.Reconciled {
-		urls += len(link) + 100
-	}
-	if len(base)+urls+len(report.Items)*400 > 14000 {
-		return "", errors.New("triage report is too verbose; retry with shorter assessments")
-	}
 	client, ok := s.client.(maintenanceGitHubClient)
 	if !ok {
 		return "", errors.New("GitHub maintenance integration unavailable")
@@ -229,9 +216,28 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 	for _, item := range snapshot.Items {
 		originals[maintenanceKey(item.Kind, item.Number)] = item
 	}
-	for _, suggestion := range report.Items {
+	// Budget the rendered report, not the agent's JSON envelope and label lists.
+	// Count JSON escapes as the journal does, reserving each bounded action result
+	// before any external writes. Merge errors have a smaller public explanation.
+	encoded, _ := json.Marshal(output.String())
+	budget := len(encoded) - 2
+	lines := make([]string, len(report.Items))
+	for i, suggestion := range report.Items {
 		original := originals[maintenanceKey(suggestion.Kind, suggestion.Number)]
-		fmt.Fprintf(&output, "- [%s #%d](%s): %s", suggestion.Kind, suggestion.Number, original.URL, suggestion.Assessment)
+		lines[i] = fmt.Sprintf("- [%s #%d](%s): %s", suggestion.Kind, suggestion.Number, original.URL, suggestion.Assessment)
+		encoded, _ = json.Marshal(lines[i])
+		actionBudget := 128
+		if suggestion.Merge {
+			actionBudget = 512
+		}
+		budget += len(encoded) - 2 + actionBudget
+	}
+	if budget > 14000 {
+		return "", errors.New("triage report is too verbose; retry with shorter assessments")
+	}
+	for i, suggestion := range report.Items {
+		original := originals[maintenanceKey(suggestion.Kind, suggestion.Number)]
+		output.WriteString(lines[i])
 		current, readErr := client.MaintenanceItem(ctx, snapshot.Repository, original)
 		if readErr != nil {
 			fmt.Fprintf(&output, " **No action:** GitHub refresh failed.\n")
@@ -264,7 +270,7 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 			} else {
 				pr, mergeErr := client.MergeMaintenancePR(ctx, snapshot.Repository, suggestion.Number, original.HeadSHA)
 				if mergeErr != nil {
-					fmt.Fprintf(&output, " **Not merged:** %.160s.", mergeErr.Error())
+					fmt.Fprintf(&output, " **Not merged:** %.64s. See GitHub.", mergeErr.Error())
 				} else if !pr.Merged {
 					output.WriteString(" **Merge submitted:** waiting for GitHub; the next maintenance run reconciles completion.")
 				} else {
