@@ -147,26 +147,7 @@ The 7/30-day activity chart counts jobs by creation day in your browser's timezo
 
 ### GitHub follow-ups
 
-The control plane checks up to ten recorded PRs per minute, rotating through larger
-sets. It uses the connected GitHub App and must remain running. Network reads
-happen outside the task lock; a changed task is rechecked before any transition.
-Only tasks awaiting merge qualify. Private holds, cancelled work, blocked work,
-and active attempts are excluded.
-
-Completed failed checks and failed commit statuses on the recorded head return
-work to Build. Pending, skipped and cancelled checks do not start a repair.
-Change-request reviews on that head and unresolved, current inline feedback from
-repository owners, members and collaborators also return work to Build. General
-PR discussion, anonymous feedback, resolved/outdated threads, and implementer
-replies do not dispatch jobs. Feedback is treated as untrusted evidence. Each
-consumed signal is saved in the task journal, so restarts and repeated polls do
-not repeat a repair. The normal limit of three repair rounds still applies.
-Standard jobs get another independent Review after a repair; single-agent jobs
-retain their single-agent policy. Repairs reuse the assigned branch and PR.
-
-A confirmed merge of the recorded head completes the task. A changed head or a PR
-closed without merging blocks it for human inspection. Incomplete GitHub evidence
-and transient API failures preserve the current task and retry automatically; a
-notice appears on its run page. This poller never merges, posts review comments,
-resolves threads or publishes internal state. Repository-maintenance auto-merge
-remains governed by its separate conservative policy.
+Machinist watches PR-ready jobs for CI failures, actionable trusted review feedback,
+and confirmed merges. Repairs stay on the same task, branch and PR. See
+[GitHub follow-ups](github-followups.md) for the repair flow, completion rules,
+and cases that need human attention.
