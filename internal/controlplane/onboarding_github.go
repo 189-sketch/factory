@@ -309,12 +309,12 @@ func (c *GitHubConnection) API(ctx context.Context, method, path string, body []
 				Number      int
 			} `json:"variables"`
 		}
-		if json.Unmarshal(body, &input) != nil || input.Query != maintenancePRQuery || input.Variables.Number < 1 || !c.allowed[strings.ToLower(input.Variables.Owner+"/"+input.Variables.Name)] {
+		if json.Unmarshal(body, &input) != nil || (input.Query != maintenancePRQuery && input.Query != githubFollowupQuery) || input.Variables.Number < 1 || !c.allowed[strings.ToLower(input.Variables.Owner+"/"+input.Variables.Name)] {
 			return nil, errors.New("unsupported or unscoped GitHub GraphQL operation")
 		}
 		// Forward only the validated, canonical fields. JSON's case-insensitive
 		// struct decoding must not authorize a different lowercase wire query.
-		body, _ = json.Marshal(map[string]any{"query": maintenancePRQuery, "variables": map[string]any{"owner": input.Variables.Owner, "name": input.Variables.Name, "number": input.Variables.Number}})
+		body, _ = json.Marshal(map[string]any{"query": input.Query, "variables": map[string]any{"owner": input.Variables.Owner, "name": input.Variables.Name, "number": input.Variables.Number}})
 	} else if method != "GET" || !(u.Path == "/user" || u.Path == "/user/installations" || (len(parts) == 3 && parts[0] == "user" && parts[1] == "installations")) {
 		return nil, errors.New("unsupported GitHub API path")
 	}

@@ -44,6 +44,7 @@ type Store struct {
 }
 
 type Job struct {
+	GitHubSyncError  string            `json:"github_sync_error,omitempty"`
 	Maintenance      bool              `json:"maintenance,omitempty"`
 	Recipe           string            `json:"recipe,omitempty"`
 	PublicationHold  string            `json:"publication_hold,omitempty"`

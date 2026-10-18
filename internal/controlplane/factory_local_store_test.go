@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/owainlewis/machinist/internal/protocol"
 	"path/filepath"
@@ -96,5 +97,84 @@ func TestLinkedIssueOnlyReceivesReadableStatus(t *testing.T) {
 	}
 	if len(client.comments) != 0 || client.creates != 0 || client.adopts != 0 {
 		t.Fatal("journal or label written to GitHub")
+	}
+}
+
+func TestSharedAgentPromptMigrationPreservesLegacyAndSharedEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "factory.db")
+	s, err := openFactoryLocalStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for repo, prompt := range map[string]string{"owner/a": "First project prompt", "owner/b": "Other project prompt"} {
+		if _, err = s.savePrompt(t.Context(), repo, "triage", prompt, "base", "base"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.db.Close()
+	s, err = openFactoryLocalStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, hash, err := s.prompt(t.Context(), "", "triage")
+	if err != nil || prompt != "First project prompt" {
+		t.Fatal("default prompt not promoted", err)
+	}
+	if _, err = s.savePrompt(t.Context(), "", "triage", "Shared edited prompt", hash, hash); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
+	s, err = openFactoryLocalStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.db.Close()
+	prompt, _, err = s.prompt(t.Context(), "", "triage")
+	if err != nil || prompt != "Shared edited prompt" {
+		t.Fatal("shared edit overwritten")
+	}
+	prompt, _, err = s.prompt(t.Context(), "owner/b", "triage")
+	if err != nil || prompt != "Other project prompt" {
+		t.Fatal("legacy prompt lost")
+	}
+}
+func TestSharedAgentDefinitionsNeedNoRepository(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	s.repositories = map[string]string{}
+	var definitions definitionsResponse
+	if err := json.Unmarshal(factoryHTTP(t, s, "GET", "/api/v1/definitions", nil, 200), &definitions); err != nil {
+		t.Fatal(err)
+	}
+	original := definitions.Commands[0]
+	factoryHTTP(t, s, "PUT", "/api/v1/factory/agents/triage", map[string]string{"prompt": "Shared instructions {{machinist.prompt}}", "expected_hash": original.Hash}, 200)
+	s.repositories = map[string]string{"first": "owner/a", "second": "owner/b"}
+	for _, repo := range []string{"first", "second"} {
+		var got definitionsResponse
+		json.Unmarshal(factoryHTTP(t, s, "GET", "/api/v1/definitions?repository="+repo, nil, 200), &got)
+		if got.Commands[0].Prompt != "Shared instructions {{machinist.prompt}}" {
+			t.Fatal("repository affected shared agent")
+		}
+	}
+	factoryHTTP(t, s, "PUT", "/api/v1/factory/agents/triage", map[string]string{"prompt": "Stale instructions {{machinist.prompt}}", "expected_hash": original.Hash}, 409)
+}
+
+func TestSharedAgentSaveKeepsRunningPromptAndUpdatesOtherProjects(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	s.repositories["other"] = "owner/other"
+	id := factorySubmit(t, s)
+	running := factoryPoll(t, s)
+	var definitions definitionsResponse
+	json.Unmarshal(factoryHTTP(t, s, "GET", "/api/v1/definitions", nil, 200), &definitions)
+	factoryHTTP(t, s, "PUT", "/api/v1/factory/agents/triage", map[string]string{"prompt": "New shared instructions {{machinist.prompt}}", "expected_hash": definitions.Commands[0].Hash}, 200)
+	if factoryJob(t, s, id).Runs[0].Prompt != running.RenderedPrompt {
+		t.Fatal("running prompt snapshot changed")
+	}
+	factoryFinish(t, s, running, protocol.FactoryResult{Resolved: true})
+	factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"repository": "other", "title": "Other project", "spec": "Research the issue"}, 201)
+	request := protocol.PollRequest{SingleAgent: true, InstanceID: "worker-instance", Name: "worker", Executors: []string{"codex"}, ReadOnlyExecutors: []string{"codex"}, Repositories: []string{"other"}, Factory: true, Workflows: true, Reviews: true}
+	var polled protocol.PollResponse
+	json.Unmarshal(factoryHTTP(t, s, "POST", "/api/v1/workers/poll", request, 200), &polled)
+	if polled.Run == nil || !strings.Contains(polled.Run.RenderedPrompt, "New shared instructions") || polled.Run.GitHubRepository != "owner/other" {
+		t.Fatal("shared agent not used for other project")
 	}
 }

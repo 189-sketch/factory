@@ -50,6 +50,16 @@ func openFactoryLocalStore(path string) (*factoryLocalStore, error) {
 		db.Close()
 		return nil, err
 	}
+	// Shared agents use the empty repository key. Preserve legacy rows, and seed
+	// each shared role once from the former default (first repository) prompt.
+	// Explicit shared edits always win, including after a restart.
+	_, err = db.Exec(`INSERT OR IGNORE INTO factory_prompts(repository,role,prompt,hash)
+ SELECT '',p.role,p.prompt,p.hash FROM factory_prompts p
+ WHERE p.repository<>'' AND p.repository=(SELECT MIN(q.repository) FROM factory_prompts q WHERE q.role=p.role AND q.repository<>'')`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	_ = os.Chmod(path, 0600)
 	return &factoryLocalStore{db: db}, nil
 }

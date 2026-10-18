@@ -27,22 +27,24 @@ import (
 // GitHubFactoryServer stores execution history locally and links published work
 // to GitHub. Workers may run on the local host or a remote VM.
 type GitHubFactoryServer struct {
-	setup          *onboarding
-	dataDirectory  string
-	mu             sync.Mutex
-	liveMu         sync.Mutex // Only leases and worker liveness; never held during GitHub requests.
-	auth           *Server
-	client         GitHubFactoryClient
-	local          *factoryLocalStore
-	definitionPath string
-	repositories   map[string]string
-	actor          string
-	tasks          map[string]*githubTask
-	workers        map[string]Worker
-	leases         map[string]*githubLease
-	loaded         time.Time
-	maxConcurrent  int
-	handler        http.Handler
+	setup                *onboarding
+	dataDirectory        string
+	mu                   sync.Mutex
+	liveMu               sync.Mutex // Only leases and worker liveness; never held during GitHub requests.
+	auth                 *Server
+	client               GitHubFactoryClient
+	local                *factoryLocalStore
+	definitionPath       string
+	repositories         map[string]string
+	actor                string
+	tasks                map[string]*githubTask
+	workers              map[string]Worker
+	leases               map[string]*githubLease
+	loaded               time.Time
+	maxConcurrent        int
+	githubFollowupCursor string
+	githubSyncErrors     map[string]string
+	handler              http.Handler
 }
 type githubTask struct {
 	issue               GitHubIssue
@@ -134,6 +136,9 @@ func (s *GitHubFactoryServer) Serve(ctx context.Context, listen string, onListen
 	scheduleCtx, stopSchedules := context.WithCancel(ctx)
 	schedulesDone := make(chan struct{})
 	go func() { defer close(schedulesDone); s.serveAutomations(scheduleCtx) }()
+	followupsDone := make(chan struct{})
+	go func() { defer close(followupsDone); s.serveGitHubFollowups(scheduleCtx) }()
+	defer func() { stopSchedules(); <-followupsDone }()
 	defer func() { stopSchedules(); <-schedulesDone }()
 	server := &http.Server{Handler: s.handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	done := make(chan error, 1)
@@ -349,6 +354,9 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 	leases := s.liveLeases()
 	for _, task := range s.tasks {
 		job := task.state.Job
+		if followupEligible(task) {
+			job.GitHubSyncError = s.githubSyncErrors[job.ID]
+		}
 		job.Runs = append([]Run(nil), job.Runs...)
 		for i := range job.Runs {
 			if lease, ok := leases[job.Runs[i].ID]; ok && job.Runs[i].State == "running" {
@@ -383,7 +391,7 @@ func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	writeJSON(w, 200, catalogResponse{Workflows: []string{"factory"}, Commands: []string{}, Repositories: s.repositoryNames()})
 }
-func (s *GitHubFactoryServer) command(ctx context.Context, repo, role string) (config.ResolvedCommand, error) {
+func (s *GitHubFactoryServer) command(ctx context.Context, role string) (config.ResolvedCommand, error) {
 	definition, err := config.LoadDefinitions(s.definitionPath)
 	if err != nil {
 		return config.ResolvedCommand{}, err
@@ -402,7 +410,7 @@ func (s *GitHubFactoryServer) command(ctx context.Context, repo, role string) (c
 			}
 		}
 	}
-	prompt, hash, localErr := s.local.prompt(ctx, repo, role)
+	prompt, hash, localErr := s.local.prompt(ctx, "", role)
 	if localErr == nil {
 		command.Prompt = prompt
 		command.Hash = hash
@@ -426,14 +434,9 @@ func (s *GitHubFactoryServer) command(ctx context.Context, repo, role string) (c
 func (s *GitHubFactoryServer) definitions(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	repo, err := s.definitionRepository(r.URL.Query().Get("repository"))
-	if err != nil {
-		writeError(w, 400, err)
-		return
-	}
 	commands := []commandDefinitionResponse{}
 	for _, role := range []string{"triage", "spec", "implement", "review"} {
-		command, err := s.command(r.Context(), repo, role)
+		command, err := s.command(r.Context(), role)
 		if err != nil {
 			writeError(w, 502, err)
 			return
@@ -446,20 +449,6 @@ func (s *GitHubFactoryServer) definitions(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, 200, definitionsResponse{Commands: commands, Workflows: map[string][]workflowStepDefinition{"factory": steps}})
 }
-func (s *GitHubFactoryServer) definitionRepository(alias string) (string, error) {
-	if alias != "" {
-		repo, ok := s.repositories[alias]
-		if !ok {
-			return "", errors.New("repository is not configured")
-		}
-		return repo, nil
-	}
-	names := s.repositoryNames()
-	if len(names) == 0 {
-		return "", nil
-	}
-	return s.repositories[names[0]], nil
-}
 func (s *GitHubFactoryServer) savePrompt(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -469,7 +458,6 @@ func (s *GitHubFactoryServer) savePrompt(w http.ResponseWriter, r *http.Request)
 	var input struct {
 		Prompt       string `json:"prompt"`
 		ExpectedHash string `json:"expected_hash"`
-		Repository   string `json:"repository"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeDecodeError(w, err)
@@ -480,25 +468,20 @@ func (s *GitHubFactoryServer) savePrompt(w http.ResponseWriter, r *http.Request)
 		writeError(w, 404, errors.New("unknown specialist"))
 		return
 	}
-	repo, err := s.definitionRepository(input.Repository)
-	if err != nil {
-		writeError(w, 400, err)
-		return
-	}
 	if len(input.Prompt) > 256<<10 || strings.TrimSpace(input.Prompt) == "" {
 		writeError(w, 400, errors.New("prompt must contain text and be at most 256 KiB"))
 		return
 	}
-	if err = config.ValidatePromptParameters(role, input.Prompt); err != nil {
+	if err := config.ValidatePromptParameters(role, input.Prompt); err != nil {
 		writeError(w, 400, err)
 		return
 	}
-	base, err := s.command(r.Context(), repo, role)
+	base, err := s.command(r.Context(), role)
 	if err != nil {
 		writeError(w, 400, err)
 		return
 	}
-	hash, err := s.local.savePrompt(r.Context(), repo, role, input.Prompt, input.ExpectedHash, base.Hash)
+	hash, err := s.local.savePrompt(r.Context(), "", role, input.Prompt, input.ExpectedHash, base.Hash)
 	if err != nil {
 		writeError(w, 409, err)
 		return
@@ -1207,9 +1190,9 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, role string) (config.ResolvedCommand, error) {
-	command, err := s.command(ctx, task.repo, role)
+	command, err := s.command(ctx, role)
 	if err == nil && (task.state.Job.Recipe == "answer" || role == "triage") {
-		review, reviewErr := s.command(ctx, task.repo, "review")
+		review, reviewErr := s.command(ctx, "review")
 		if reviewErr != nil {
 			return command, reviewErr
 		}

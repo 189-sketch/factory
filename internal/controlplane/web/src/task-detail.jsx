@@ -318,6 +318,7 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
         <div className="factory-task-meta"><span>{job.repository}</span>{job.task?.source_url && <><span>·</span><a href={job.task.source_url} target="_blank" rel="noreferrer">Open issue</a></>}</div>
       </header>
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+      {job.github_sync_error && <p role="status" className="text-sm text-warning">{job.github_sync_error}</p>}
       <ol className="factory-progress" aria-label="Task progress">
         {stages.map(stage => <li key={stage.name} aria-current={stage.current ? "step" : undefined} className={cn(stage.current && "is-current", stage.complete && "is-complete")}>
           {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(stage.name)}{stage.skipped && <span>Skipped</span>}

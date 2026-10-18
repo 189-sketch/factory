@@ -31,8 +31,16 @@ restricted environment, use a separate writable provider runtime or start
 Machinist from your normal terminal.
 
 Settings lets you return to setup. Changed repository/agent selections invalidate
-the earlier check. Agent prompt edits stay in Machinist and never become issue
+the earlier check. Agents are shared configurations, independent of repositories. Edit their Markdown
+prompts in **Agents**; choose a project when starting a job. Saves apply to future
+attempts across all projects. Running attempts retain their prompt snapshots, and
+stale saves are rejected. Prompt edits stay in Machinist and never become issue
 comments or commits just because you pressed Save.
+
+On upgrade, each shared prompt is seeded once from the first repository with a
+saved prompt, ordered by repository name. Other legacy prompt rows are retained
+in the private database for recovery; they no longer override shared agents.
+Existing shared edits always take precedence on subsequent restarts.
 
 After setup, add more repositories from **Projects → Add project**. Grant access
 through **Manage GitHub access** and refresh if another repository is missing.
@@ -118,8 +126,8 @@ historical. Re-adopt an issue explicitly to begin a new local task. This avoids
 silently resuming work while migrating away from comment-based persistence.
 
 Saved [automations](automations.md) run a single agent on demand or on a schedule,
-from the repository root. Automatic CI/review follow-ups, merge polling, webhook
-relays and live log streaming remain outside this slice.
+from the repository root. GitHub follow-ups run automatically for delivered Machinist PRs. Webhook relays
+and live log streaming are not required for this polling-based integration.
 
 ### Issue labels
 
@@ -136,3 +144,29 @@ Every requested file, including reports, documents, and HTML pages, is committed
 Dashboard is the default page and the first navigation item. The older `#/analytics` link opens it too. Current workload spans all dates: active jobs, PRs ready for review, and uncleared approvals, blockers or failures. Counts open matching run filters; entering Runs from another page clears an unrelated search.
 
 The 7/30-day activity chart counts jobs by creation day in your browser's timezone. Outcomes, recent jobs, timed execution and reported tokens use that same creation window. Current runner availability and schedules stay independent of the time window. Missing token usage is shown as unreported, without inferred costs.
+
+### GitHub follow-ups
+
+The control plane checks up to ten recorded PRs per minute, rotating through larger
+sets. It uses the connected GitHub App and must remain running. Network reads
+happen outside the task lock; a changed task is rechecked before any transition.
+Only tasks awaiting merge qualify. Private holds, cancelled work, blocked work,
+and active attempts are excluded.
+
+Completed failed checks and failed commit statuses on the recorded head return
+work to Build. Pending, skipped and cancelled checks do not start a repair.
+Change-request reviews on that head and unresolved, current inline feedback from
+repository owners, members and collaborators also return work to Build. General
+PR discussion, anonymous feedback, resolved/outdated threads, and implementer
+replies do not dispatch jobs. Feedback is treated as untrusted evidence. Each
+consumed signal is saved in the task journal, so restarts and repeated polls do
+not repeat a repair. The normal limit of three repair rounds still applies.
+Standard jobs get another independent Review after a repair; single-agent jobs
+retain their single-agent policy. Repairs reuse the assigned branch and PR.
+
+A confirmed merge of the recorded head completes the task. A changed head or a PR
+closed without merging blocks it for human inspection. Incomplete GitHub evidence
+and transient API failures preserve the current task and retry automatically; a
+notice appears on its run page. This poller never merges, posts review comments,
+resolves threads or publishes internal state. Repository-maintenance auto-merge
+remains governed by its separate conservative policy.
