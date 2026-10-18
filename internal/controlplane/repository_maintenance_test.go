@@ -38,7 +38,7 @@ func TestMaintenanceResponseExampleMatchesRunnerContract(t *testing.T) {
 func validMaintenanceReview(t *testing.T) maintenanceReviewState {
 	t.Helper()
 	var state maintenanceReviewState
-	raw := `{"state":"OPEN","headRefOid":"` + maintenanceHead + `","baseRefOid":"` + maintenanceBase + `","mergeStateStatus":"CLEAN","reviews":{"nodes":[]},"reviewThreads":{"nodes":[]},"commits":{"nodes":[{"commit":{"oid":"` + maintenanceHead + `","statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}`
+	raw := `{"state":"OPEN","headRefOid":"` + maintenanceHead + `","baseRefOid":"` + maintenanceBase + `","mergeStateStatus":"CLEAN","reviews":{"nodes":[]},"reviewThreads":{"nodes":[]},"commits":{"nodes":[{"commit":{"oid":"` + maintenanceHead + `","statusCheckRollup":{"state":"SUCCESS","contexts":{"nodes":[{"__typename":"CheckRun","name":"check","checkSuite":{"app":{"databaseId":1}},"status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}`
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestMaintenanceDocumentationPolicy(t *testing.T) {
 	}
 }
 func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
-	for _, scenario := range []string{"valid", "code change", "too large", "too many files", "mode change", "stacked", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
+	for _, scenario := range []string{"valid", "authorization revoked", "unprotected check", "wrong check app", "code change", "too large", "too many files", "mode change", "stacked", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
 		t.Run(scenario, func(t *testing.T) {
 			reads, writes := 0, 0
 			g := &ghFactoryClient{api: func(_ context.Context, method, p string, body []byte) ([]byte, error) {
@@ -149,6 +149,9 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 				case p == "repos/owner/repo":
 					return []byte(`{"default_branch":"main"}`), nil
 				case strings.Contains(p, "/rules/branches/"):
+					if scenario == "wrong check app" {
+						return []byte(`[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"check","integration_id":2}]}},{"type":"pull_request","parameters":{"required_review_thread_resolution":true}}]`), nil
+					}
 					if scenario == "no rules" {
 						return []byte(`[]`), nil
 					}
@@ -179,6 +182,11 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 						return nil, errors.New("unavailable")
 					}
 					state := validMaintenanceReview(t)
+					if scenario == "unprotected check" {
+						check := state.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes[0]
+						check.Name = "optional"
+						state.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes = append(state.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes, check)
+					}
 					if scenario == "stacked" {
 						state.Stack = &struct{ ID string }{"stack-1"}
 					}
@@ -194,7 +202,12 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 					return nil, nil
 				}
 			}}
-			pr, err := g.MergeMaintenancePR(context.Background(), "owner/repo", 2, maintenanceHead)
+			pr, err := g.MergeMaintenancePR(context.Background(), "owner/repo", 2, maintenanceHead, func() error {
+				if scenario == "authorization revoked" {
+					return errors.New("held during verification")
+				}
+				return nil
+			})
 			if scenario == "pending merge" {
 				if err != nil || pr.Merged || writes != 1 {
 					t.Fatalf("pending merge mishandled: %v %v", pr, err)
@@ -250,7 +263,10 @@ func (f *maintenanceFactoryFake) AddMaintenanceLabels(_ context.Context, _ strin
 	f.labels = append(f.labels, labels)
 	return f.labelError
 }
-func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string) (maintenancePull, error) {
+func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string, authorize func() error) (maintenancePull, error) {
+	if err := authorize(); err != nil {
+		return maintenancePull{}, err
+	}
 	f.merges++
 	if f.mergeError != nil {
 		return maintenancePull{}, f.mergeError
@@ -366,7 +382,7 @@ func TestMaintenanceFullBatchFitsRenderedReportBudget(t *testing.T) {
 		report.Items[i].Assessment = strings.Repeat("<", 245)
 	}
 	raw, _ = json.Marshal(report)
-	_, err = s.completeMaintenance(t.Context(), &githubTask{issue: GitHubIssue{Maintenance: client.snapshot}}, string(raw))
+	_, err = s.completeMaintenance(t.Context(), &githubTask{issue: GitHubIssue{Maintenance: client.snapshot}, state: &GitHubFactoryState{}}, string(raw))
 	if err == nil || len(client.labels) != 0 {
 		t.Fatal("escaped output exceeded its budget or actions preceded validation")
 	}
@@ -386,7 +402,12 @@ func TestMaintenanceMergeErrorFitsReservedJSONBudget(t *testing.T) {
 	client.labelError = errors.New("label update unavailable")
 	report := maintenanceReport{Summary: "One eligible PR", Items: []maintenanceSuggestion{{Number: 2, Kind: "pr", Assessment: "Small documentation correction", Merge: true}}}
 	raw, _ := json.Marshal(report)
-	output, err := s.completeMaintenance(t.Context(), &githubTask{issue: GitHubIssue{Maintenance: client.snapshot}}, string(raw))
+	a := maintenanceDefinition(t, s)
+	id := automationRun(t, s, a, "merge-error", 201)
+	run := factoryPoll(t, s)
+	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: string(raw)})
+	output := factoryJob(t, s, id).Runs[0].Report
+	var err error
 	if err != nil || client.merges != 1 || factoryJob(t, s, source).State != "awaiting_merge" {
 		t.Fatal("merge failure was not safely reported", err)
 	}

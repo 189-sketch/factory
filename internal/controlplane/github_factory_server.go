@@ -45,10 +45,11 @@ type GitHubFactoryServer struct {
 	handler        http.Handler
 }
 type githubTask struct {
-	issue   GitHubIssue
-	state   *GitHubFactoryState
-	repo    string
-	receipt *factoryReceipt
+	issue               GitHubIssue
+	state               *GitHubFactoryState
+	repo                string
+	receipt             *factoryReceipt
+	maintenanceApplying bool
 }
 type githubLease struct {
 	phase    string
@@ -201,7 +202,13 @@ func (s *GitHubFactoryServer) refresh(ctx context.Context, force bool) error {
 		if err != nil {
 			return err
 		}
-		task := &githubTask{issue: record.issue, state: state, repo: record.repository}
+		// Keep task identity stable across refreshes while a maintenance action
+		// temporarily releases mu. Controls must update the same in-flight task.
+		task := s.tasks[state.Job.ID]
+		if task == nil {
+			task = &githubTask{}
+		}
+		task.issue, task.state, task.repo = record.issue, state, record.repository
 		if state.LastEventID == 0 {
 			if err = s.event(ctx, task, GitHubFactoryEvent{Kind: "created", Role: "triage"}); err != nil {
 				return err
@@ -1164,7 +1171,18 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, errors.New("maintenance must finish as a read-only triage answer"))
 			return
 		}
+		if task.maintenanceApplying {
+			writeError(w, 409, errors.New("maintenance completion is already being applied"))
+			return
+		}
+		task.maintenanceApplying = true
+		defer func() { task.maintenanceApplying = false }()
+		version := task.state.LastEventID
 		report, applyErr := s.completeMaintenance(r.Context(), task, step.Factory.Report)
+		if task.state.LastEventID != version || task.state.Job.PublicationHold != "" || s.liveLease(id) == nil {
+			writeError(w, 409, errors.New("maintenance task changed while applying actions"))
+			return
+		}
 		if applyErr != nil {
 			step.Outcome = "blocked"
 			report = "Maintenance could not proceed: " + applyErr.Error()

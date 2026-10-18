@@ -47,6 +47,24 @@ func (f *blockingMaintenance) MaintenanceItem(ctx context.Context, repo string, 
 	}
 	return f.maintenanceFactoryFake.MaintenanceItem(ctx, repo, item)
 }
+func (f *blockingMaintenance) AddMaintenanceLabels(ctx context.Context, repo string, number int, labels []string) error {
+	if f.phase == "actions" {
+		if err := f.wait(ctx); err != nil {
+			return err
+		}
+	}
+	return f.maintenanceFactoryFake.AddMaintenanceLabels(ctx, repo, number, labels)
+}
+
+func (f *blockingMaintenance) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() error) (maintenancePull, error) {
+	if f.phase == "merge" {
+		if err := f.wait(ctx); err != nil {
+			return maintenancePull{}, err
+		}
+	}
+	return f.maintenanceFactoryFake.MergeMaintenancePR(ctx, repo, number, head, authorize)
+}
+
 func maintenanceDefinition(t *testing.T, s *GitHubFactoryServer) factoryAutomation {
 	t.Helper()
 	var a factoryAutomation
@@ -165,5 +183,62 @@ func TestMaintenanceStopConfirmationDoesNotCoverNewCancelledAttempt(t *testing.T
 	close(f.release)
 	if response := <-request; response.Code != 409 || !strings.Contains(response.Body.String(), "confirm the process stopped again") {
 		t.Fatal("old stop confirmation reused", response.Code, response.Body)
+	}
+}
+
+func TestMaintenanceCompletionKeepsControlsResponsiveAndRechecksCancellation(t *testing.T) {
+	for _, phase := range []string{"actions", "merge"} {
+		t.Run(phase, func(t *testing.T) {
+			f := &blockingMaintenance{maintenanceFactoryFake: maintenanceFixture(), phase: phase, entered: make(chan struct{}, 2), release: make(chan struct{})}
+			s := githubFactoryTestServer(t, f)
+			source := factorySubmit(t, s)
+			factoryFinish(t, s, factoryPoll(t, s), protocol.FactoryResult{})
+			metadata := protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: maintenanceHead, Branch: "codex/source"}
+			factoryFinish(t, s, factoryPoll(t, s), metadata)
+			metadata.Verdict = "accepted"
+			factoryFinish(t, s, factoryPoll(t, s), metadata)
+			if _, reason := s.maintenanceTask("owner/repo", 2, maintenanceHead); reason != "" {
+				t.Fatal(reason)
+			}
+			a := maintenanceDefinition(t, s)
+			id := automationRun(t, s, a, "actions", 201)
+			run := factoryPoll(t, s)
+			report := `{"summary":"Triage","items":[{"kind":"pr","number":2,"assessment":"Needs review","labels":["bug"],"merge":true}]}`
+			completion := factoryCompletion(run, protocol.FactoryResult{Resolved: true, Report: report})
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				raw, _ := json.Marshal(completion)
+				r := httptest.NewRequest("POST", "/api/v1/runs/"+run.ID+"/complete", strings.NewReader(string(raw)))
+				r.Header.Set("Authorization", "Bearer secret")
+				w := httptest.NewRecorder()
+				s.Handler().ServeHTTP(w, r)
+				done <- w
+			}()
+			waitMaintenanceRead(t, f)
+			s.mu.Lock()
+			s.loaded = time.Time{} // Force status to rebuild state during the remote action.
+			s.mu.Unlock()
+			controls := make(chan struct{})
+			go func() {
+				factoryHTTP(t, s, "GET", "/api/v1/status", nil, 200)
+				factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 409)
+				factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/cancel", map[string]string{"run_id": run.ID}, 200)
+				close(controls)
+			}()
+			select {
+			case <-controls:
+			case <-time.After(3 * time.Second):
+				close(f.release)
+				t.Fatal("remote maintenance action blocked status, duplicate completion or cancellation")
+			}
+			close(f.release)
+			if response := <-done; response.Code != 409 {
+				t.Fatal(response.Code, response.Body.String())
+			}
+			if job := factoryJob(t, s, id); job.State != "cancelled" || factoryJob(t, s, source).State != "awaiting_merge" || f.merges != 0 || len(f.labels) != 1 {
+				t.Fatal("stale completion or duplicate external actions", job.State, f.merges, len(f.labels))
+			}
+
+		})
 	}
 }

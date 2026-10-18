@@ -95,7 +95,7 @@ type maintenanceGitHubClient interface {
 	MaintenanceSnapshot(context.Context, string) (*maintenanceSnapshot, error)
 	MaintenanceItem(context.Context, string, maintenanceItem) (maintenanceItem, error)
 	AddMaintenanceLabels(context.Context, string, int, []string) error
-	MergeMaintenancePR(context.Context, string, int, string) (maintenancePull, error)
+	MergeMaintenancePR(context.Context, string, int, string, func() error) (maintenancePull, error)
 }
 
 func maintenanceKey(kind string, number int) string { return fmt.Sprintf("%s:%d", kind, number) }
@@ -201,7 +201,23 @@ func maintenancePlainText(value string) string {
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "{", "\\{", "}", "\\}", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "!", "\\!", "-", "\\-", "+", "\\+", ".", "\\.", "=", "\\=", "|", "\\|").Replace(value)
 }
 
+// Caller holds mu. Each remote request runs outside it, then revalidates the
+// maintenance task before another action or a completion can be recorded.
+func (s *GitHubFactoryServer) maintenanceRemote(task *githubTask, request func() error) error {
+	version := task.state.LastEventID
+	err := func() error {
+		s.mu.Unlock()
+		defer s.mu.Lock()
+		return request()
+	}()
+	if task.state.LastEventID != version || task.state.Job.PublicationHold != "" {
+		return errors.New("maintenance task changed while applying actions")
+	}
+	return err
+}
+
 func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *githubTask, raw string) (string, error) {
+	version := task.state.LastEventID
 	snapshot := task.issue.Maintenance
 	report, err := parseMaintenanceReport(raw, snapshot)
 	if err != nil {
@@ -245,7 +261,15 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 	for i, suggestion := range report.Items {
 		original := originals[maintenanceKey(suggestion.Kind, suggestion.Number)]
 		output.WriteString(lines[i])
-		current, readErr := client.MaintenanceItem(ctx, snapshot.Repository, original)
+		var current maintenanceItem
+		readErr := s.maintenanceRemote(task, func() error {
+			var err error
+			current, err = client.MaintenanceItem(ctx, snapshot.Repository, original)
+			return err
+		})
+		if task.state.LastEventID != version || task.state.Job.PublicationHold != "" || task.state.Job.State != "running" {
+			return "", errors.New("maintenance task is no longer running")
+		}
 		if readErr != nil {
 			fmt.Fprintf(&output, " **No action:** GitHub refresh failed.\n")
 			continue
@@ -263,8 +287,13 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 			output.WriteString(" **No action:** item changed since triage.\n")
 			continue
 		}
-		if err := client.AddMaintenanceLabels(ctx, snapshot.Repository, suggestion.Number, suggestion.Labels); err != nil {
+		if err := s.maintenanceRemote(task, func() error {
+			return client.AddMaintenanceLabels(ctx, snapshot.Repository, suggestion.Number, suggestion.Labels)
+		}); err != nil {
 			output.WriteString(" **No labels applied:** GitHub update failed.")
+		}
+		if task.state.LastEventID != version || task.state.Job.PublicationHold != "" || task.state.Job.State != "running" {
+			return "", errors.New("maintenance task is no longer running")
 		}
 		if suggestion.Merge {
 			if !original.MergeEvidenceComplete {
@@ -275,13 +304,31 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 			if reason != "" {
 				fmt.Fprintf(&output, " **Needs review:** %s.", reason)
 			} else {
-				pr, mergeErr := client.MergeMaintenancePR(ctx, snapshot.Repository, suggestion.Number, original.HeadSHA)
+				version := candidate.state.LastEventID
+				maintenanceVersion := task.state.LastEventID
+				var pr maintenancePull
+				mergeErr := s.maintenanceRemote(task, func() error {
+					var err error
+					pr, err = client.MergeMaintenancePR(ctx, snapshot.Repository, suggestion.Number, original.HeadSHA, func() error {
+						s.mu.Lock()
+						defer s.mu.Unlock()
+						latest, reason := s.maintenanceTask(snapshot.Repository, suggestion.Number, original.HeadSHA)
+						if task.state.LastEventID != maintenanceVersion || task.state.Job.PublicationHold != "" || task.state.Job.State != "running" || latest != candidate || reason != "" || candidate.state.LastEventID != version {
+							return errors.New("local merge authorization changed during inspection")
+						}
+						return nil
+					})
+					return err
+				})
 				if mergeErr != nil {
 					fmt.Fprintf(&output, " **Not merged:** %.64s. See GitHub.", mergeErr.Error())
 				} else if !pr.Merged {
 					output.WriteString(" **Merge submitted:** waiting for GitHub; the next maintenance run reconciles completion.")
 				} else {
-					if eventErr := s.finishMaintenanceMerge(ctx, candidate); eventErr != nil {
+					latest, reason := s.maintenanceTask(snapshot.Repository, suggestion.Number, original.HeadSHA)
+					if reason != "" || latest != candidate || candidate.state.LastEventID != version {
+						output.WriteString(" **Merged; local task changed and needs reconciliation.**")
+					} else if eventErr := s.finishMaintenanceMerge(ctx, candidate); eventErr != nil {
 						output.WriteString(" **Merged; local completion needs reconciliation.**")
 					} else {
 						output.WriteString(" **Merged after all policy checks passed.**")

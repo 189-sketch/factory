@@ -14,7 +14,7 @@ var maintenanceComparePath = regexp.MustCompile(`^/repos/[^/]+/[^/]+/compare/[0-
 
 // This read-only query is the only GraphQL operation accepted by the App
 // connection. Its repository variables are checked against the installation.
-const maintenancePRQuery = `query MachinistMaintenance($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){stack{id} state isDraft headRefOid baseRefOid mergeStateStatus reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}} reviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}} commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{status conclusion} ... on StatusContext{state}} pageInfo{hasNextPage}}}}}}}}}`
+const maintenancePRQuery = `query MachinistMaintenance($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){stack{id} state isDraft headRefOid baseRefOid mergeStateStatus reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}} reviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}} commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{name checkSuite{app{databaseId}} status conclusion} ... on StatusContext{context state}} pageInfo{hasNextPage}}}}}}}}}`
 
 type maintenanceReviewState struct {
 	Stack                                                    *struct{ ID string }
@@ -42,6 +42,8 @@ type maintenanceReviewState struct {
 						Nodes []struct {
 							Type                      string `json:"__typename"`
 							Status, Conclusion, State string
+							Name, Context             string
+							CheckSuite                struct{ App *struct{ DatabaseID int64 } }
 						}
 						PageInfo struct{ HasNextPage bool }
 					}
@@ -284,7 +286,7 @@ func (g *ghFactoryClient) maintenanceBlob(ctx context.Context, root, revision, n
 	}
 	return errors.New("invalid document path")
 }
-func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, number int, head string) (maintenancePull, error) {
+func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() error) (maintenancePull, error) {
 	root, err := githubRepositoryPath(repo)
 	if err != nil {
 		return maintenancePull{}, err
@@ -324,18 +326,25 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	var rules []struct {
 		Type       string
 		Parameters struct {
-			RequiredReviewThreadResolution   bool              `json:"required_review_thread_resolution"`
-			StrictRequiredStatusChecksPolicy bool              `json:"strict_required_status_checks_policy"`
-			RequiredStatusChecks             []json.RawMessage `json:"required_status_checks"`
+			RequiredReviewThreadResolution   bool `json:"required_review_thread_resolution"`
+			StrictRequiredStatusChecksPolicy bool `json:"strict_required_status_checks_policy"`
+			RequiredStatusChecks             []struct {
+				Context       string
+				IntegrationID *int64 `json:"integration_id"`
+			} `json:"required_status_checks"`
 		}
 	}
 	if err = json.Unmarshal(raw, &rules); err != nil {
 		return pr, err
 	}
 	checksRequired, conversationsRequired := false, false
+	protected := map[string][]*int64{}
 	for _, rule := range rules {
 		if rule.Type == "required_status_checks" && rule.Parameters.StrictRequiredStatusChecksPolicy && len(rule.Parameters.RequiredStatusChecks) > 0 {
 			checksRequired = true
+			for _, check := range rule.Parameters.RequiredStatusChecks {
+				protected[check.Context] = append(protected[check.Context], check.IntegrationID)
+			}
 		}
 		if rule.Type == "pull_request" && rule.Parameters.RequiredReviewThreadResolution {
 			conversationsRequired = true
@@ -386,6 +395,21 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	if err = maintenanceChecks(*review, pr.Head.SHA, pr.Base.SHA); err != nil {
 		return pr, err
 	}
+	for _, check := range review.Commits.Nodes[0].Commit.StatusCheckRollup.Contexts.Nodes {
+		name := check.Name
+		if check.Type == "StatusContext" {
+			name = check.Context
+		}
+		matched := false
+		for _, integration := range protected[name] {
+			if integration == nil || *integration == -1 || (check.CheckSuite.App != nil && check.CheckSuite.App.DatabaseID == *integration) {
+				matched = true
+			}
+		}
+		if name == "" || !matched {
+			return pr, errors.New("every observed check must be enforced by strict branch rules")
+		}
+	}
 	// Re-read after inspection. SHA guard on the actual merge closes the head race;
 	// CLEAN on this read catches a moving base or newly blocked GitHub requirement.
 	fresh, err := g.maintenancePull(ctx, root, number)
@@ -394,6 +418,11 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	}
 	if fresh.Head.SHA != head || fresh.Base.SHA != pr.Base.SHA || fresh.Base.Ref != pr.Base.Ref || fresh.Head.Repo.FullName != repo || fresh.Base.Repo.FullName != repo || fresh.State != "open" || fresh.Draft || fresh.MergeableState != "clean" {
 		return pr, errors.New("PR changed or became blocked during verification")
+	}
+	// Recheck local cancellation, privacy and review authorization after all
+	// remote inspection, immediately before submitting the guarded merge.
+	if err = authorize(); err != nil {
+		return pr, err
 	}
 	body, _ := json.Marshal(map[string]any{"sha": head, "merge_method": "squash", "merge_action": "default", "bypass_rules": false})
 	raw, err = g.api(ctx, "PUT", fmt.Sprintf("%s/pulls/%d/merge-async", root, number), body)
