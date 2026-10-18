@@ -378,6 +378,9 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 	issue := GitHubIssue{Title: a.Name, Body: a.Prompt, HTMLURL: "local:automation_" + localID, State: "open", CreatedAt: now, UpdatedAt: now}
 	recipe := "single"
 	if a.Kind == "repository-maintenance" {
+		// Managed instructions are selected at admission, including for definitions
+		// saved before a prompt correction. Each job still keeps its own snapshot.
+		issue.Body = strings.TrimSpace(maintenanceInstructions)
 		client, ok := s.client.(maintenanceGitHubClient)
 		if !ok {
 			return "", errors.New("repository maintenance requires the GitHub App integration")

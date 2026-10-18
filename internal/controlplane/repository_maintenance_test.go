@@ -16,6 +16,25 @@ import (
 const maintenanceHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const maintenanceBase = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
+func TestMaintenanceResponseExampleMatchesRunnerContract(t *testing.T) {
+	_, example, ok := strings.Cut(maintenanceInstructions, "Complete response example:\n")
+	if !ok {
+		t.Fatal("maintenance response example missing")
+	}
+	example = strings.SplitN(example, "\n", 2)[0]
+	step, err := protocol.ParseStepResult([]byte(example))
+	if err != nil {
+		t.Fatalf("maintenance instructions produce an invalid runner response: %v", err)
+	}
+	if step.Factory == nil || !step.Factory.Resolved || step.Factory.Role != "triage" {
+		t.Fatal("example must be a completed read-only answer")
+	}
+	snapshot := &maintenanceSnapshot{Items: []maintenanceItem{{Number: 12, Kind: "issue"}}}
+	if _, err := parseMaintenanceReport(step.Factory.Report, snapshot); err != nil {
+		t.Fatalf("serialized report in runner response is invalid: %v", err)
+	}
+}
+
 func validMaintenanceReview(t *testing.T) maintenanceReviewState {
 	t.Helper()
 	var state maintenanceReviewState
@@ -248,6 +267,12 @@ func TestMaintenanceAutomationReadOnlyAdmissionCompletionAndRecovery(t *testing.
 	if a.Prompt != strings.TrimSpace(maintenanceInstructions) {
 		t.Fatal("maintenance contract was overridden")
 	}
+	// Existing definitions must use the corrected managed contract without an
+	// operator reopening and saving every automation after an upgrade.
+	a.Prompt = "Legacy contract: put a JSON object directly in factory.report"
+	if err := s.local.saveAutomation(t.Context(), a); err != nil {
+		t.Fatal(err)
+	}
 	id := automationRun(t, s, a, "once", 201)
 	s = restartFactoryTestServer(t, s, client)
 	if again := automationRun(t, s, a, "once", 201); again != id {
@@ -256,6 +281,9 @@ func TestMaintenanceAutomationReadOnlyAdmissionCompletionAndRecovery(t *testing.
 	run := factoryPoll(t, s)
 	if run.Factory.Recipe != "answer" || run.Factory.Role != "triage" || !strings.Contains(run.Factory.Context, "untrusted data") || !factoryJob(t, s, id).Maintenance {
 		t.Fatal("maintenance is not read-only answer work")
+	}
+	if !strings.Contains(run.Factory.Context, "factory.report MUST be a JSON string") || strings.Contains(run.Factory.Context, "Legacy contract") {
+		t.Fatal("admission used a stale saved maintenance prompt")
 	}
 	report := `{"summary":"One small docs correction","items":[{"kind":"pr","number":2,"assessment":"Documentation correction; no behavior change","labels":[],"merge":true}]}`
 	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: report})

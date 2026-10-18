@@ -23,8 +23,9 @@ Suggest only exact existing, non-Machinist labels. Preserve human decisions and 
 Only recommend merge for a small documentation correction with no security, permissions, deployment, dependency, migration, or public-interface implications. If uncertain, recommend human review.
 
 ## Output
-Return the normal Answer triage JSON with resolved=true. Put a JSON object (not a Markdown code block) in factory.report:
-{"summary":"A concise overview","items":[{"number":12,"kind":"issue","labels":["bug"],"assessment":"Evidence, missing information or duplicate link","merge":false}]}
+Return the normal Answer triage JSON with resolved=true. factory.report MUST be a JSON string containing the serialized report, never an object or a Markdown code block. Escape its inner quotation marks in the outer response JSON.
+Complete response example:
+{"outcome":"complete","summary":"Triage finished.","factory":{"version":1,"role":"triage","resolved":true,"report":"{\"summary\":\"A concise overview\",\"items\":[{\"number\":12,\"kind\":\"issue\",\"labels\":[\"bug\"],\"assessment\":\"Evidence, missing information or duplicate link\",\"merge\":false}]}"}}
 Use kind "issue" or "pr" and only numbers present in the snapshot. At most 20 items; assessment at most 300 characters; summary at most 1000 characters. Include one entry for every snapshot item. merge may be true only for a PR. The foreman independently checks provenance, current revision, review, checks, conversations and documentation-only scope. A recommendation never grants authority.
 `
 
