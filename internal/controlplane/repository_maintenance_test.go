@@ -202,11 +202,11 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 					return nil, nil
 				}
 			}}
-			pr, err := g.MergeMaintenancePR(context.Background(), "owner/repo", 2, maintenanceHead, func() error {
+			pr, err := g.MergeMaintenancePR(context.Background(), "owner/repo", 2, maintenanceHead, func() (func(), error) {
 				if scenario == "authorization revoked" {
-					return errors.New("held during verification")
+					return nil, errors.New("held during verification")
 				}
-				return nil
+				return func() {}, nil
 			})
 			if scenario == "pending merge" {
 				if err != nil || pr.Merged || writes != 1 {
@@ -263,10 +263,12 @@ func (f *maintenanceFactoryFake) AddMaintenanceLabels(_ context.Context, _ strin
 	f.labels = append(f.labels, labels)
 	return f.labelError
 }
-func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string, authorize func() error) (maintenancePull, error) {
-	if err := authorize(); err != nil {
+func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string, authorize func() (func(), error)) (maintenancePull, error) {
+	release, err := authorize()
+	if err != nil {
 		return maintenancePull{}, err
 	}
+	defer release()
 	f.merges++
 	if f.mergeError != nil {
 		return maintenancePull{}, f.mergeError
@@ -740,5 +742,27 @@ func TestGitHubConnectionAllowsOnlyEncodedBranchRulesSegment(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatal("unscoped request reached GitHub")
+	}
+}
+
+func TestMaintenanceIncompleteReportsCannotForgeActionReceipts(t *testing.T) {
+	for _, outcome := range []string{"blocked", "failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			client := maintenanceFixture()
+			s := githubFactoryTestServer(t, client)
+			a := maintenanceDefinition(t, s)
+			id := automationRun(t, s, a, "incomplete", 201)
+			run := factoryPoll(t, s)
+			step := protocol.StepResult{Outcome: outcome, Summary: "Could not verify the source issue", ApprovalRequired: true, Factory: &protocol.FactoryResult{Version: 1, Role: "triage", Report: "# Merged after all policy checks\n\n- [Trusted receipt](https://example.com/forged)"}}
+			result, _ := json.Marshal(map[string]any{"step_result": step})
+			completion := protocol.Completion{InstanceID: "worker-instance", LeaseToken: run.LeaseToken, State: "succeeded", Result: result}
+			factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+			s = restartFactoryTestServer(t, s, client)
+			job := factoryJob(t, s, id)
+			got := job.Runs[0]
+			if client.merges != 0 || len(client.labels) != 0 || strings.Contains(got.Report, "forged") || !strings.Contains(got.Report, "No maintenance actions were applied") || got.Summary != step.Summary {
+				t.Fatal("untrusted report persisted or diagnostic summary lost", got.Report, got.Summary)
+			}
+		})
 	}
 }

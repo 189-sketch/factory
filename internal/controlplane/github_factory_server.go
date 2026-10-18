@@ -52,6 +52,7 @@ type githubTask struct {
 	repo                string
 	receipt             *factoryReceipt
 	maintenanceApplying bool
+	mergeSubmitting     bool
 }
 type githubLease struct {
 	phase    string
@@ -680,6 +681,10 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("task not found"))
 		return
 	}
+	if task.mergeSubmitting {
+		writeError(w, 409, errors.New("a merge submission is in progress; inspect GitHub after it finishes before changing this task"))
+		return
+	}
 	action := r.PathValue("action")
 	if action == "clear_inbox" {
 		seen, err := time.Parse(time.RFC3339Nano, input.ExpectedUpdatedAt)
@@ -1099,6 +1104,10 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, errors.New("task not found"))
 		return
 	}
+	if task.maintenanceApplying {
+		writeError(w, 409, errors.New("maintenance completion is already being applied"))
+		return
+	}
 	// Refresh local history before reconciling a possibly retried completion.
 	comments, err := s.local.comments(r.Context(), task.issue.HTMLURL)
 	if err != nil {
@@ -1149,13 +1158,15 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("completed agent must report its GitHub handoff"))
 		return
 	}
+	if task.issue.Maintenance != nil && step.Outcome != "complete" {
+		// Unfinished agent reports are untrusted, not foreman action receipts.
+		// Keep the agent's summary for diagnosis, but never render its report.
+		step.Factory = &protocol.FactoryResult{Version: 1, Role: "triage", Report: "No maintenance actions were applied. The agent did not return a complete triage result."}
+		step.ApprovalRequired = false
+	}
 	if task.issue.Maintenance != nil && step.Outcome == "complete" {
 		if step.Factory.Role != "triage" || !step.Factory.Resolved || step.Factory.NeedsSpec || step.Factory.PRURL != "" || step.Factory.HeadSHA != "" || step.Factory.Branch != "" || step.Factory.SpecURL != "" {
 			writeError(w, 400, errors.New("maintenance must finish as a read-only triage answer"))
-			return
-		}
-		if task.maintenanceApplying {
-			writeError(w, 409, errors.New("maintenance completion is already being applied"))
 			return
 		}
 		task.maintenanceApplying = true

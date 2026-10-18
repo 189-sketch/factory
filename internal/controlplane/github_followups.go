@@ -203,7 +203,7 @@ func (pr githubFollowupPR) signals(head string) ([]githubFollowupSignal, error) 
 }
 
 func followupEligible(task *githubTask) bool {
-	return task != nil && task.state.Job.State == "awaiting_merge" && task.state.Job.PublicationHold == "" && task.state.Job.Workflow != nil && task.state.Job.Workflow.Factory != nil && task.state.Job.Workflow.Factory.PRURL != ""
+	return task != nil && !task.mergeSubmitting && task.state.Job.State == "awaiting_merge" && task.state.Job.PublicationHold == "" && task.state.Job.Workflow != nil && task.state.Job.Workflow.Factory != nil && task.state.Job.Workflow.Factory.PRURL != ""
 }
 
 // Network reads happen outside mu. The recorded event version is checked again

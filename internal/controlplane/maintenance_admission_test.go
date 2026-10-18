@@ -56,11 +56,24 @@ func (f *blockingMaintenance) AddMaintenanceLabels(ctx context.Context, repo str
 	return f.maintenanceFactoryFake.AddMaintenanceLabels(ctx, repo, number, labels)
 }
 
-func (f *blockingMaintenance) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() error) (maintenancePull, error) {
-	if f.phase == "merge" {
+func (f *blockingMaintenance) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() (func(), error)) (maintenancePull, error) {
+	if f.phase == "merge" || f.phase == "merge_hold" {
 		if err := f.wait(ctx); err != nil {
 			return maintenancePull{}, err
 		}
+	}
+	if f.phase == "submitted" {
+		return f.maintenanceFactoryFake.MergeMaintenancePR(ctx, repo, number, head, func() (func(), error) {
+			release, err := authorize()
+			if err != nil {
+				return nil, err
+			}
+			if err = f.wait(ctx); err != nil {
+				release()
+				return nil, err
+			}
+			return release, nil
+		})
 	}
 	return f.maintenanceFactoryFake.MergeMaintenancePR(ctx, repo, number, head, authorize)
 }
@@ -187,7 +200,7 @@ func TestMaintenanceStopConfirmationDoesNotCoverNewCancelledAttempt(t *testing.T
 }
 
 func TestMaintenanceCompletionKeepsControlsResponsiveAndRechecksCancellation(t *testing.T) {
-	for _, phase := range []string{"actions", "merge"} {
+	for _, phase := range []string{"actions", "merge", "merge_hold", "submitted"} {
 		t.Run(phase, func(t *testing.T) {
 			f := &blockingMaintenance{maintenanceFactoryFake: maintenanceFixture(), phase: phase, entered: make(chan struct{}, 2), release: make(chan struct{})}
 			s := githubFactoryTestServer(t, f)
@@ -222,7 +235,25 @@ func TestMaintenanceCompletionKeepsControlsResponsiveAndRechecksCancellation(t *
 			go func() {
 				factoryHTTP(t, s, "GET", "/api/v1/status", nil, 200)
 				factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 409)
-				factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/cancel", map[string]string{"run_id": run.ID}, 200)
+				if phase == "submitted" {
+					for _, outcome := range []string{"blocked", "failed", "transport_failed"} {
+						duplicate := completion
+						if outcome == "transport_failed" {
+							duplicate.State = "failed"
+							duplicate.Error = "worker failed"
+						} else {
+							step := protocol.StepResult{Outcome: outcome, Summary: "Late duplicate", Factory: &protocol.FactoryResult{Version: 1, Role: "triage", Report: "untrusted report"}}
+							duplicate.Result, _ = json.Marshal(map[string]any{"step_result": step})
+						}
+						factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", duplicate, 409)
+					}
+					factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/cancel", map[string]string{"run_id": run.ID}, 409)
+					factoryHTTP(t, s, "POST", "/api/v1/jobs/"+source+"/publication_hold", map[string]string{"feedback": "Hold publication"}, 409)
+				} else if phase == "merge_hold" {
+					factoryHTTP(t, s, "POST", "/api/v1/jobs/"+source+"/publication_hold", map[string]string{"feedback": "Keep private"}, 200)
+				} else {
+					factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/cancel", map[string]string{"run_id": run.ID}, 200)
+				}
 				close(controls)
 			}()
 			select {
@@ -232,6 +263,30 @@ func TestMaintenanceCompletionKeepsControlsResponsiveAndRechecksCancellation(t *
 				t.Fatal("remote maintenance action blocked status, duplicate completion or cancellation")
 			}
 			close(f.release)
+			if phase == "submitted" {
+				if response := <-done; response.Code != 204 {
+					t.Fatal(response.Code, response.Body.String())
+				}
+				if factoryJob(t, s, id).State != "succeeded" || factoryJob(t, s, source).State != "succeeded" || f.merges != 1 {
+					t.Fatal("authorized submission did not complete")
+				}
+				s.mu.Lock()
+				guarded := s.tasks[id].mergeSubmitting || s.tasks[source].mergeSubmitting
+				s.mu.Unlock()
+				if guarded {
+					t.Fatal("submission guard leaked")
+				}
+				return
+			}
+			if phase == "merge_hold" {
+				if response := <-done; response.Code != 204 {
+					t.Fatal(response.Code, response.Body.String())
+				}
+				if factoryJob(t, s, source).PublicationHold == "" || f.merges != 0 {
+					t.Fatal("hold before submission bypassed")
+				}
+				return
+			}
 			if response := <-done; response.Code != 409 {
 				t.Fatal(response.Code, response.Body.String())
 			}

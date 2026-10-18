@@ -95,7 +95,7 @@ type maintenanceGitHubClient interface {
 	MaintenanceSnapshot(context.Context, string) (*maintenanceSnapshot, error)
 	MaintenanceItem(context.Context, string, maintenanceItem) (maintenanceItem, error)
 	AddMaintenanceLabels(context.Context, string, int, []string) error
-	MergeMaintenancePR(context.Context, string, int, string, func() error) (maintenancePull, error)
+	MergeMaintenancePR(context.Context, string, int, string, func() (func(), error)) (maintenancePull, error)
 }
 
 func maintenanceKey(kind string, number int) string { return fmt.Sprintf("%s:%d", kind, number) }
@@ -152,6 +152,9 @@ func (s *GitHubFactoryServer) maintenanceTask(repo string, number int, head stri
 	}
 	job := found.state.Job
 	f := job.Workflow.Factory
+	if found.mergeSubmitting {
+		return nil, "a merge submission is already in progress"
+	}
 	if job.PublicationHold != "" {
 		return nil, "publication is held private"
 	}
@@ -309,14 +312,22 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 				var pr maintenancePull
 				mergeErr := s.maintenanceRemote(task, func() error {
 					var err error
-					pr, err = client.MergeMaintenancePR(ctx, snapshot.Repository, suggestion.Number, original.HeadSHA, func() error {
+					pr, err = client.MergeMaintenancePR(ctx, snapshot.Repository, suggestion.Number, original.HeadSHA, func() (func(), error) {
 						s.mu.Lock()
 						defer s.mu.Unlock()
 						latest, reason := s.maintenanceTask(snapshot.Repository, suggestion.Number, original.HeadSHA)
 						if task.state.LastEventID != maintenanceVersion || task.state.Job.PublicationHold != "" || task.state.Job.State != "running" || latest != candidate || reason != "" || candidate.state.LastEventID != version {
-							return errors.New("local merge authorization changed during inspection")
+							return nil, errors.New("local merge authorization changed during inspection")
 						}
-						return nil
+						// Reserve only these tasks through the remote submission. Status
+						// and unrelated work remain responsive; controls cannot claim
+						// to cancel a merge that is already being submitted.
+						task.mergeSubmitting, candidate.mergeSubmitting = true, true
+						return func() {
+							s.mu.Lock()
+							defer s.mu.Unlock()
+							task.mergeSubmitting, candidate.mergeSubmitting = false, false
+						}, nil
 					})
 					return err
 				})
