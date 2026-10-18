@@ -124,7 +124,8 @@ func reviewSignal(c githubFollowupComment, prefix string) githubFollowupSignal {
 	return githubFollowupSignal{id: c.ID + ":" + hex.EncodeToString(sum[:8]), text: fmt.Sprintf("%s by %s: %s\n%s", prefix, c.Author.Login, followupText(c.Body, 1200), c.URL)}
 }
 func (pr githubFollowupPR) signals(head string) ([]githubFollowupSignal, error) {
-	if len(pr.Commits.Nodes) != 1 || pr.Commits.Nodes[0].Commit.OID != head || pr.ReviewThreads.PageInfo.HasNextPage || pr.Reviews.PageInfo.HasPreviousPage {
+	head = strings.ToLower(head)
+	if len(pr.Commits.Nodes) != 1 || !strings.EqualFold(pr.Commits.Nodes[0].Commit.OID, head) || pr.ReviewThreads.PageInfo.HasNextPage || pr.Reviews.PageInfo.HasPreviousPage {
 		return nil, errors.New("GitHub follow-up evidence is incomplete; inspect the PR")
 	}
 	signals := []githubFollowupSignal{}
@@ -154,7 +155,7 @@ func (pr githubFollowupPR) signals(head string) ([]githubFollowupSignal, error) 
 	sort.Strings(reviewers)
 	for _, name := range reviewers {
 		r := latest[name]
-		if r.State == "CHANGES_REQUESTED" && r.Commit != nil && r.Commit.OID == head && strings.TrimSpace(r.Body) != "" && r.ID != "" {
+		if r.State == "CHANGES_REQUESTED" && r.Commit != nil && strings.EqualFold(r.Commit.OID, head) && strings.TrimSpace(r.Body) != "" && r.ID != "" {
 			signals = append(signals, reviewSignal(r, "Changes requested"))
 		}
 	}
@@ -260,7 +261,7 @@ func (s *GitHubFactoryServer) applyGitHubFollowup(ctx context.Context, task *git
 	if pr.URL != progress.PRURL {
 		return errors.New("GitHub PR identity changed")
 	}
-	if pr.HeadRefOID != progress.HeadSHA {
+	if !strings.EqualFold(pr.HeadRefOID, progress.HeadSHA) {
 		event.Kind = "github_blocked"
 		event.Feedback = "The PR head changed outside this task. Inspect the new commit before retrying."
 	} else if pr.State == "MERGED" {

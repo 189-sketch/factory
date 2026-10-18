@@ -35,13 +35,16 @@ func followupFixture(t *testing.T, checks string) githubFollowupPR {
 	}
 	return pr
 }
-func readyFollowupTask(t *testing.T) (*GitHubFactoryServer, *followupFake, string) {
+func readyFollowupTask(t *testing.T, uppercase ...bool) (*GitHubFactoryServer, *followupFake, string) {
 	t.Helper()
 	f := &followupFake{memoryFactoryGitHub: newMemoryFactoryGitHub(), pr: followupFixture(t, `[]`)}
 	s := githubFactoryTestServer(t, f)
 	id := factorySubmit(t, s)
 	factoryFinish(t, s, factoryPoll(t, s), protocol.FactoryResult{})
 	metadata := protocol.FactoryResult{PRURL: f.pr.URL, HeadSHA: f.pr.HeadRefOID, Branch: "codex/task"}
+	if len(uppercase) > 0 && uppercase[0] {
+		metadata.HeadSHA = strings.ToUpper(metadata.HeadSHA)
+	}
 	factoryFinish(t, s, factoryPoll(t, s), metadata)
 	metadata.Verdict = "accepted"
 	factoryFinish(t, s, factoryPoll(t, s), metadata)
@@ -319,5 +322,28 @@ func TestGitHubFollowupSingleAgentKeepsItsPolicy(t *testing.T) {
 	job := factoryJob(t, s, admitted.ID)
 	if job.State != "awaiting_merge" || len(job.Runs) != 2 || factoryPoll(t, s) != nil {
 		t.Fatal("single-agent mode gained an independent review")
+	}
+}
+
+func TestGitHubFollowupsAcceptEquivalentUppercaseObjectIDs(t *testing.T) {
+	for _, scenario := range []string{"CI failure", "review", "merge"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, f, id := readyFollowupTask(t, true)
+			want := "queued"
+			switch scenario {
+			case "CI failure":
+				f.pr = followupFixture(t, `[{"__typename":"CheckRun","id":"case-check","name":"CI","status":"COMPLETED","conclusion":"FAILURE"}]`)
+			case "review":
+				f.pr.Reviews.Nodes = []githubFollowupComment{{ID: "case-review", Body: "Fix the empty input", State: "CHANGES_REQUESTED", AuthorAssociation: "OWNER", Author: &struct{ Login string }{"reviewer"}, Commit: &struct{ OID string }{f.pr.HeadRefOID}}}
+			case "merge":
+				f.pr.State = "MERGED"
+				f.pr.MergeCommit = &struct{ OID string }{strings.Repeat("b", 40)}
+				want = "succeeded"
+			}
+			tickFollowups(t, s)
+			if job := factoryJob(t, s, id); job.State != want {
+				t.Fatal("equivalent object ID blocked follow-up", scenario, job.State)
+			}
+		})
 	}
 }
