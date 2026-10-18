@@ -14,9 +14,10 @@ var maintenanceComparePath = regexp.MustCompile(`^/repos/[^/]+/[^/]+/compare/[0-
 
 // This read-only query is the only GraphQL operation accepted by the App
 // connection. Its repository variables are checked against the installation.
-const maintenancePRQuery = `query MachinistMaintenance($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state isDraft headRefOid baseRefOid mergeStateStatus reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}} reviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}} commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{status conclusion} ... on StatusContext{state}} pageInfo{hasNextPage}}}}}}}}}`
+const maintenancePRQuery = `query MachinistMaintenance($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){stack{id} state isDraft headRefOid baseRefOid mergeStateStatus reviewDecision reviewThreads(first:100){nodes{isResolved} pageInfo{hasNextPage}} reviews(last:100){nodes{state author{login}} pageInfo{hasPreviousPage}} commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){nodes{__typename ... on CheckRun{status conclusion} ... on StatusContext{state}} pageInfo{hasNextPage}}}}}}}}}`
 
 type maintenanceReviewState struct {
+	Stack                                                    *struct{ ID string }
 	State                                                    string
 	IsDraft                                                  bool
 	HeadRefOid, BaseRefOid, MergeStateStatus, ReviewDecision string
@@ -378,6 +379,9 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	review, err := g.maintenanceReview(ctx, repo, number)
 	if err != nil {
 		return pr, err
+	}
+	if review.Stack != nil {
+		return pr, errors.New("stacked pull requests require human review")
 	}
 	if err = maintenanceChecks(*review, pr.Head.SHA, pr.Base.SHA); err != nil {
 		return pr, err

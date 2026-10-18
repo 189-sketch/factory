@@ -182,16 +182,23 @@ func allowedMaintenanceFile(file maintenanceFile) bool {
 	}
 	// Agent instructions, operational runbooks and sensitive reports never qualify.
 	for _, part := range strings.Split(strings.ToLower(name), "/") {
-		if strings.HasPrefix(part, ".") {
+		if strings.HasPrefix(part, ".") || part == "ops" || part == "ops.md" || strings.HasPrefix(part, "ops-") || strings.HasPrefix(part, "ops_") {
 			return false
 		}
-		for _, term := range []string{"agent", "claude", "skill", "prompt", "security", "credential", "permission", "deploy", "migration", "dependenc", "api", "interface", "auth", "secret"} {
+		for _, term := range []string{"agent", "claude", "skill", "prompt", "security", "credential", "permission", "deploy", "migration", "dependenc", "api", "interface", "auth", "secret", "runbook", "operation", "on-call", "oncall", "incident", "recovery", "backup", "restore", "disaster", "sre"} {
 			if strings.Contains(part, term) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// Keep agent-controlled prose on one escaped Markdown line so it cannot forge
+// the foreman's separate action labels, links, headings, images or list items.
+func maintenancePlainText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "{", "\\{", "}", "\\}", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "!", "\\!", "-", "\\-", "+", "\\+", ".", "\\.", "=", "\\=", "|", "\\|").Replace(value)
 }
 
 func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *githubTask, raw string) (string, error) {
@@ -205,7 +212,7 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 		return "", errors.New("GitHub maintenance integration unavailable")
 	}
 	var output bytes.Buffer
-	fmt.Fprintf(&output, "%s\n\n", report.Summary)
+	fmt.Fprintf(&output, "%s\n\n", maintenancePlainText(report.Summary))
 	if snapshot.Limited {
 		output.WriteString("Snapshot limited to the 10 most recently updated issues and 10 PRs. Older items were not changed.\n\n")
 	}
@@ -224,7 +231,7 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 	lines := make([]string, len(report.Items))
 	for i, suggestion := range report.Items {
 		original := originals[maintenanceKey(suggestion.Kind, suggestion.Number)]
-		lines[i] = fmt.Sprintf("- [%s #%d](%s): %s", suggestion.Kind, suggestion.Number, original.URL, suggestion.Assessment)
+		lines[i] = fmt.Sprintf("- [%s #%d](%s): %s", suggestion.Kind, suggestion.Number, original.URL, maintenancePlainText(suggestion.Assessment))
 		encoded, _ = json.Marshal(lines[i])
 		actionBudget := 128
 		if suggestion.Merge {
@@ -294,35 +301,50 @@ func (s *GitHubFactoryServer) finishMaintenanceMerge(ctx context.Context, task *
 
 // Remote success may outlive a lost response or a foreman restart. Reconcile
 // recorded pending deliveries even though merged PRs vanish from open lists.
+// Caller holds mu. Only immutable identifiers cross an unlocked GitHub read.
 func (s *GitHubFactoryServer) reconcileMaintenanceMerges(ctx context.Context, repo string, client maintenanceGitHubClient) ([]string, error) {
-	var reconciled []string
-	inspected := 0
-	for _, task := range s.tasks {
+	type candidate struct {
+		id, url, head string
+		version       int64
+		number        int
+	}
+	candidates := []candidate{}
+	for id, task := range s.tasks {
 		job := task.state.Job
 		if task.repo != repo || job.State != "awaiting_merge" || job.PublicationHold != "" || job.Workflow == nil || job.Workflow.Factory == nil {
 			continue
 		}
 		f := job.Workflow.Factory
-		var number int
 		prefix := fmt.Sprintf("https://github.com/%s/pull/", repo)
 		if !strings.HasPrefix(f.PRURL, prefix) {
 			continue
 		}
+		var number int
 		if _, err := fmt.Sscanf(strings.TrimPrefix(f.PRURL, prefix), "%d", &number); err != nil || number <= 0 {
 			continue
 		}
-		if inspected >= 10 {
+		candidates = append(candidates, candidate{id: id, url: f.PRURL, head: f.HeadSHA, version: task.state.LastEventID, number: number})
+		if len(candidates) >= 10 {
 			break
 		}
-		inspected++
-		current, err := client.MaintenanceItem(ctx, repo, maintenanceItem{Number: number, Kind: "pr"})
-		if err != nil || !current.Merged || current.HeadSHA != f.HeadSHA {
+	}
+	var reconciled []string
+	for _, candidate := range candidates {
+		var current maintenanceItem
+		var readErr error
+		s.mu.Unlock()
+		func() {
+			defer s.mu.Lock()
+			current, readErr = client.MaintenanceItem(ctx, repo, maintenanceItem{Number: candidate.number, Kind: "pr"})
+		}()
+		task := s.tasks[candidate.id]
+		if readErr != nil || !current.Merged || !strings.EqualFold(current.HeadSHA, candidate.head) || task == nil || task.state.LastEventID != candidate.version || task.state.Job.PublicationHold != "" || task.state.Job.State != "awaiting_merge" {
 			continue
 		}
-		if err = s.finishMaintenanceMerge(ctx, task); err != nil {
+		if err := s.finishMaintenanceMerge(ctx, task); err != nil {
 			return nil, err
 		}
-		reconciled = append(reconciled, f.PRURL)
+		reconciled = append(reconciled, candidate.url)
 	}
 	return reconciled, nil
 }

@@ -273,12 +273,27 @@ func (c *GitHubConnection) token(ctx context.Context) (string, error) {
 	}
 	return c.credentials.AccessToken, nil
 }
+
+// Permit an encoded slash only inside the branch argument of the read-only
+// rules endpoint. Repository segments and all other escaped paths stay rejected.
+func encodedBranchRulesPath(method string, u *url.URL) bool {
+	if method != "GET" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
+	if len(parts) != 6 || parts[0] != "repos" || strings.ContainsAny(parts[1]+parts[2], "%") || parts[3] != "rules" || parts[4] != "branches" {
+		return false
+	}
+	branch, err := url.PathUnescape(parts[5])
+	return err == nil && branch != "" && !strings.ContainsAny(branch, "\\?#%\x00\r\n") && !strings.Contains(branch, "..") && parts[5] == url.PathEscape(branch)
+}
+
 func (c *GitHubConnection) API(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	path = "/" + strings.TrimPrefix(path, "/")
 	u, err := url.Parse(path)
-	if err != nil || u.IsAbs() || u.Host != "" || (strings.Contains(u.Path, "..") && !(method == "GET" && maintenanceComparePath.MatchString(u.Path))) || u.RawPath != "" {
+	if err != nil || u.IsAbs() || u.Host != "" || (strings.Contains(u.Path, "..") && !(method == "GET" && maintenanceComparePath.MatchString(u.Path))) || ((u.RawPath != "" || strings.Contains(u.Path, "%")) && !encodedBranchRulesPath(method, u)) {
 		return nil, errors.New("invalid GitHub API path")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")

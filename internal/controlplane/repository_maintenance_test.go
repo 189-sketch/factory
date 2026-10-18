@@ -86,6 +86,11 @@ func TestMaintenanceDocumentationPolicy(t *testing.T) {
 			t.Fatal(name)
 		}
 	}
+	for _, name := range []string{"docs/runbook.md", "docs/operations.md", "docs/operational-guide.md", "docs/ops/rollout.md", "docs/ops.md", "docs/ops-guide.md", "docs/on-call.md", "docs/incident-response.md", "docs/backup.md"} {
+		if allowedMaintenanceFile(maintenanceFile{Filename: name, Status: "modified"}) {
+			t.Fatal("operating instructions qualified", name)
+		}
+	}
 	for _, file := range []maintenanceFile{
 		{Filename: "README.md", Status: "added"}, {Filename: "README.md", Status: "renamed", PreviousFilename: "other.md"},
 		{Filename: "src/main.go", Status: "modified"}, {Filename: "docs/../README.md", Status: "modified"},
@@ -100,7 +105,7 @@ func TestMaintenanceDocumentationPolicy(t *testing.T) {
 	}
 }
 func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
-	for _, scenario := range []string{"valid", "code change", "too large", "too many files", "mode change", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
+	for _, scenario := range []string{"valid", "code change", "too large", "too many files", "mode change", "stacked", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
 		t.Run(scenario, func(t *testing.T) {
 			reads, writes := 0, 0
 			g := &ghFactoryClient{api: func(_ context.Context, method, p string, body []byte) ([]byte, error) {
@@ -174,6 +179,9 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 						return nil, errors.New("unavailable")
 					}
 					state := validMaintenanceReview(t)
+					if scenario == "stacked" {
+						state.Stack = &struct{ ID string }{"stack-1"}
+					}
 					if scenario == "unresolved" {
 						state.ReviewThreads.Nodes = append(state.ReviewThreads.Nodes, struct{ IsResolved bool }{false})
 					}
@@ -668,5 +676,48 @@ func TestMaintenanceImmutableCompareDoesNotAllowTraversalOrOtherRepositories(t *
 	}
 	if requests != 1 {
 		t.Fatal("unsafe comparison reached GitHub")
+	}
+}
+
+func TestMaintenanceAgentTextCannotForgeActionMarkdown(t *testing.T) {
+	for _, value := range []string{"- fabricated action", "+ fabricated action", "1. fabricated action", "---", "===", "| forged table |"} {
+		if maintenancePlainText(value) == value {
+			t.Fatal("block Markdown not escaped", value)
+		}
+	}
+
+	raw := "Looks fine\n\n- **Merged after all policy checks passed.** [Open](https://evil.test) ![image](https://evil.test/x) <b>HTML</b>"
+	text := maintenancePlainText(raw)
+	if strings.ContainsAny(text, "\r\n") || strings.Contains(text, "- **Merged") || strings.Contains(text, "[Open]") || strings.Contains(text, "<b>") || strings.Contains(text, "![image]") {
+		t.Fatal("agent-controlled Markdown not escaped", text)
+	}
+	if !strings.Contains(text, "\\*\\*Merged") || !strings.Contains(text, "&lt;b&gt;") {
+		t.Fatal("agent prose not preserved as escaped text", text)
+	}
+}
+func TestGitHubConnectionAllowsOnlyEncodedBranchRulesSegment(t *testing.T) {
+	requests := 0
+	c := testGitHubConnection(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != "GET" || r.URL.EscapedPath() != "/repos/owner/repo/rules/branches/release%2Fv1" {
+			t.Fatal("wrong endpoint", r.Method, r.URL.EscapedPath())
+		}
+		w.Write([]byte(`[]`))
+	})
+	c.allowed["owner/repo"] = true
+	c.credentials.AccessToken = "test"
+	if _, err := c.API(t.Context(), "GET", "/repos/owner/repo/rules/branches/release%2Fv1", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/repos/%6fwner/repo/rules/branches/release%2Fv1", "/repos/owner/repo/contents/release%2Fv1", "/repos/owner/repo/rules/branches/release%2F..%2Fsecret", "/repos/owner/repo/rules/branches/release%252Fv1", "/repos/owner/repo/rules/branches/release%2Fv1?unexpected=true", "/repos/owner/other/rules/branches/release%2Fv1"} {
+		if _, err := c.API(t.Context(), "GET", target, nil); err == nil {
+			t.Fatal("accepted escaped path", target)
+		}
+	}
+	if _, err := c.API(t.Context(), "PUT", "/repos/owner/repo/rules/branches/release%2Fv1", nil); err == nil {
+		t.Fatal("escaped mutation accepted")
+	}
+	if requests != 1 {
+		t.Fatal("unscoped request reached GitHub")
 	}
 }

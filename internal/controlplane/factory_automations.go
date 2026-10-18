@@ -323,6 +323,9 @@ func (s *GitHubFactoryServer) guardAutomationRetry(ctx context.Context, task *gi
 	}
 	return nil
 }
+
+// enqueueAutomation is called with mu held. Maintenance network reads release
+// it temporarily, then revalidate the definition, receipt and job ownership.
 func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryAutomation, occurrence string, now time.Time, scheduled, stopped bool) (string, error) {
 	if s.setup != nil && !s.setup.snapshot().Finished {
 		return "", errors.New("complete setup before running automations")
@@ -373,6 +376,20 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 	if busy {
 		return "", errors.New("the previous run still needs to finish or be cleared by cancelling its job")
 	}
+	// A stop confirmation covers the owned attempts observed now, not a retry
+	// that starts and is cancelled again while the remote snapshot is fetched.
+	stoppedVersions := map[string]int64{}
+	if a.Kind == "repository-maintenance" && stopped {
+		owned, readErr := s.automationJobs(ctx, *a)
+		if readErr != nil {
+			return "", readErr
+		}
+		for id, task := range s.tasks {
+			if owned[task.issue.HTMLURL] {
+				stoppedVersions[id] = task.state.LastEventID
+			}
+		}
+	}
 	sum := sha256.Sum256([]byte(requestID))
 	localID := hex.EncodeToString(sum[:12])
 	issue := GitHubIssue{Title: a.Name, Body: a.Prompt, HTMLURL: "local:automation_" + localID, State: "open", CreatedAt: now, UpdatedAt: now}
@@ -385,7 +402,11 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 		if !ok {
 			return "", errors.New("repository maintenance requires the GitHub App integration")
 		}
-		issue.Maintenance, err = client.MaintenanceSnapshot(ctx, repo)
+		s.mu.Unlock()
+		func() {
+			defer s.mu.Lock()
+			issue.Maintenance, err = client.MaintenanceSnapshot(ctx, repo)
+		}()
 		if err != nil {
 			return "", err
 		}
@@ -393,6 +414,41 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 		if err != nil {
 			return "", err
 		}
+		// A concurrent edit/delete, admission, cancellation or setup change must
+		// not be overwritten by the definition captured before the remote read.
+		current, readErr := s.local.automation(ctx, a.ID)
+		if readErr != nil {
+			return "", readErr
+		}
+		if current.Version != a.Version {
+			return "", errors.New("automation changed while fetching GitHub; retry the current version")
+		}
+		if s.repositories[a.Repository] != repo || (s.setup != nil && !s.setup.snapshot().Finished) {
+			return "", errors.New("project setup changed while fetching GitHub")
+		}
+		if _, _, receiptErr := s.local.request(ctx, requestID); receiptErr == nil {
+			return s.enqueueAutomation(ctx, &current, occurrence, now, scheduled, stopped)
+		} else if !errors.Is(receiptErr, sql.ErrNoRows) {
+			return "", receiptErr
+		}
+		if current.LastJob != a.LastJob {
+			return "", errors.New("another run changed automation ownership while fetching GitHub; retry")
+		}
+		if err = s.refresh(ctx, true); err != nil {
+			return "", err
+		}
+		for id, version := range stoppedVersions {
+			if task := s.tasks[id]; task == nil || task.state.LastEventID != version {
+				return "", errors.New("previous job changed while fetching GitHub; confirm the process stopped again")
+			}
+		}
+		if busy, busyErr := s.automationBusy(ctx, current, "", stopped); busyErr != nil || busy {
+			if busyErr != nil {
+				return "", busyErr
+			}
+			return "", errors.New("another run was admitted while fetching GitHub")
+		}
+		a = &current
 		snapshot, marshalErr := json.Marshal(issue.Maintenance)
 		if marshalErr != nil {
 			return "", marshalErr
@@ -455,6 +511,15 @@ func (s *GitHubFactoryServer) tickAutomations(ctx context.Context, now time.Time
 		return err
 	}
 	for _, a := range list {
+		// Earlier maintenance reads release mu, so refresh each saved definition.
+		var loadErr error
+		a, loadErr = s.local.automation(ctx, a.ID)
+		if errors.Is(loadErr, sql.ErrNoRows) {
+			continue
+		}
+		if loadErr != nil {
+			return loadErr
+		}
 		if a.Paused || a.NextDue == nil || a.NextDue.After(now) {
 			continue
 		}
@@ -483,6 +548,14 @@ func (s *GitHubFactoryServer) tickAutomations(ctx context.Context, now time.Time
 		}
 		_, err = s.enqueueAutomation(ctx, &a, fmt.Sprintf("scheduled:%d:%s", a.Version, a.NextDue.UTC().Format(time.RFC3339)), now, true, false)
 		if err != nil {
+			latest, loadErr := s.local.automation(ctx, a.ID)
+			if errors.Is(loadErr, sql.ErrNoRows) || (loadErr == nil && latest.Version != a.Version) {
+				continue
+			}
+			if loadErr != nil {
+				return loadErr
+			}
+			a = latest
 			a.LastError = err.Error()
 			if saveErr := s.local.saveAutomation(ctx, a); saveErr != nil {
 				return saveErr
