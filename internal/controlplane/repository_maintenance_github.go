@@ -147,17 +147,17 @@ func (g *ghFactoryClient) MaintenanceItem(ctx context.Context, repo string, orig
 	}
 	return maintenanceItem{Number: current.Number, Kind: original.Kind, UpdatedAt: current.UpdatedAt, HeadSHA: current.Head.SHA, BaseSHA: current.Base.SHA, Merged: current.Merged}, nil
 }
-func (g *ghFactoryClient) AddMaintenanceLabels(ctx context.Context, repo string, number int, suggestions []string) error {
+func (g *ghFactoryClient) AddMaintenanceLabels(ctx context.Context, repo string, number int, suggestions []string) ([]string, error) {
 	if len(suggestions) == 0 {
-		return nil
+		return nil, nil
 	}
 	root, err := githubRepositoryPath(repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	catalog, err := g.RepositoryLabels(ctx, repo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	available := map[string]string{}
 	for _, label := range catalog {
@@ -173,11 +173,14 @@ func (g *ghFactoryClient) AddMaintenanceLabels(ctx context.Context, repo string,
 		}
 	}
 	if len(add) == 0 {
-		return nil
+		return nil, nil
 	}
 	body, _ := json.Marshal(map[string]any{"labels": add})
 	_, err = g.api(ctx, "POST", fmt.Sprintf("%s/issues/%d/labels", root, number), body)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return add, nil
 }
 func (g *ghFactoryClient) maintenancePull(ctx context.Context, root string, number int) (maintenancePull, error) {
 	var pr maintenancePull
@@ -189,7 +192,7 @@ func (g *ghFactoryClient) maintenancePull(ctx context.Context, root string, numb
 	return pr, err
 }
 func maintenanceChecks(review maintenanceReviewState, head, base string) error {
-	if review.State != "OPEN" || review.IsDraft || review.HeadRefOid != head || review.BaseRefOid != base || review.MergeStateStatus != "CLEAN" {
+	if review.State != "OPEN" || review.IsDraft || !strings.EqualFold(review.HeadRefOid, head) || !strings.EqualFold(review.BaseRefOid, base) || review.MergeStateStatus != "CLEAN" {
 		return errors.New("PR is draft, changed, conflicted, behind, or blocked by GitHub rules")
 	}
 	if review.ReviewDecision == "CHANGES_REQUESTED" || review.ReviewDecision == "REVIEW_REQUIRED" {
@@ -222,7 +225,7 @@ func maintenanceChecks(review maintenanceReviewState, head, base string) error {
 	}
 	commit := review.Commits.Nodes[0].Commit
 	rollup := commit.StatusCheckRollup
-	if commit.Oid != head || rollup == nil || rollup.State != "SUCCESS" || len(rollup.Contexts.Nodes) == 0 || rollup.Contexts.PageInfo.HasNextPage {
+	if !strings.EqualFold(commit.Oid, head) || rollup == nil || rollup.State != "SUCCESS" || len(rollup.Contexts.Nodes) == 0 || rollup.Contexts.PageInfo.HasNextPage {
 		return errors.New("current revision must have passing checks")
 	}
 	for _, check := range rollup.Contexts.Nodes {
@@ -287,6 +290,7 @@ func (g *ghFactoryClient) maintenanceBlob(ctx context.Context, root, revision, n
 	return errors.New("invalid document path")
 }
 func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, number int, head string, authorize func() (func(), error)) (maintenancePull, error) {
+	head = strings.ToLower(head)
 	root, err := githubRepositoryPath(repo)
 	if err != nil {
 		return maintenancePull{}, err
@@ -295,7 +299,7 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	if err != nil {
 		return pr, err
 	}
-	if pr.Head.SHA != head || pr.Head.Repo.FullName != repo || pr.Base.Repo.FullName != repo {
+	if !strings.EqualFold(pr.Head.SHA, head) || !strings.EqualFold(pr.Head.Repo.FullName, repo) || !strings.EqualFold(pr.Base.Repo.FullName, repo) {
 		return pr, errors.New("PR revision or repository changed")
 	}
 	if pr.Merged {
@@ -416,7 +420,7 @@ func (g *ghFactoryClient) MergeMaintenancePR(ctx context.Context, repo string, n
 	if err != nil {
 		return pr, err
 	}
-	if fresh.Head.SHA != head || fresh.Base.SHA != pr.Base.SHA || fresh.Base.Ref != pr.Base.Ref || fresh.Head.Repo.FullName != repo || fresh.Base.Repo.FullName != repo || fresh.State != "open" || fresh.Draft || fresh.MergeableState != "clean" {
+	if !strings.EqualFold(fresh.Head.SHA, head) || !strings.EqualFold(fresh.Base.SHA, pr.Base.SHA) || fresh.Base.Ref != pr.Base.Ref || !strings.EqualFold(fresh.Head.Repo.FullName, repo) || !strings.EqualFold(fresh.Base.Repo.FullName, repo) || fresh.State != "open" || fresh.Draft || fresh.MergeableState != "clean" {
 		return pr, errors.New("PR changed or became blocked during verification")
 	}
 	// Recheck local cancellation, privacy and review authorization after all
@@ -517,6 +521,6 @@ func (g *ghFactoryClient) maintenanceEvidence(ctx context.Context, repo string, 
 	if len(review.Commits.Nodes) == 1 && review.Commits.Nodes[0].Commit.StatusCheckRollup != nil {
 		item.Checks = review.Commits.Nodes[0].Commit.StatusCheckRollup.State
 	}
-	item.MergeEvidenceComplete = complete && review.HeadRefOid == item.HeadSHA && review.BaseRefOid == item.BaseSHA
+	item.MergeEvidenceComplete = complete && strings.EqualFold(review.HeadRefOid, item.HeadSHA) && strings.EqualFold(review.BaseRefOid, item.BaseSHA)
 	return nil
 }

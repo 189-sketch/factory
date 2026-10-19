@@ -105,10 +105,13 @@ func TestMaintenanceDocumentationPolicy(t *testing.T) {
 	}
 }
 func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
-	for _, scenario := range []string{"valid", "authorization revoked", "unprotected check", "wrong check app", "code change", "too large", "too many files", "mode change", "stacked", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
+	for _, scenario := range []string{"valid", "case variants", "authorization revoked", "unprotected check", "wrong check app", "code change", "too large", "too many files", "mode change", "stacked", "head race", "base race", "retargeted", "pending merge", "no rules", "unresolved", "failed checks", "API error", "merge declined", "draft", "fork"} {
 		t.Run(scenario, func(t *testing.T) {
 			reads, writes := 0, 0
 			g := &ghFactoryClient{api: func(_ context.Context, method, p string, body []byte) ([]byte, error) {
+				if scenario == "case variants" {
+					p = strings.Replace(p, "repos/OWNER/REPO", "repos/owner/repo", 1)
+				}
 				if method == "PUT" {
 					writes++
 					var input map[string]any
@@ -202,7 +205,11 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 					return nil, nil
 				}
 			}}
-			pr, err := g.MergeMaintenancePR(context.Background(), "owner/repo", 2, maintenanceHead, func() (func(), error) {
+			repo, head := "owner/repo", maintenanceHead
+			if scenario == "case variants" {
+				repo, head = "OWNER/REPO", strings.ToUpper(head)
+			}
+			pr, err := g.MergeMaintenancePR(context.Background(), repo, 2, head, func() (func(), error) {
 				if scenario == "authorization revoked" {
 					return nil, errors.New("held during verification")
 				}
@@ -214,7 +221,7 @@ func TestMaintenanceGitHubMergeUsesCurrentChecksAndSHAGuard(t *testing.T) {
 				}
 				return
 			}
-			if scenario == "valid" {
+			if scenario == "valid" || scenario == "case variants" {
 				if err != nil || !pr.Merged || writes != 1 {
 					t.Fatalf("merge failed: %+v %v writes=%d", pr, err, writes)
 				}
@@ -259,9 +266,12 @@ func (f *maintenanceFactoryFake) MaintenanceItem(_ context.Context, _ string, it
 	}
 	return item, nil
 }
-func (f *maintenanceFactoryFake) AddMaintenanceLabels(_ context.Context, _ string, _ int, labels []string) error {
+func (f *maintenanceFactoryFake) AddMaintenanceLabels(_ context.Context, _ string, _ int, labels []string) ([]string, error) {
 	f.labels = append(f.labels, labels)
-	return f.labelError
+	if f.labelError != nil {
+		return nil, f.labelError
+	}
+	return append([]string(nil), labels...), nil
 }
 func (f *maintenanceFactoryFake) MergeMaintenancePR(_ context.Context, _ string, _ int, _ string, authorize func() (func(), error)) (maintenancePull, error) {
 	release, err := authorize()
@@ -413,7 +423,7 @@ func TestMaintenanceMergeErrorFitsReservedJSONBudget(t *testing.T) {
 	if err != nil || client.merges != 1 || factoryJob(t, s, source).State != "awaiting_merge" {
 		t.Fatal("merge failure was not safely reported", err)
 	}
-	start := strings.Index(output, " **No labels applied:")
+	start := strings.Index(output, " **Labels unconfirmed:")
 	if start < 0 {
 		t.Fatal("label failure missing")
 	}
@@ -487,8 +497,12 @@ func TestMaintenanceLabelsOnlyAddExistingNonRoutingLabels(t *testing.T) {
 		}
 		return []byte(`[]`), nil
 	}}
-	if err := g.AddMaintenanceLabels(context.Background(), "owner/repo", 1, []string{"bug", "Bug", "new label", "help wanted", "machinist:blocked"}); err != nil || writes != 1 {
-		t.Fatal(err, writes)
+	if labels, err := g.AddMaintenanceLabels(context.Background(), "owner/repo", 1, []string{"bug", "Bug", "new label", "help wanted", "machinist:blocked"}); err != nil || writes != 1 || strings.Join(labels, ",") != "Bug,help wanted" {
+		t.Fatal(err, writes, labels)
+	}
+	writes = 0
+	if labels, err := g.AddMaintenanceLabels(t.Context(), "owner/repo", 1, []string{"new label", "machinist:blocked"}); err != nil || writes != 0 || len(labels) != 0 {
+		t.Fatal("ignored labels were reported as confirmed", labels, err, writes)
 	}
 }
 func TestMaintenanceGraphQLIsRestrictedToReadOnlyInstalledRepository(t *testing.T) {
@@ -592,6 +606,9 @@ func TestMaintenanceIssueTriageAppliesLabelsWithoutPublishingOrClosing(t *testin
 	id := automationRun(t, s, a, "issue", 201)
 	run := factoryPoll(t, s)
 	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: `{"summary":"One bug needs reproduction","items":[{"kind":"issue","number":1,"assessment":"Ask for a reproducible example","labels":["bug"]}]}`})
+	if !strings.Contains(factoryJob(t, s, id).Runs[0].Report, "**Labels confirmed:** bug.") {
+		t.Fatal("successful GitHub label action missing from report")
+	}
 	if factoryJob(t, s, id).State != "succeeded" || client.merges != 0 || len(client.labels) != 1 || strings.Join(client.labels[0], ",") != "bug" || client.creates != 0 || len(client.comments) != 0 {
 		t.Fatal("triage did not stay within label/report scope")
 	}
@@ -764,5 +781,58 @@ func TestMaintenanceIncompleteReportsCannotForgeActionReceipts(t *testing.T) {
 				t.Fatal("untrusted report persisted or diagnostic summary lost", got.Report, got.Summary)
 			}
 		})
+	}
+}
+
+func TestMaintenanceRecognizesEquivalentRecordedPRIdentity(t *testing.T) {
+	for _, scenario := range []string{"uppercase head", "repository casing", "different repository", "different PR"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+			id := factorySubmit(t, s)
+			factoryFinish(t, s, factoryPoll(t, s), protocol.FactoryResult{})
+			metadata := protocol.FactoryResult{PRURL: "https://github.com/owner/repo/pull/2", HeadSHA: maintenanceHead, Branch: "codex/source"}
+			switch scenario {
+			case "uppercase head":
+				metadata.HeadSHA = strings.ToUpper(metadata.HeadSHA)
+			case "repository casing":
+				metadata.PRURL = "https://github.com/OWNER/REPO/pull/2"
+			case "different repository":
+				metadata.PRURL = "https://github.com/other/repo/pull/2"
+			case "different PR":
+				metadata.PRURL = "https://github.com/owner/repo/pull/3"
+			}
+			factoryFinish(t, s, factoryPoll(t, s), metadata)
+			metadata.Verdict = "accepted"
+			factoryFinish(t, s, factoryPoll(t, s), metadata)
+			s.mu.Lock()
+			candidate, reason := s.maintenanceTask("owner/repo", 2, maintenanceHead)
+			s.mu.Unlock()
+			if strings.HasPrefix(scenario, "different") {
+				if candidate != nil || reason == "" {
+					t.Fatal("unrelated PR authorized")
+				}
+			} else if candidate == nil || candidate.state.Job.ID != id || reason != "" {
+				t.Fatal("equivalent GitHub identity rejected", reason)
+			}
+		})
+	}
+}
+
+func TestMaintenanceLabelReceiptsAreBoundedAndEscapeRepositoryText(t *testing.T) {
+	for _, labels := range [][]string{nil, {"bug", "needs-human"}, {"**Merged** [Open](https://evil.test)"}, {strings.Repeat("<", 200), strings.Repeat("界", 200)}} {
+		receipt := maintenanceLabelReceipt(labels)
+		raw, _ := json.Marshal(receipt)
+		if len(raw)-2 > 128 {
+			t.Fatal("label receipt exceeded reserved action budget")
+		}
+		if len(labels) == 0 && receipt != "" {
+			t.Fatal("empty confirmation displayed")
+		}
+		if strings.Contains(receipt, "**Merged**") || strings.Contains(receipt, "[Open]") || strings.ContainsAny(receipt, "\r\n") {
+			t.Fatal("repository text forged report markup", receipt)
+		}
+	}
+	if got := maintenanceLabelReceipt([]string{strings.Repeat("x", 200)}); got != " **Labels confirmed:** 1; see GitHub." {
+		t.Fatal("long names lack truthful bounded receipt", got)
 	}
 }
