@@ -5,4 +5,4 @@ resources:
 images:
   - name: machinist-control-plane
     newName: europe-west2-docker.pkg.dev/machinist-prod/machinist/control-plane
-    digest: sha256:8676161e2e63bfb88a1bc2b8b2f96651a6c05698f516afbbbe973ab28a50d6ad
+    digest: sha256:47ac896302292892a47dd120cba73a3a460323f4bcee98943316a6b38bc86651
