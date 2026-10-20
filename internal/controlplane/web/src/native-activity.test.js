@@ -12,3 +12,46 @@ test("parallel identities, primary log and honest interruption", () => {
  assert.equal(reduceActivity(events, "interrupted").children[1].status, "interrupted");
  assert.equal(reduceActivity(events, "running").children[1].status, "running");
 });
+
+test("reports and delegation map are readable, accessible, and free of disclosures", async context => {
+  const { createServer } = await import("vite");
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  context.after(() => server.close());
+  const { ActivityTimeline, PrimaryLog, ExecutionGraph } = await server.ssrLoadModule("/src/native-activity.jsx");
+  const children = [{ native_id: "reader", name: "Read go.mod", status: "completed", started_at: "2026-10-20T10:00:00Z", updated_at: "2026-10-20T10:00:04Z", summary: "- **Module:** `example/project`\n- **Go:** 1.26\n\n<script>unsafe()</script>" }];
+  const html = renderToStaticMarkup(React.createElement(ActivityTimeline, { children }));
+  assert.match(html, /1 of 1 completed/);
+  assert.match(html, /<strong>Module:<\/strong>/);
+  assert.match(html, /<code>example\/project<\/code>/);
+  assert.match(html, /Completed/);
+  assert.doesNotMatch(html, /<details|<summary|<script/);
+  const log = renderToStaticMarkup(React.createElement(PrimaryLog, { logs: [JSON.stringify({ outcome: "complete", summary: "Both agents finished." })] }));
+  assert.match(log, /Both agents finished\./);
+  assert.doesNotMatch(log, /&quot;outcome&quot;|<details/);
+  const empty = renderToStaticMarkup(React.createElement(ActivityTimeline, { children: [], loaded: true, runState: "running" }));
+  assert.match(empty, /The primary agent is working/);
+  const graph = renderToStaticMarkup(React.createElement(ExecutionGraph, { activities: children, runState: "succeeded", idPrefix: "overview" }));
+  assert.match(graph, /Execution map/);
+  assert.match(graph, /Primary agent/);
+  assert.match(graph, /href="#overview-agent-reader"/);
+  assert.match(graph, /Connections show delegation/);
+  assert.equal(renderToStaticMarkup(React.createElement(ExecutionGraph, { activities: [], runState: "running" })), "");
+});
+
+test("native run separates outcome, logs, history and diagnostics", async context => {
+  const { createServer } = await import("vite");
+  const React = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  context.after(() => server.close());
+  const { TaskDetail } = await server.ssrLoadModule("/src/task-detail.jsx");
+  const job = { id: "native", recipe: "native-v1", state_backend: "local", state: "succeeded", repository: "example/repo", task: { title: "Read the project", spec: "Read only" }, workflow: { factory: {} }, runs: [{ id: "first", state: "failed", summary: "invalid character 'B' looking for beginning of value" }, { id: "second", state: "succeeded", executor: "claude-native", summary: "Two readers finished." }] };
+  const html = renderToStaticMarkup(React.createElement(TaskDetail, { job, loaded: true }));
+  assert.match(html, /Run outcome/);
+  assert.match(html, /Overview/);
+  assert.match(html, /Attempts \(2\)/);
+  assert.match(html, /required result format/);
+  assert.doesNotMatch(html, /<details|<summary|invalid character/);
+});
