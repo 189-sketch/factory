@@ -47,10 +47,10 @@ func (f *blockingMaintenance) MaintenanceItem(ctx context.Context, repo string, 
 	}
 	return f.maintenanceFactoryFake.MaintenanceItem(ctx, repo, item)
 }
-func (f *blockingMaintenance) AddMaintenanceLabels(ctx context.Context, repo string, number int, labels []string) error {
+func (f *blockingMaintenance) AddMaintenanceLabels(ctx context.Context, repo string, number int, labels []string) ([]string, error) {
 	if f.phase == "actions" {
 		if err := f.wait(ctx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	return f.maintenanceFactoryFake.AddMaintenanceLabels(ctx, repo, number, labels)

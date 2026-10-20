@@ -94,7 +94,7 @@ type maintenancePull struct {
 type maintenanceGitHubClient interface {
 	MaintenanceSnapshot(context.Context, string) (*maintenanceSnapshot, error)
 	MaintenanceItem(context.Context, string, maintenanceItem) (maintenanceItem, error)
-	AddMaintenanceLabels(context.Context, string, int, []string) error
+	AddMaintenanceLabels(context.Context, string, int, []string) ([]string, error)
 	MergeMaintenancePR(context.Context, string, int, string, func() (func(), error)) (maintenancePull, error)
 }
 
@@ -139,7 +139,7 @@ func (s *GitHubFactoryServer) maintenanceTask(repo string, number int, head stri
 	var found *githubTask
 	for _, task := range s.tasks {
 		job := task.state.Job
-		if task.repo != repo || job.Workflow == nil || job.Workflow.Factory == nil || job.Workflow.Factory.PRURL != expected {
+		if !strings.EqualFold(task.repo, repo) || job.Workflow == nil || job.Workflow.Factory == nil || !sameFollowupPR(repo, job.Workflow.Factory.PRURL, expected) {
 			continue
 		}
 		if found != nil {
@@ -158,7 +158,7 @@ func (s *GitHubFactoryServer) maintenanceTask(repo string, number int, head stri
 	if job.PublicationHold != "" {
 		return nil, "publication is held private"
 	}
-	if job.State != "awaiting_merge" || job.Recipe == "single" || job.Recipe == "answer" || f.Verdict != "accepted" || len(f.Findings) != 0 || f.HeadSHA != head || len(job.Runs) < 2 {
+	if job.State != "awaiting_merge" || job.Recipe == "single" || job.Recipe == "answer" || f.Verdict != "accepted" || len(f.Findings) != 0 || !strings.EqualFold(f.HeadSHA, head) || len(job.Runs) < 2 {
 		return nil, "requires an accepted independent review of the current revision"
 	}
 	review := job.Runs[len(job.Runs)-1]
@@ -202,6 +202,24 @@ func allowedMaintenanceFile(file maintenanceFile) bool {
 func maintenancePlainText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "{", "\\{", "}", "\\}", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;", "#", "\\#", "!", "\\!", "-", "\\-", "+", "\\+", ".", "\\.", "=", "\\=", "|", "\\|").Replace(value)
+}
+
+// Keep receipts inside their reserved JSON budget, even for long or hostile
+// repository label names. Confirmation means present, including idempotent adds.
+func maintenanceLabelReceipt(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	names := make([]string, len(labels))
+	for i, label := range labels {
+		names[i] = maintenancePlainText(label)
+	}
+	receipt := " **Labels confirmed:** " + strings.Join(names, ", ") + "."
+	encoded, _ := json.Marshal(receipt)
+	if len(encoded)-2 > 128 {
+		return fmt.Sprintf(" **Labels confirmed:** %d; see GitHub.", len(labels))
+	}
+	return receipt
 }
 
 // Caller holds mu. Each remote request runs outside it, then revalidates the
@@ -254,7 +272,7 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 		encoded, _ = json.Marshal(lines[i])
 		actionBudget := 128
 		if suggestion.Merge {
-			actionBudget = 512
+			actionBudget += 512
 		}
 		budget += len(encoded) - 2 + actionBudget
 	}
@@ -278,7 +296,7 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 			continue
 		}
 		if current.Merged {
-			if candidate, reason := s.maintenanceTask(snapshot.Repository, suggestion.Number, current.HeadSHA); reason == "" && current.HeadSHA == original.HeadSHA {
+			if candidate, reason := s.maintenanceTask(snapshot.Repository, suggestion.Number, current.HeadSHA); reason == "" && strings.EqualFold(current.HeadSHA, original.HeadSHA) {
 				if err := s.finishMaintenanceMerge(ctx, candidate); err != nil {
 					return "", err
 				}
@@ -286,14 +304,19 @@ func (s *GitHubFactoryServer) completeMaintenance(ctx context.Context, task *git
 			output.WriteString(" Already merged on GitHub; no new merge requested.\n")
 			continue
 		}
-		if !current.UpdatedAt.Equal(original.UpdatedAt) || current.HeadSHA != original.HeadSHA || current.BaseSHA != original.BaseSHA {
+		if !current.UpdatedAt.Equal(original.UpdatedAt) || !strings.EqualFold(current.HeadSHA, original.HeadSHA) || !strings.EqualFold(current.BaseSHA, original.BaseSHA) {
 			output.WriteString(" **No action:** item changed since triage.\n")
 			continue
 		}
+		var labels []string
 		if err := s.maintenanceRemote(task, func() error {
-			return client.AddMaintenanceLabels(ctx, snapshot.Repository, suggestion.Number, suggestion.Labels)
+			var err error
+			labels, err = client.AddMaintenanceLabels(ctx, snapshot.Repository, suggestion.Number, suggestion.Labels)
+			return err
 		}); err != nil {
-			output.WriteString(" **No labels applied:** GitHub update failed.")
+			output.WriteString(" **Labels unconfirmed:** GitHub update failed.")
+		} else {
+			output.WriteString(maintenanceLabelReceipt(labels))
 		}
 		if task.state.LastEventID != version || task.state.Job.PublicationHold != "" || task.state.Job.State != "running" {
 			return "", errors.New("maintenance task is no longer running")
@@ -369,16 +392,12 @@ func (s *GitHubFactoryServer) reconcileMaintenanceMerges(ctx context.Context, re
 	candidates := []candidate{}
 	for id, task := range s.tasks {
 		job := task.state.Job
-		if task.repo != repo || job.State != "awaiting_merge" || job.PublicationHold != "" || job.Workflow == nil || job.Workflow.Factory == nil {
+		if !strings.EqualFold(task.repo, repo) || job.State != "awaiting_merge" || job.PublicationHold != "" || job.Workflow == nil || job.Workflow.Factory == nil {
 			continue
 		}
 		f := job.Workflow.Factory
-		prefix := fmt.Sprintf("https://github.com/%s/pull/", repo)
-		if !strings.HasPrefix(f.PRURL, prefix) {
-			continue
-		}
-		var number int
-		if _, err := fmt.Sscanf(strings.TrimPrefix(f.PRURL, prefix), "%d", &number); err != nil || number <= 0 {
+		number, err := followupPRNumber(repo, f.PRURL)
+		if err != nil {
 			continue
 		}
 		candidates = append(candidates, candidate{id: id, url: f.PRURL, head: f.HeadSHA, version: task.state.LastEventID, number: number})
