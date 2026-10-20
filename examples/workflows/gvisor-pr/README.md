@@ -1,5 +1,9 @@
 # Prompt to PR in gVisor
 
+This standalone Docker experiment is separate from the shipped
+[Kubernetes runner](../../../docs/local-factory/kubernetes.md), which uses native
+Codex subscription login and keeps GitHub publication outside agent Pods.
+
 One prompt starts a disposable Docker container using `runsc`. Inside it, the worker
 clones the target repository's current `main`, creates a unique `codex/task-*`
 branch, runs Codex, commits the changes, pushes the branch, and opens a PR for human

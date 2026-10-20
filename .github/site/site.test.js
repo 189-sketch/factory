@@ -68,7 +68,7 @@ test('setup snippets include required directories and Codex permissions', async 
   const source = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('./index.html', import.meta.url), 'utf8'));
   assert.match(source, /mkdir -p \.\/bin &amp;&amp; go build/);
   assert.match(source, /"--sandbox"[\s\S]+"danger-full-access"/);
-  assert.doesNotMatch(source, /pipeline|--agent/);
+  assert.doesNotMatch(source, /--agent/);
 });
 
 test('public identity uses the two-piece interlocking mark and current positioning', async () => {
@@ -98,7 +98,8 @@ test('public identity uses the two-piece interlocking mark and current positioni
 test('repository quick start links to existing guides and stays directly runnable', async () => {
   const source = await import('node:fs/promises').then(({ readFile }) => readFile(new URL('../../README.md', import.meta.url), 'utf8'));
 
-  assert.match(source, /\.github\/site\/technical-drawings\.webp/);
+  assert.match(source, /go build -o \.\/bin\/machinist \.\/cmd\/machinist/);
+  assert.match(source, /\.\/bin\/machinist start/);
   for (const guide of ['docs/README.md', 'docs/configuration.md', 'docs/development.md', 'docs/vm-deployment.md']) {
     assert.match(source, new RegExp(guide.replace('.', '\\.')));
   }

@@ -100,8 +100,35 @@ expose the existing unauthenticated loopback API directly.
 
 ## Recovery and updates
 
-Back up the persistent runtime before updates. Keep the old image digest for
-rollback. Recreate stops the old dispatcher before a replacement starts;
+For an existing deployment, use this update sequence:
+
+1. Finish or cancel active work and confirm old agent Pods stopped. Check that
+   no due schedule can admit another job during the rollout.
+2. Make a private, consistent SQLite backup plus a runtime archive. A raw copy of
+   `jobs.db` while SQLite is writing is not a consistent backup; use SQLite's
+   backup API or stop the owner first. Protect archives as credentials and never
+   add them to the build context.
+3. Build from reviewed source, verify `machinist version` inside the image, push
+   it, verify the registry digest, and review the overlay's digest change.
+4. Run server-side validation, apply the normal GKE overlay, and wait for rollout:
+
+   ```sh
+   kubectl --context "$CLUSTER_CONTEXT" apply --dry-run=server \
+     -k deploy/kubernetes/control-plane-gke
+   kubectl --context "$CLUSTER_CONTEXT" apply -k deploy/kubernetes/control-plane-gke
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     rollout status deployment/machinist-control-plane --timeout=180s
+   ```
+
+5. Reconnect port-forward to the replacement Pod. Confirm one healthy worker,
+   preserved job IDs, projects, automations, GitHub connection and publication
+   holds. Run a real connection check or narrow job and verify runner cleanup
+   before enabling schedules.
+
+Never reapply the zero-replica bootstrap overlay during an ordinary update.
+Never restore the old laptop runtime over newer cloud history.
+
+Keep the old image digest and matching private state backup for rollback. Recreate stops the old dispatcher before a replacement starts;
 the process lock also prevents concurrent access to the store. Allow its 90-second
 termination grace period for bounded sandbox cleanup. Do not force-delete an
 unreachable dispatcher or clear a credential lock until its old agent Pods are

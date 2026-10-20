@@ -1,146 +1,173 @@
 # Architecture
 
-Machinist runs local agent jobs. The Standard pipeline uses Triage, optional Spec, Build and independent Review. Single-agent mode performs one task without a separate reviewer. Its agents
-run through the user's Codex or Claude Code CLI on this computer or a VM. A
-GitHub App connects selected repositories. No hosted agent service is required.
+Machinist has one Go control plane, a React UI, and workers on a local host, VM,
+or Kubernetes. It connects selected repositories through a GitHub App. The same
+control plane can run locally, on a VM, or in the existing GKE runner cluster.
+There is no required Machinist-hosted service.
 
 ```mermaid
 flowchart LR
-    User[Developer] -->|setup and tasks| UI[Local web UI]
-    UI -->|authenticated requests| Foreman[Go foreman]
-    Foreman -->|tasks, prompts, attempts, approvals| DB[(Local SQLite)]
-    Foreman -->|device authorization and repository API| GitHub[GitHub App]
-    Foreman -->|lease and heartbeat protocol| Worker[Local or VM worker]
-    Worker -->|process input and bounded output| CLI[Codex or Claude Code]
-    CLI -->|specification and code commits| GitHub
-    GitHub -->|issues, PRs and checks| Foreman
+    User[Operator] --> UI[React UI or jobs API]
+    UI --> Foreman[Go control plane and deterministic foreman]
+    Foreman --> DB[(Private SQLite and runtime files)]
+    Foreman <--> GitHub[GitHub App API]
+    Foreman --> Host[Local or VM worker]
+    Foreman --> Connector[Trusted Kubernetes connector]
+    Host --> CLI[Native coding CLI]
+    Connector --> Job[gVisor Job and native Codex CLI]
+    Job -->|bounded Git bundle| Connector
+    Connector -->|validated branch and PR| GitHub
 ```
 
-The browser configures the foreman. Workers execute on user-controlled hosts.
-GitHub owns published work; the local database owns execution bookkeeping.
+## Product model
 
-## Ownership and invariants
+An **agent** is shared configuration and a Markdown role prompt, independent of
+repositories. A **project** selects a connected repository and its checkout.
+A **job** binds a request to a project and one fixed execution mode:
 
-- INV-1: GitHub holds linked issues, published specs, branches, PRs, checks, and
-  review. Local requests need no issue. A PING never creates one.
-- INV-2: SQLite holds factory tasks, event history, prompt overrides, snapshots,
-  approvals, and completion receipts. Internal events and prompts are never posted
-  to issue comments. A linked issue gets one readable status comment, updated in
-  place. After an uncertain write the next update reconciles its own marker first.
-- INV-3: A GitHub App device authorization uses a public client ID. Credentials
-  and refresh tokens stay in private local files. No shared client secret or App
-  private key is distributed. API access is limited to the installation/user
-  repository intersection. Setup checks both App permissions and user write access.
-- INV-4: Local worker credentials are refreshed per run and supplied only through
-  the process environment. A Git credential helper is scoped to github.com and
-  the selected repository. Tokens never appear in Git URLs or command arguments.
-  VM workers use credentials on the VM; ordinary pairing never sends the user's
-  GitHub App token to that host.
-- INV-5: The host owns executor argument arrays, repository paths, credentials,
-  model configuration, and temporary worktrees. Repository content cannot widen
-  that configuration. Review requires a configured read-only executor.
-- INV-6: Setup completes only after repository checks and a real PONG from the
-  selected agent. VM setup requires a matching worker handshake and a read-only
-  connection check on the VM. The check makes no issue, commit, or PR.
+- `factory`: Triage → optional Spec and approval → Build → independent Review.
+  Findings return to Build on the same branch and PR, for at most three repairs.
+- `single`: one agent completes a task end to end, without a separate reviewer.
 
-## Components and data
+Each stage starts a fresh coding process. Triage and Review require restricted
+read-only executors. An informational request can finish in Triage; requested
+files, including documents and reports, require PR delivery. Spec approval is
+bound to its producing attempt. Review acceptance is bound to the implementation
+attempt and published head, not just a successful process exit.
 
-`internal/controlplane` owns onboarding, scheduling, the local factory store,
-GitHub connection, and readable status publication. `internal/managedworker`
-owns allowlisted host execution, isolated worktrees, evidence checks, heartbeats,
-and process lifecycle. `internal/runner` bounds and observes a single process.
-The CLI injects the local worker launcher into the foreman, avoiding a package
-cycle. `internal/githubauth` supplies process-scoped Git credential settings.
+The foreman is code that validates evidence and advances state. Conversational
+Foreman chat, arbitrary workflow editing in the app, PostgreSQL, and replicated
+control planes are not implemented. Lower-level direct commands and legacy
+sequence workflows remain separate supported interfaces.
 
-A task has a stable local identity, repository alias, requirements, optional issue
-URL, stage attempts, prompt snapshots, and completion receipts. Receipt tokens
-are hashed. A stage result advances the deterministic reducer. Database events
-are internal implementation data, even where compatibility types retain older
-GitHub-oriented names.
+## State and authority
 
-Jobs use one process-locked SQLite store, `jobs.db`, beside the configured worker token. The first launch snapshots the former `factory.db`, preserves IDs, events, prompts and hashed receipts, then retires it under `archive/factory-v1.db`. Existing blocked work receives an explicit publication hold. Worker outputs remain in place and must be included in runtime backups. Legacy direct/sequence `machinist.db` stores remain separate and unchanged. New submission receipts and initial recipe events are atomic, so repeating a client request ID returns the same job after response loss or restart. Reusing an ID for a different request fails.
+GitHub holds linked issues, published specifications, branches, PRs, checks, and
+review discussions. A request does not need an issue. Linked issues receive one
+readable status comment updated in place, with reconciliation after an uncertain
+write. Internal prompts, logs, events, and handoffs are not posted to issues or
+committed as deliverables.
 
-Factory runtime data normally lives under
-`~/.machinist/server`. Onboarding settings, credentials, temporary checks, and
-managed checkouts live below that directory. They are not placed beside source
-prompt definitions. Credentials use mode 0600 and their directory mode 0700.
-Execution history must be backed up for recovery; GitHub comments are not a backup
-of local scheduling state.
+Private SQLite `jobs.db` holds jobs, attempts, prompt versions and snapshots,
+approvals, automation definitions, feedback, and completion receipts. It lives
+beside the worker token, normally under `~/.machinist/server`. Credentials,
+checkouts, logs, and worker outputs also belong to the private runtime. Back up
+the whole runtime with a consistent SQLite snapshot. GitHub is not a backup of
+execution state.
 
-## Runtime flows
+One process owns the database through a host lock. New submission receipts and
+initial events commit atomically. Replaying the same `client_request_id` and
+payload returns the existing job; changing the payload returns 409. Stale prompt
+and automation edits are rejected. Running attempts retain their prompt snapshots.
+Shared prompts are seeded once from legacy repository prompts, ordered by
+repository name; existing shared edits take precedence.
 
-First launch opens setup: connect GitHub, choose a repository and checkout, choose
-an agent and host, verify, then start work. Device authorization handles pending,
-rate-limited, denied, and expired responses. Token refresh is serialized and a
-failed refresh preserves the prior credentials. Repositories without required
-permissions remain visible with an explanation.
+On upgrade, the former `factory.db` is snapshotted into `jobs.db` and retired under
+`archive/factory-v1.db`. IDs, events and hashed receipts survive. Legacy
+`machinist.db` stores remain separate. Imported blocked jobs receive a publication
+hold. Holds survive retries and prompt edits, prevent dispatch and GitHub updates,
+and require an explicit release naming the current hold version. Stop running
+work before changing publication access. A hold cannot undo an external write
+already issued.
 
-For local execution the foreman starts an in-process managed worker. For a VM it
-provides a private setup script and an SSH forwarding command. The displayed
-forward is initiated on the VM toward the foreman's SSH host; that requires SSH
-reachability to the foreman. The app never opens a public listener or enables SSH.
-The VM keeps its own GitHub and provider authentication.
+## GitHub and host execution
 
-A job fixes its built-in mode at creation: `factory` for the Standard pipeline or `single` for one task runner. No arbitrary workflow is offered. Historical direct/answer jobs retain their recorded transitions for recovery but cannot be newly submitted. Triage and Review use restricted read-only executors with host-collected evidence. Standard delivery always starts at Triage, which requests Spec only for consequential decisions. Single-agent tasks may return an operational result directly; repository changes require verified PR delivery, with no independent review claimed. Both modes wait for human merge when a PR exists. Spec pushes
-one tracked specification and draft PR, then pauses for approval of that attempt.
-Implement reuses the branch and PR. Independent Review checks the exact published
-head using bounded host-collected evidence. Findings trigger at most three repair
-rounds. Accepted review waits for human merge and a verified GitHub merge check.
-The factory never merges automatically.
+Onboarding uses a GitHub App's public client ID and device authorization. Access
+is limited to the installation/user repository intersection; setup checks App
+permissions and user write access. Tokens and refresh data stay private on the
+control-plane host. Clients receive neither an App private key nor a shared
+client secret. Refresh is serialized and preserves prior credentials on failure.
 
-Transitions and receipts are committed locally before dispatch or acknowledgement.
-Restart interrupts running work rather than replaying side effects. Retry requires
-confirmation that an interrupted process stopped. Prompt saves use optimistic
-version checks. A failed readable status update does not erase a durable result.
+Local agent Git/gh processes receive a refreshed token through the environment.
+The Git helper scopes normal Git authentication to the selected repository;
+the API token can access other repositories granted to the App. VM workers use
+their own host GitHub credentials. Local/VM workers are trusted with their host
+account permissions: checkout selection is not an operating-system sandbox.
+Executables, argument arrays, paths, models, and credentials are operator-owned.
+Repository content cannot widen registered executor configuration.
 
-## Compatibility and operating limits
-
-`server.state = "factory"` selects this backend; `github` remains a compatibility
-alias. Legacy direct and sequence modes keep their existing SQLite/artifact
-contracts. Previous GitHub event comments remain historical and are not deleted
-or treated as the active database. Re-adopt a linked issue explicitly to start a
-new local task. There is no automatic migration of old comment journals.
-
-A publication hold survives retries and prompt edits. Held jobs are never dispatched, and no status or label content is written to GitHub for them. A dedicated operator release action must name the current hold version. Running work must first be cancelled and stopped before changing publication access; already issued GitHub writes cannot be undone.
-
-One foreman owns a local factory database. Multiple trusted workers can connect.
-The UI uses a compact runs table and grouped sidebar. Inbox clearing is a durable
-notification preference, not task deletion; later workflow activity resurfaces it.
-Role prompts and embedded execution contracts use Markdown. PostgreSQL, a
-conversational Foreman and versioned custom roles remain planned. The current
-trusted local/VM compatibility worker still receives per-run GitHub credentials.
+Setup requires a real read-only PONG, plus repository and GitHub access checks.
+Local workers start automatically. VM workers use a private pairing script and
+an operator-created SSH tunnel. The app neither provisions SSH nor exposes a
+public listener. Agents are shared across configured projects.
 
 ## Kubernetes execution
 
-An optional Kubernetes connector runs beside the existing local control plane.
-It uses an explicit kubectl context and a fixed, digest-pinned gVisor Job per
-attempt. It sends Git objects and execution context, never host credentials or a
-worker bearer. The agent receives a dedicated native Codex account cache and no
-GitHub or cluster token. Triage/Review source is mounted read-only. An enforced
-network boundary permits only cluster DNS and an allowlisted HTTPS CONNECT proxy;
-credential-free preparation probes this before the agent starts.
+`internal/kuberunner` launches a fixed digest-pinned gVisor Job per attempt. Pods
+are non-root, with a read-only root filesystem, dropped capabilities, bounded
+resources, no host mounts, and no service-account token. Triage and Review source
+is mounted read-only. An enforced NetworkPolicy permits cluster DNS and an
+allowlisted HTTPS CONNECT proxy. Credential-free preparation verifies denial of
+metadata, Kubernetes API, direct internet, and unapproved proxy destinations.
 
-A cluster lock serializes native auth-cache refresh. Completion retains the
-refreshed Secret with a resource-version check. Cancellation requests native
-shutdown, attempts cache retention, and deletes the Job in the foreground. Unlock
-requires Pod absence. Uncertain execution/cache persistence keeps the lock and
-requires operator recovery; jobs never retry themselves or fall back to local/API
-execution. A restarted local control plane resumes its connector, not an old
-attempt. Existing interrupted-attempt confirmation still applies.
+The agent receives a dedicated native Codex account cache, never GitHub, worker,
+or cluster credentials. A ConfigMap lock serializes that account stream across
+attempts and connectors. Native refresh is written back to the Secret using a
+resource-version check. The CLI and code it runs can read the model credential;
+this is trusted personal automation, not a shared subscription service.
 
-For this target, the trusted connector validates bounded candidate bundles in a
-bare repository and publishes the assigned fast-forward branch and PR. It never
-runs candidate source in that publisher. Publication checks the active lease and
-reconciles the assigned remote branch after a lost response. This retains the
-existing single-owner local lease model; durable distributed leases, a separate
-publication gateway and a cloud control plane remain future work. The database
-and GitHub App connection do not move into agent Pods. See the
-[Kubernetes runner guide](docs/local-factory/kubernetes.md).
+The trusted connector imports a bounded returned Git bundle into a disposable
+bare repository, validates head and ancestry, and publishes only the assigned
+fast-forward branch and PR. It never runs candidate source in the publisher.
+Publication checks the active lease and reconciles uncertain remote writes.
 
-Cross-machine foreman replication, hosted token relays, push webhooks, automatic
-CI repair, merge polling, and live output streaming are not included.
+Cancellation asks the native process to stop, retains refreshed authentication
+when possible, then foreground-deletes the Job. Unlock requires confirmed Pod
+absence. Uncertain execution or cache persistence retains the lock for operator
+recovery. There are no automatic Pod retries or local/API billing fallbacks.
+See [runner setup and recovery](docs/local-factory/kubernetes.md).
 
-Automated proof covers authorization failure paths, local restart and receipts,
-zero GitHub writes for plain tasks, comment retry reconciliation, credential
-scoping, VM health checks, and setup gating. Live GitHub consent is completed by
-the account owner. See the [factory guide](docs/local-factory/README.md).
+The [GKE control plane](docs/local-factory/cloud-control-plane.md) uses one replica,
+Recreate updates, and SQLite on a persistent disk. Its built-in dispatcher uses a
+rotating in-cluster Kubernetes service-account token and narrow runner-namespace
+RBAC. It needs no personal gcloud login at runtime. The UI stays on loopback,
+accessed by operator port-forward; no public ingress is installed. Never run the
+old laptop state and the cloud copy concurrently.
+
+## Automations and GitHub follow-ups
+
+Saved automations start single-agent jobs from the project root, manually or on
+a five-field cron schedule with an IANA timezone. The control plane checks due
+work every 15 seconds, coalesces missed occurrences, and prevents overlapping
+unresolved jobs. Pausing prevents future scheduled admissions, not manual runs.
+
+Repository maintenance is a distinct automation type. It gives a read-only agent
+bounded issue/PR evidence and validates its recommendations. The foreman can
+append existing classification labels without removing human or routing labels.
+It never closes issues or PRs or posts internal reports to GitHub.
+
+Only recorded factory PRs with an accepted independent review on the current head
+can qualify for automatic merge. The fixed policy permits small edits to existing,
+non-sensitive Markdown documentation. It also requires complete diff evidence,
+a merge recommendation, successful current checks, strict protection for every
+observed context, resolved conversations, and no outstanding change requests or
+private hold. Fresh revalidation and a SHA-guarded asynchronous squash merge use
+`bypass_rules: false`. Pending requests are not called merged. Single-agent and
+unrelated PRs never qualify. The full policy is in [Automations](docs/local-factory/automations.md).
+
+A separate poller checks up to ten PR-ready jobs per minute for qualifying CI
+failures, trusted review feedback, and confirmed merges. It repairs the same PR
+within the normal three-round limit and deduplicates consumed feedback. It does
+not merge or resolve conversations. Only a confirmed merge with the recorded PR
+head completes a delivery. See [GitHub follow-ups](docs/local-factory/github-followups.md).
+
+## Failures and code boundaries
+
+Transitions commit before dispatch or acknowledgement. Duplicate completions do
+not advance twice. Restart interrupts running work instead of replaying external
+side effects; retry requires proof the old process stopped. GitHub publication
+failures preserve durable results and remain visible. Missing or incomplete
+remote evidence fails closed.
+
+- `internal/controlplane`: API, onboarding, SQLite jobs, deterministic foreman,
+  schedules, maintenance policy, GitHub polling and status publication.
+- `internal/managedworker`: allowlisted execution, workspaces, evidence,
+  publication, leases, heartbeats and process lifecycle.
+- `internal/runner`: bounded process execution, provider output and token reporting.
+- `internal/kuberunner`: sandbox templates, proxy, authentication retention and cleanup.
+- `internal/githubauth`: process-scoped Git credentials.
+
+Automated checks cover state transitions, privacy, idempotency, authorization,
+merge gates, cleanup and provider failure paths. Live GKE evidence is recorded
+beside the relevant deployment guide; it does not prove every provider or failure
+mode. Follow [Development](docs/development.md) for repeatable checks.

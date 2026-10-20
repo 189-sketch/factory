@@ -1,4 +1,9 @@
-# Local four-agent factory
+# Original four-agent factory spec
+
+> Historical implementation brief. Some exclusions below have since shipped,
+> including automations, CI/review follow-ups, merge polling and GKE hosting;
+> Inbox has been removed. Use [Architecture](../../ARCHITECTURE.md) and the
+> [setup guide](README.md) for the current product.
 
 This is the core contract, updated for the approved GitHub App onboarding and
 local execution-state ownership. Published specifications remain on GitHub.

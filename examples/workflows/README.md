@@ -1,5 +1,9 @@
 # Workflow examples
 
+For the current app, use the [Standard pipeline or Single agent](../../docs/task-guide.md).
+These examples are lower-level executables or legacy sequences, not additional
+workflow choices in the app.
+
 A Machinist command runs one executable with the prompt on standard input. The same
 workflow can be written in two styles.
 
@@ -45,7 +49,8 @@ progress.
 
 ## Managed task workflows
 
-For stages tracked in the UI, see [the task guide](../../docs/task-guide.md),
+For legacy sequence APIs with `server.state = "sqlite"`, see
+[the workflow reference](../../docs/workflows.md),
 [staged configuration](staged/config.toml), and the optional
 [classify-then-merge example](risk_delivery/README.md).
 

@@ -67,7 +67,7 @@ Do not replace a pinned SHA with a mutable tag.
 - Explain what was verified, including browser checks for UI work.
 - Do not commit credentials, local configuration, databases, or run artifacts.
 
-Changes to `main` must go through a pull request and pass the required `check`
-status. By participating, you agree to follow the
+Changes to `main` must go through a pull request and pass the required `check`, `Linux checks`, and `macOS checks`
+statuses. By participating, you agree to follow the
 [Code of Conduct](CODE_OF_CONDUCT.md). Contributions use the project's
 [MIT License](LICENSE).

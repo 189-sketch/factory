@@ -1,7 +1,8 @@
 # Set up the local factory
 
 Machinist connects GitHub to Codex or Claude Code running on your computer, a VM, or Kubernetes.
-There is no Machinist cloud account and no hosted agent execution.
+No Machinist cloud account is required. The control plane can also run in your
+[GKE cluster](cloud-control-plane.md); agents still execute on infrastructure you control.
 
 ## First run
 
@@ -105,13 +106,20 @@ receipts. Linked issues receive one concise status comment updated in place.
 Internal prompts, JSON events, logs, and handoffs are never posted to issues.
 There is no local specification viewer or Markdown artifact list in factory tasks.
 
-Review findings return to the same PR for at most three repair rounds. Inspect CI
-and merge on GitHub when ready. **Check merge status** verifies that the reviewed
-head was merged before marking a code task complete. Machinist never merges itself.
+Review findings return to the same PR for at most three repair rounds. The
+[GitHub follow-up watcher](github-followups.md) handles qualifying CI/review repairs
+and verifies confirmed merges. You can also use **Check merge status**. Neither
+green CI nor an approval alone completes a delivery.
+
+Merge manually by default. Optional
+[repository maintenance](automations.md#repository-maintenance) can auto-merge only
+small, independently reviewed Machinist documentation PRs that meet its fixed
+policy and branch protections. Single-agent deliveries remain ineligible.
 
 ## Recovery and compatibility
 
-Back up the factory database and machine configuration. Restart preserves local
+Back up the full private runtime with a consistent SQLite snapshot, including
+credentials, configuration, checkouts and worker outputs. Restart preserves
 history and interrupts previously running attempts. Confirm the old process stopped
 before retrying. Published branches allow workspace recovery without provider-session
 memory. One foreman owns each local database.
@@ -141,7 +149,7 @@ Every requested file, including reports, documents, and HTML pages, is committed
 
 ### Dashboard
 
-Dashboard is the default page and the first navigation item. The older `#/analytics` link opens it too. Current workload spans all dates: active jobs, PRs ready for review, and uncleared approvals, blockers or failures. Counts open matching run filters; entering Runs from another page clears an unrelated search.
+Dashboard is the default page and the first navigation item. The older `#/analytics` link opens it too. Current workload spans all dates: active jobs, PRs ready for review, and pending approvals, blockers or failures. Counts open matching run filters; entering Runs from another page clears an unrelated search.
 
 The 7/30-day activity chart counts jobs by creation day in your browser's timezone. Outcomes, recent jobs, timed execution and reported tokens use that same creation window. Current runner availability and schedules stay independent of the time window. Missing token usage is shown as unreported, without inferred costs.
 

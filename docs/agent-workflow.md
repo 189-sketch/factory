@@ -1,6 +1,10 @@
-# Canonical issue delivery workflow
+# Optional Python issue-delivery adapter
 
-[`agent.py`](../agent.py) is the single issue-to-PR workflow. It accepts one GitHub
+This guide covers a standalone script, not the app foreman. For the built-in
+Standard pipeline and its durable GitHub follow-ups, use [job delivery](task-guide.md)
+and [GitHub follow-ups](local-factory/github-followups.md).
+
+[`agent.py`](../agent.py) is an optional issue-to-PR workflow. It accepts one GitHub
 issue, implements it, verifies the returned PR relationship, waits for CI and review
 feedback, and runs up to three repair passes. It never merges or force-pushes.
 

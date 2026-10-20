@@ -1,4 +1,8 @@
-# Artifact workflows
+# Legacy artifact workflows
+
+This reference applies to sequence workflows with `server.state = "sqlite"`.
+The current factory app publishes requested files through GitHub PRs and has no
+local specification viewer. See [job delivery](task-guide.md).
 
 A task describes the work. A workflow chooses the commands. Each stage attempt
 produces files, which the worker uploads to control-plane storage before the

@@ -17,7 +17,8 @@ Edit opens the saved instructions and schedule. Pause/Resume uses buttons. Delet
 All mutations require the normal CSRF/origin protection or worker bearer authorization.
 
 - `GET /api/v1/automations`: list definitions and latest run links.
-- `POST /api/v1/automations`: create `{name, repository, prompt, cron, timezone, paused}`. Empty `cron` means manual only.
+- `POST /api/v1/automations`: create `{name, repository, prompt, cron, timezone, paused}`. Add
+  `kind: "repository-maintenance"` for the managed maintenance type below. Empty `cron` means manual only.
 - `PUT /api/v1/automations/{id}`: replace those fields with the current `version`. Stale versions return 409.
 - `POST /api/v1/automations/{id}/run`: queue once with `{client_request_id}`. Reuse the key to recover a lost response. An optional `previous_process_stopped: true` explicitly confirms cancelled processes have stopped.
 - `DELETE /api/v1/automations/{id}`: delete with `{version}`.
