@@ -102,12 +102,26 @@ expose the existing unauthenticated loopback API directly.
 
 For an existing deployment, use this update sequence:
 
-1. Finish or cancel active work and confirm old agent Pods stopped. Check that
-   no due schedule can admit another job during the rollout.
+1. Pause every scheduled automation and stop manual/API submission clients for
+   the entire maintenance window. Record which schedules were enabled so only
+   those are resumed afterwards. Finish or cancel active work, then gracefully
+   stop the control-plane owner so GitHub follow-up polling cannot enqueue repairs:
+
+   ```sh
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     scale deployment/machinist-control-plane --replicas=0
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     wait --for=delete pod --selector=app=machinist-control-plane --timeout=180s
+   ```
+
+   Confirm agent Jobs, Pods and credential locks are also gone. Do not force-delete
+   unreachable workloads. Keep the owner stopped until the backup is complete.
 2. Make a private, consistent SQLite backup plus a runtime archive. A raw copy of
    `jobs.db` while SQLite is writing is not a consistent backup; use SQLite's
-   backup API or stop the owner first. Protect archives as credentials and never
-   add them to the build context.
+   backup API with the owner stopped. Mount the claim in a temporary trusted,
+   non-root utility Pod to copy the private runtime; do not start Machinist there.
+   Remove that Pod before restarting the control plane. Protect archives as
+   credentials and never add them to the build context.
 3. Build from reviewed source, verify `machinist version` inside the image, push
    it, verify the registry digest, and review the overlay's digest change.
 4. Run server-side validation, apply the normal GKE overlay, and wait for rollout:
@@ -122,8 +136,9 @@ For an existing deployment, use this update sequence:
 
 5. Reconnect port-forward to the replacement Pod. Confirm one healthy worker,
    preserved job IDs, projects, automations, GitHub connection and publication
-   holds. Run a real connection check or narrow job and verify runner cleanup
-   before enabling schedules.
+   holds. Run a real connection check or narrow job and verify runner cleanup.
+   Only after validation, resume the previously enabled schedules and submission
+   clients. Leave schedules that were already paused unchanged.
 
 Never reapply the zero-replica bootstrap overlay during an ordinary update.
 Never restore the old laptop runtime over newer cloud history.
