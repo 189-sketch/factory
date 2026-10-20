@@ -5,6 +5,8 @@ New runs in the web UI use `native-v1`: one primary run owns all observed child 
 - Claude Code: `.claude/agents/*.md`.
 - Codex: `.codex/agents/*.toml`, with `name`, `description`, and `developer_instructions`.
 
+The Agents page shows the configured primary prompt template, model choice, and native definitions for the selected local repository. Model inheritance is explicit. Built-in and plugin-provided agents are managed by the harness; remote repository definitions are reported as unavailable rather than inferred from a local checkout. This view is read-only and has a Refresh action.
+
 Commit those files to the repository. Machinist does not translate or copy agent definitions. The primary instructions come from `commands.primary.prompt_file` in the server config. The example config and `machinist init` include this command. Set its executor to `codex-native` or `claude-native`. Set a model only when it is available to the signed-in account. Codex checks `account/read` and `model/list` before starting a primary thread; the service can still reject a listed model at turn start.
 
 Host workers use existing CLI subscription sign-in. Native adapters remove inherited desktop routing variables and API-token variables from the child environment. Codex requires a ChatGPT account; Claude rejects an explicit API key source. This is a personal host integration, not approval for hosted commercial subscription use.

@@ -36,6 +36,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   let cancelled = false;
   let savedPrompt;
   globalThis.fetch = async (url, options) => {
+    if (url.startsWith("/api/v1/agents")) return { ok: true, json: async () => ({ repository: "example/repo", repositories: ["example/repo"], harness: "claude", agents: [{ id: "primary", name: "Primary agent", kind: "primary", harness: "claude", model: "sonnet", prompt: "Coordinate this task.", source: "prompts/primary.md" }] }) };
     if (url.startsWith("/api/v1/definitions")) return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
     if (url === "/api/v1/factory/agents/triage" && options?.method === "PUT") { savedPrompt = JSON.parse(options.body); return { ok: true, json: async () => ({ hash: "new-hash" }) }; }
 
@@ -157,10 +158,9 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   assert.ok(document.querySelector('[role="tab"][aria-selected="true"]'), "run has clear Activity and Details tabs");
   assert.equal(document.querySelector("details"),null,"native disclosure toggles are absent");
   window.location.hash = "#/agents";
-  await eventually(() => assert.match(document.body.textContent, /Repository configuration/));
-  assert.match(document.body.textContent, /commands.primary.prompt_file/);
-  assert.match(document.body.textContent, /\.claude\/agents\/\*\.md/);
-  assert.match(document.body.textContent, /\.codex\/agents\/\*\.toml/);
+  await eventually(() => assert.match(document.body.textContent, /Coordinate this task/));
+  assert.match(document.body.textContent, /sonnet/);
+  assert.match(document.body.textContent, /prompts\/primary.md/);
   assert.equal(document.querySelector("textarea"),null);
 
   window.location.hash = "#/runs";
@@ -169,6 +169,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   // A retry can then exercise the same submission regardless of machine speed.
   const submissions = [];
   globalThis.fetch = async (url, options) => {
+    if (url.startsWith("/api/v1/agents")) return { ok: true, json: async () => ({ repository: "example/repo", repositories: ["example/repo"], harness: "claude", agents: [{ id: "primary", name: "Primary agent", kind: "primary", harness: "claude", model: "sonnet", prompt: "Coordinate this task.", source: "prompts/primary.md" }] }) };
     if (url === "/api/v1/jobs") {
       submissions.push(JSON.parse(options.body));
       if (submissions.length === 1) throw new Error("Response lost after submission");
