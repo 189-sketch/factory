@@ -34,7 +34,7 @@ test("a shared prompt draft keeps its original version for conflict detection", 
       else delete globalThis[name];
     }
   });
-  const { AgentsPage } = await server.ssrLoadModule("/src/catalog.jsx");
+  const { LegacyAgentsPage: AgentsPage } = await server.ssrLoadModule("/src/catalog.jsx");
   await act(async () => root.render(React.createElement(AgentsPage, { csrfToken: "test", repositories: ["owner/a", "owner/b"], stateBackend: "local" })));
   const click = async text => {
     const element = [...document.querySelectorAll("button")].find(element => element.textContent === text);

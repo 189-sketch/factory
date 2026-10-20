@@ -157,22 +157,11 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   assert.ok(document.querySelector('[role="tab"][aria-selected="true"]'), "run has clear Activity and Details tabs");
   assert.equal(document.querySelector("details"),null,"native disclosure toggles are absent");
   window.location.hash = "#/agents";
-  await eventually(() => assert.ok(document.querySelector('[aria-label="Factory agents"]')));
-  await eventually(() => assert.equal(document.querySelector("textarea").value, "triage original prompt"));
-  assert.ok(document.querySelector(".markdown-prompt"), "prompt has a Markdown reading view");
-  button("Edit prompt").click();
-  assert.equal(button("Save prompt").disabled, true);
-  const textarea = document.querySelector("textarea");
-  Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Updated triage prompt");
-  textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
-  await eventually(() => assert.equal(button("Save prompt").disabled, false));
-  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Spec")).click();
-  await eventually(()=>assert.equal(document.querySelector("textarea").value,"spec original prompt"));
-  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Triage")).click();
-  await eventually(()=>assert.equal(document.querySelector("textarea").value,"Updated triage prompt"));
-  button("Save prompt").click();
-  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
-  await eventually(() => assert.match(document.body.textContent, /Saved. Future stage attempts use this Markdown version/));
+  await eventually(() => assert.match(document.body.textContent, /Repository configuration/));
+  assert.match(document.body.textContent, /commands.primary.prompt_file/);
+  assert.match(document.body.textContent, /\.claude\/agents\/\*\.md/);
+  assert.match(document.body.textContent, /\.codex\/agents\/\*\.toml/);
+  assert.equal(document.querySelector("textarea"),null);
 
   window.location.hash = "#/runs";
   await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "New run")));

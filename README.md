@@ -34,7 +34,15 @@ target; adding one preserves the existing projects.
 
 ## Run a job
 
-Use **Runs → New run** with a request or GitHub issue link:
+Use **Runs → New run** with a request or GitHub issue link. New host runs default
+to [native agents](docs/native-agents.md): one primary Claude or Codex run discovers
+repository-defined children and shows their live activity under the run. Configure
+`commands.primary.prompt_file` and commit `.claude/agents/*.md` or
+`.codex/agents/*.toml` in the task repository. Codex requires saved CLI trust for
+the main repository root. Native child reviews are advisory; this mode has no
+enforced specification approval or separate read-only review checkout.
+
+The existing modes remain available, including the Kubernetes single-agent path:
 
 - **Standard pipeline:** Triage → optional Spec and approval → Build → independent
   Review. Findings return to Build on the same PR, for up to three repair rounds.

@@ -68,6 +68,11 @@ func TestKubernetesConnectorResumesAfterRestart(t *testing.T) {
 	}
 	started := make(chan struct{})
 	s.SetLocalWorkerFactory(func(cfg config.Worker) (LocalWorker, error) {
+		for name, e := range cfg.Executors {
+			if e.Adapter != "" {
+				t.Errorf("host-native executor %s leaked into Kubernetes config", name)
+			}
+		}
 		if cfg.Kubernetes == nil || cfg.Name != "machinist-kubernetes" {
 			t.Error("resumed wrong runtime")
 		}

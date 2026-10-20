@@ -185,6 +185,8 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.auth.authorizeSubmission(s.action))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.auth.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.auth.authorizeWorker(s.heartbeat))
+	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.auth.authorizeWorker(s.ingestEvents))
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.runEvents)
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.auth.authorizeWorker(s.complete))
 	mux.HandleFunc("GET /api/v1/jobs/{id}/artifacts", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, []any{}) })
 	mux.Handle("/", http.FileServer(http.FS(dist)))
@@ -517,9 +519,24 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 	if recipe == "" {
 		recipe = "factory"
 	}
-	if recipe != "factory" && recipe != "single" {
+	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
 		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
 		return
+	}
+	if recipe == "native-v1" {
+		definition, loadErr := config.LoadDefinitions(s.definitionPath)
+		if loadErr != nil {
+			writeError(w, 400, loadErr)
+			return
+		}
+		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
+			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
+			return
+		}
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
+			return
+		}
 	}
 	if len(input.ClientRequestID) > 128 || strings.TrimSpace(input.ClientRequestID) != input.ClientRequestID {
 		writeError(w, 400, errors.New("invalid client request ID"))
@@ -860,6 +877,9 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		task := s.tasks[id]
 		state := task.state
+		if state.Job.Recipe == "native-v1" && (!p.NativeAgents || p.Runtime == "kubernetes") {
+			continue
+		}
 		if (state.Job.Recipe == "single" && !p.SingleAgent) || (state.Job.Recipe != "single" && !p.Reviews) {
 			continue
 		}
@@ -907,6 +927,10 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				writeError(w, 502, err)
 				return
+			}
+			if state.Job.Recipe == "native-v1" && p.Adapters[command.Executor] != "claude-stream" && p.Adapters[command.Executor] != "codex-app-server" {
+				capable = false
+				break
 			}
 			if !executors[command.Executor] || !supportsModel(p.Models, command.Executor, command.Model) || ((stage == "review" || stage == "triage" || state.Job.Recipe == "answer") && !readonly[command.Executor]) {
 				capable = false
@@ -1201,6 +1225,21 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, role string) (config.ResolvedCommand, error) {
+	if role == "primary" {
+		definition, err := config.LoadDefinitions(s.definitionPath)
+		if err != nil {
+			return config.ResolvedCommand{}, err
+		}
+		command, err := definition.ResolveCommand("primary")
+		if err == nil && s.setup != nil {
+			selection := s.setup.snapshot().Selection
+			if selection.Agent != "" {
+				command.Executor = selection.Agent + "-native"
+			}
+		}
+		return command, err
+	}
+
 	command, err := s.command(ctx, role)
 	if err == nil && (task.state.Job.Recipe == "answer" || role == "triage") {
 		review, reviewErr := s.command(ctx, "review")

@@ -156,9 +156,24 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		return result, &RuntimeError{Cause: err}
 	}
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
+	native := options.Command.Adapter == "claude-stream" || options.Command.Adapter == "codex-app-server"
+	if native {
+		executorCommand, err = nativeCommand(options.Command)
+		if err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
+		if options.Command.Adapter == "codex-app-server" {
+			canonical, canonicalErr := filepath.EvalSymlinks(repository)
+			if canonicalErr != nil {
+				return completeFailure(&result, log, runDirectory, canonicalErr)
+			}
+			repository = canonical
+
+		}
+	}
 	_, claudeAgent := claudeCommandInfo(options.Command.Executor, executorCommand)
-	agentExecutor := codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
-	if options.Factory != nil && newUsageCollector(options.Command.Executor, executorCommand) == nil {
+	agentExecutor := native || codexExecIndex(options.Command.Executor, executorCommand) >= 1 || claudeAgent
+	if options.Factory != nil && !native && newUsageCollector(options.Command.Executor, executorCommand) == nil {
 		return completeFailure(&result, log, runDirectory, fmt.Errorf("factory stages require a structured Codex or Claude Code executor"))
 	}
 	outputDirectory := ""
@@ -208,6 +223,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	command := exec.Command(executorCommand[0], executorCommand[1:]...)
 	command.Dir = repository
 	command.Env = append(mergeEnvironment(sanitizedEnvironment(os.Environ()), options.Environment), "MACHINIST_RUN_ID="+runID, "MACHINIST_REPOSITORY="+repository, tokenUsageEnvironment+"="+tokenUsagePath)
+	if native {
+		command.Env = nativeEnvironment(command.Env)
+	}
 	if options.Revision != nil {
 		revisionPath := filepath.Join(runDirectory, "revision.json")
 		body, err := json.Marshal(options.Revision)
@@ -237,6 +255,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		command.Env = append(command.Env, "MACHINIST_FACTORY_CONTEXT="+string(body))
 		options.Command.Prompt += options.ReviewEvidence
 		options.Command.Prompt += factoryPrompt(options.Factory, repository)
+	}
+	if native {
+		if err := nativeProvenance(runDirectory, repository, options.Command); err != nil {
+			return completeFailure(&result, log, runDirectory, err)
+		}
 	}
 	configureProcess(command)
 
@@ -276,7 +299,15 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	}
 
 	inputResult := make(chan error, 1)
-	go writePrompt(stdinWriter, options.Command.Prompt, inputResult)
+	var nativeOutput *nativeStream
+	if native {
+		nativeOutput = &nativeStream{adapter: options.Command.Adapter, log: log, stdin: stdinWriter, model: options.Command.Model, cwd: repository, prompt: options.Command.Prompt}
+	}
+	if options.Command.Adapter == "codex-app-server" {
+		go func() { inputResult <- nativeOutput.start() }()
+	} else {
+		go writePrompt(stdinWriter, options.Command.Prompt, inputResult)
+	}
 	streamErrors := make(chan error, 2)
 	var streams sync.WaitGroup
 	streams.Add(2)
@@ -286,6 +317,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if usageCollector != nil {
 		usageCollector.diagnostics = diagnostics
 		stdoutDestination = io.MultiWriter(options.Stdout, usageCollector)
+	}
+	if nativeOutput != nil {
+		stdoutDestination = io.MultiWriter(stdoutDestination, nativeOutput)
 	}
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
 	go pumpStream(&streams, stderrReader, io.MultiWriter(options.Stderr, diagnostics), "stderr", log, streamErrors)
@@ -302,7 +336,15 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
-	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr)
+	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
+	if nativeOutput != nil {
+		if err := nativeOutput.finish(state != StateSucceeded); err != nil && state == StateSucceeded {
+			state, exitCode, outcome = StateFailed, 1, err
+		}
+		if state == StateSucceeded && !nativeOutput.completed {
+			state, exitCode, outcome = StateFailed, 1, errors.New("native harness exited before primary completion")
+		}
+	}
 	if usageCollector != nil {
 		usageCollector.flush()
 	}
@@ -318,6 +360,13 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		if options.Factory != nil && usageCollector != nil {
 			step, err = parseFactoryMessage(usageCollector.lastMessage())
 		}
+		if nativeOutput != nil && options.Factory != nil {
+			if options.Factory.Recipe == "native-v1" {
+				step, err = parseNativeResult(nativeOutput.lastMessage())
+			} else {
+				step, err = parseFactoryMessage(nativeOutput.lastMessage())
+			}
+		}
 		if err != nil {
 			state, exitCode, outcome = StateFailed, 1, err
 		} else {
@@ -329,6 +378,13 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if usageCollector != nil {
 		collectedTokenUsage = usageCollector.tokenUsage()
 		result.FinalMessage = usageCollector.lastMessage()
+	}
+	if nativeOutput != nil {
+		result.FinalMessage = nativeOutput.lastMessage()
+		if options.Command.Adapter == "codex-app-server" {
+			collectedTokenUsage = nativeOutput.usage
+			collectedTokenUsageIsAuthoritative = true
+		}
 	}
 	if err := finish(&result, log, runDirectory, state, exitCode, outcome, collectedTokenUsage, collectedTokenUsageIsAuthoritative); err != nil {
 		if outcome != nil {
@@ -374,6 +430,11 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 	// process result so callers can decide how to report the failure.
 	abort := func() processWait {
 		setOutputDeadline(time.Now(), outputWriters...)
+		for _, writer := range outputWriters {
+			if stop, ok := writer.(interface{ BeforeProcessStop() }); ok {
+				stop.BeforeProcessStop()
+			}
+		}
 		_ = terminateProcessTree(process)
 		closeInput()
 		closeStreams()
@@ -509,6 +570,10 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 		count, readErr := source.Read(buffer)
 		if count > 0 {
 			chunk := buffer[:count]
+			if err := log.appendOutput(stream, chunk); err != nil {
+				sendError(errorsChannel, err)
+				return
+			}
 			written, writeErr := destination.Write(chunk)
 			if writeErr == nil && written != len(chunk) {
 				writeErr = io.ErrShortWrite
@@ -517,10 +582,7 @@ func pumpStream(group *sync.WaitGroup, source *os.File, destination io.Writer, s
 				sendError(errorsChannel, fmt.Errorf("write %s: %w", stream, writeErr))
 				return
 			}
-			if err := log.appendOutput(stream, chunk); err != nil {
-				sendError(errorsChannel, err)
-				return
-			}
+
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) && !errors.Is(readErr, os.ErrClosed) {

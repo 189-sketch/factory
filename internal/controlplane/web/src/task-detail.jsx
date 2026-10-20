@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
+import { NativeActivity } from "./native-activity.jsx";
 import { stageLabel } from "./stage-progress.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { jobDisplayTitle } from "./runs-board.js";
@@ -319,11 +320,11 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
       </header>
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       {job.github_sync_error && <p role="status" className="text-sm text-warning">{job.github_sync_error}</p>}
-      <ol className="factory-progress" aria-label="Task progress">
+      {job.recipe !== "native-v1" && <ol className="factory-progress" aria-label="Task progress">
         {stages.map(stage => <li key={stage.name} aria-current={stage.current ? "step" : undefined} className={cn(stage.current && "is-current", stage.complete && "is-complete")}>
           {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(stage.name)}{stage.skipped && <span>Skipped</span>}
         </li>)}
-      </ol>
+      </ol>}
       <Tabs key={job.id} label="Run sections" items={[
         {id:"activity",label:"Activity",content:<>      <section className="factory-result" aria-label="Current result">
         <h2>{resultTitle(job, result)}</h2>
@@ -331,10 +332,11 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
         {job.maintenance && result?.report && <div className="markdown-prompt" aria-label="Maintenance report"><Markdown>{result.report}</Markdown></div>}
         {result?.error && result.error !== result.summary && <p role="alert" className="factory-summary text-danger">{result.error}</p>}
         {job.state === "running" ? <RunActivity run={latest} /> : !result?.summary && <p className="factory-summary">{job.state === "queued" ? "Waiting for a runner to pick up this task." : "No result was reported."}</p>}
+        {job.recipe === "native-v1" && <NativeActivity run={latest} />}
         {progress?.spec_url && <a className="factory-spec-link" href={progress.spec_url} target="_blank" rel="noreferrer">Open spec on GitHub<ArrowRight className="size-4" aria-hidden="true" /></a>}
         <TaskActions key={`${job.id}:${latest?.id}:${job.state}:${job.hold_version || 0}`} job={job} result={result} onAction={onWorkflowAction} />
       </section>
-      {history.length > 0 && <section className="factory-history" aria-label="Previous attempts"><h2>Earlier activity</h2><ol>{history.map(run => <li key={run.id}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{stageLabel(run.command)}</span><State value={run.outcome === "complete" ? "succeeded" : run.outcome || run.state} /></div><p>{run.summary || run.error}</p>{run.github_url && <a href={run.github_url} target="_blank" rel="noreferrer">View on GitHub</a>}</li>)}</ol></section>}
+      {history.length > 0 && <section className="factory-history" aria-label="Previous attempts"><h2>Earlier activity</h2><ol>{history.map(run => <li key={run.id}><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{stageLabel(run.command)}</span><State value={run.outcome === "complete" ? "succeeded" : run.outcome || run.state} /></div><p>{run.summary || run.error}</p>{job.recipe === "native-v1" && <NativeActivity run={run} />}{run.github_url && <a href={run.github_url} target="_blank" rel="noreferrer">View on GitHub</a>}</li>)}</ol></section>}
 </>},
         {id:"details",label:"Details",content:<>      <section className="factory-details"><h2 className="text-sm font-medium">Run details</h2>
         {result && <ExecutionDetails run={result} />}

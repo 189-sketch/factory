@@ -38,7 +38,7 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
-  const [recipe, setRecipe] = useState("factory");
+  const [recipe, setRecipe] = useState("native-v1");
   const submission = useRef(null);
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
@@ -249,9 +249,9 @@ function RunComposer({ recipe,setRecipe,stateBackend,choices,repositories,select
     <form onSubmit={submit} className="composer-form">
       <label><span className="field-label">What do you want done?</span><textarea autoFocus aria-describedby={hintID} className="field-control composer-prompt" value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Describe a task or paste a GitHub issue link…" required /></label>
       <div className="composer-options"><label><span className="field-label">Repository</span><select className="field-control" value={repository} onChange={e=>setRepository(e.target.value)} required>{!repositories.length && <option value="">No repositories available</option>}{repositories.map(r=><option key={r} value={r}>{r}</option>)}</select></label>
-      {taskMode && <label><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="factory">Standard pipeline</option><option value="single">Single agent</option></select></label>}
+      {taskMode && <label><span className="field-label">Run mode</span><select className="field-control" value={recipe} onChange={event => setRecipe(event.target.value)}><option value="native-v1">Native agents</option><option value="factory">Legacy pipeline</option><option value="single">Single agent</option></select></label>}
       {!taskMode && <label><span className="field-label">Model override</span><input className="field-control" value={model} onChange={e=>setModel(e.target.value)} maxLength={128} placeholder="Agent default" /></label>}</div>
-      <p id={hintID} className="composer-hint">{!taskMode ? "Uses the configured agent and execution target." : recipe === "single" ? "One agent completes the task. No separate review." : "Triage → optional Spec → Build → Review. You decide when to merge."}</p>
+      <p id={hintID} className="composer-hint">{!taskMode ? "Uses the configured agent and execution target." : recipe === "native-v1" ? "One primary run with native child agents. You decide when to merge." : recipe === "single" ? "One agent completes the task. No separate review." : "Triage → optional Spec → Build → Review. You decide when to merge."}</p>
       {!choices.length && <p role="alert" className="text-sm text-danger">Complete setup before starting a run.</p>}
       <footer><Button variant="ghost" type="button" onClick={close}>Cancel</Button><Button disabled={submitting || !selection || !repository}>{submitting ? "Starting…" : "Start run"}<Play className="size-3.5" /></Button></footer>
     </form>

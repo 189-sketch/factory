@@ -84,12 +84,15 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if recipe == "" {
 				recipe = "factory"
 			}
-			if recipe != "factory" && recipe != "direct" && recipe != "answer" && recipe != "single" {
+			if recipe != "factory" && recipe != "direct" && recipe != "answer" && recipe != "single" && recipe != "native-v1" {
 				return nil, fmt.Errorf("invalid job recipe")
 			}
 			first := "triage"
 			if recipe == "direct" || recipe == "single" {
 				first = "implement"
+			}
+			if recipe == "native-v1" {
+				first = "primary"
 			}
 			if s.LastEventID != 0 || event.Role != first {
 				return nil, fmt.Errorf("invalid factory creation")
@@ -103,6 +106,9 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			}
 			if recipe == "single" {
 				s.Job.Workflow.Steps = []string{"implement"}
+			}
+			if recipe == "native-v1" {
+				s.Job.Workflow.Steps = []string{"primary"}
 			}
 			if recipe == "answer" {
 				s.Job.Workflow.Steps = []string{"triage"}
@@ -327,6 +333,10 @@ func (s *GitHubFactoryState) block(reason string) {
 	s.Job.Runs[len(s.Job.Runs)-1].Summary = reason
 }
 func (s *GitHubFactoryState) repair(url string) {
+	if s.Job.Recipe == "native-v1" {
+		s.queue(url, "primary", "queued")
+		return
+	}
 	if s.Job.Workflow.Factory.RepairRound >= 3 {
 		s.block("Three repair rounds exhausted")
 		return
@@ -375,8 +385,8 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		progress.HeadSHA = f.HeadSHA
 		progress.Branch = f.Branch
 		s.queue(url, "implement", "awaiting_approval")
-	case "implement":
-		if s.Job.Recipe == "single" && progress.PRURL == "" && f.PRURL == "" && f.HeadSHA == "" && f.Branch == "" {
+	case "primary", "implement":
+		if (s.Job.Recipe == "single" || s.Job.Recipe == "native-v1") && progress.PRURL == "" && f.PRURL == "" && f.HeadSHA == "" && f.Branch == "" {
 			s.Job.State = "succeeded"
 			return nil
 		}
@@ -397,7 +407,7 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		progress.Branch = f.Branch
 		progress.Verdict = ""
 		progress.Findings = nil
-		if s.Job.Recipe == "single" {
+		if s.Job.Recipe == "single" || s.Job.Recipe == "native-v1" {
 			s.Job.State = "awaiting_merge"
 		} else {
 			s.queue(url, "review", "queued")

@@ -48,13 +48,14 @@ type ControlPlane struct {
 }
 
 type Executor struct {
+	Adapter  string            `toml:"adapter"`
 	ReadOnly bool              `toml:"read_only"`
 	Command  []string          `toml:"command"`
 	Models   map[string]string `toml:"models"`
 }
 
 func (e Executor) supportsModel() bool {
-	return slices.ContainsFunc(e.Command, func(argument string) bool { return strings.Contains(argument, modelParameter) })
+	return e.Adapter == "codex-app-server" || e.Adapter == "claude-stream" || slices.ContainsFunc(e.Command, func(argument string) bool { return strings.Contains(argument, modelParameter) })
 }
 
 type Repository struct {
@@ -144,6 +145,7 @@ type Command struct {
 }
 
 type ResolvedCommand struct {
+	Adapter    string
 	Name       string
 	Executor   string
 	Command    []string
@@ -277,6 +279,7 @@ func (w Worker) ResolveCommandModel(command ResolvedCommand, requestedModel stri
 		}
 		command.Command = append(command.Command, strings.ReplaceAll(argument, modelParameter, model))
 	}
+	command.Adapter = executor.Adapter
 	command.Model = model
 	return command, nil
 }
@@ -519,6 +522,14 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		worker.Repositories[name] = repository
 	}
 	for name, executor := range worker.Executors {
+		switch executor.Adapter {
+		case "", "process", "claude-stream", "codex-app-server":
+		default:
+			return Worker{}, fmt.Errorf("executor %q has unknown adapter %q", name, executor.Adapter)
+		}
+		if executor.Adapter != "" && executor.Adapter != "process" && slices.ContainsFunc(executor.Command, func(arg string) bool { return strings.Contains(arg, modelParameter) }) {
+			return Worker{}, fmt.Errorf("executor %q native adapter supplies model directly; remove model placeholders", name)
+		}
 		if err := validateCommand(name, executor.Command); err != nil {
 			return Worker{}, err
 		}

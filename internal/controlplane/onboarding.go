@@ -498,9 +498,9 @@ func (o *onboarding) selectAgent(agent, host string) error {
 }
 func setupExecutors(agent string) map[string]config.Executor {
 	if agent == "claude" {
-		return map[string]config.Executor{"claude": {Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"}}, "claude-review": {ReadOnly: true, Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--safe-mode", "--restricted", "--strict-mcp-config", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"}}}
+		return map[string]config.Executor{"claude-native": {Adapter: "claude-stream", Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--dangerously-skip-permissions"}}, "claude": {Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions"}}, "claude-review": {ReadOnly: true, Command: []string{"claude", "--print", "--verbose", "--output-format", "stream-json", "--safe-mode", "--restricted", "--strict-mcp-config", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"}}}
 	}
-	return map[string]config.Executor{"codex": {Command: []string{"codex", "exec", "--json", "--sandbox", "danger-full-access", "-"}}, "codex-review": {ReadOnly: true, Command: []string{"codex", "exec", "--json", "--sandbox", "read-only", "-"}}}
+	return map[string]config.Executor{"codex-native": {Adapter: "codex-app-server", Command: []string{"codex", "app-server", "--stdio", "-c", "features.multi_agent=true", "-c", `sandbox_mode='danger-full-access'`}}, "codex": {Command: []string{"codex", "exec", "--json", "--sandbox", "danger-full-access", "-"}}, "codex-review": {ReadOnly: true, Command: []string{"codex", "exec", "--json", "--sandbox", "read-only", "-"}}}
 }
 func (o *onboarding) workerConfig(selection setupSelection) (config.Worker, error) {
 	o.mu.Lock()
@@ -525,6 +525,11 @@ func (o *onboarding) workerConfig(selection setupSelection) (config.Worker, erro
 		}
 		if definition.Server.Kubernetes == nil {
 			return cfg, errors.New("Kubernetes runner configuration is missing")
+		}
+		for name, executor := range cfg.Executors {
+			if executor.Adapter != "" {
+				delete(cfg.Executors, name)
+			}
 		}
 		cfg.Kubernetes = definition.Server.Kubernetes
 		cfg.Name = "machinist-kubernetes"
@@ -664,7 +669,17 @@ func (o *onboarding) checkAgent(ctx context.Context, selection setupSelection) s
 		return setupCheck{"failed", err.Error()}
 	}
 	executor := setupExecutors(selection.Agent)[selection.Agent+"-review"]
-	result, err := runner.Execute(ctx, runner.Options{Command: config.ResolvedCommand{Name: "connection-check", Executor: selection.Agent, Command: executor.Command, Prompt: "Reply exactly PONG. Do not use tools, read files, or change anything.", Timeout: 45 * time.Second}, Repository: selection.Path, DataDirectory: filepath.Join(o.dir, "checks"), Stdout: io.Discard, Stderr: io.Discard, Environment: env})
+	if selection.Agent == "codex" {
+		executor = setupExecutors(selection.Agent)["codex-native"]
+		for index, arg := range executor.Command {
+			if strings.Contains(arg, "sandbox_mode=") {
+				executor.Command[index] = `sandbox_mode='read-only'`
+			}
+		}
+	} else {
+		executor.Adapter = "claude-stream"
+	}
+	result, err := runner.Execute(ctx, runner.Options{Command: config.ResolvedCommand{Name: "connection-check", Executor: selection.Agent, Adapter: executor.Adapter, Command: executor.Command, Prompt: "Reply exactly PONG. Do not use tools, read files, or change anything.", Timeout: 45 * time.Second}, Repository: selection.Path, DataDirectory: filepath.Join(o.dir, "checks"), Stdout: io.Discard, Stderr: io.Discard, Environment: env})
 	if err != nil {
 		return setupCheck{"failed", err.Error()}
 	}

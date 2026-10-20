@@ -4,7 +4,8 @@ state = "factory"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
 
-# Four specialists run through the deterministic local factory foreman.
+# Legacy specialists retain their deterministic factory routing.
+# New native-agent runs use commands.primary below.
 # Use executor "claude" for Claude Code; review requires "claude-review".
 # The worker may run on this host or on a configured remote machine.
 [workflows.factory]
@@ -64,3 +65,9 @@ timeout = "60m"
 # repository = "my-project"
 # command = "audit"
 # prompt = "Audit the repository for high-confidence correctness bugs."
+
+# One primary run. Child definitions live in each repository's native folders.
+[commands.primary]
+executor = "codex-native"
+prompt_file = "prompts/primary.md"
+timeout = "120m"

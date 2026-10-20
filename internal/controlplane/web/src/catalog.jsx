@@ -44,7 +44,7 @@ const specialistRoles = [
   ["review", "Independently check the change and return definite findings without editing it."],
 ];
 
-export function AgentsPage({ csrfToken, stateBackend }) {
+export function LegacyAgentsPage({ csrfToken, stateBackend }) {
   const factoryBackend = ["github", "local"].includes(stateBackend);
   const definitions = useDefinitions();
   const [selected, setSelected] = useState("triage");
@@ -87,4 +87,12 @@ export function AgentsPage({ csrfToken, stateBackend }) {
       ]} /></section>
     </div>}
   </Page>;
+}
+
+export function AgentsPage(props) {
+ if (!["github","local"].includes(props.stateBackend)) return <LegacyAgentsPage {...props} />;
+ return <Page title="Agents" description="One primary run with native child agents.">
+ <section className="max-w-2xl space-y-5 text-sm leading-6"><h2 className="text-lg font-semibold">Repository configuration</h2><p>The primary instructions use <code>commands.primary.prompt_file</code> in config.toml. Configure the executor and model in that command.</p><p>Claude Code discovers <code>.claude/agents/*.md</code>. Codex discovers <code>.codex/agents/*.toml</code>. Commit these files to the task repository so they are present in its worktree.</p><p>Child agents share a primary run. Their activity appears under that run. Native reviews are advisory; this mode does not enforce a separate spec approval or isolated review checkout.</p><details><summary className="cursor-pointer">Legacy prompts</summary><p>Existing pipeline tasks keep their saved prompt history. Legacy prompt overrides remain available through the existing API.</p></details></section>
+ </Page>;
+
 }
