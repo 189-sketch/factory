@@ -145,6 +145,22 @@ not a backup; deleting the PVC can delete its disk. Keep periodic private SQLite
 backups and runtime archives separately. This first deployment has no automatic
 backup service or public endpoint.
 
+## Availability limits
+
+The `standard-rwo` claim is zonal. A replacement control-plane Pod needs capacity
+in the disk's zone; healthy nodes in another zone cannot mount that claim. Node
+recovery or a capacity failure can therefore leave the app unavailable even when
+the cluster API is healthy. Recreate and a persistent disk do not provide
+cross-zone failover. Keep private backups outside the active runtime and plan
+recovery before treating this deployment as highly available.
+
+If Pods remain Pending, inspect scheduling events and disk node affinity before
+changing authentication or retrying agent work. Do not force-delete an unreachable
+Pod or clear credential locks to bypass uncertain process ownership. Follow
+[Google's Autopilot troubleshooting guide](https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/autopilot-clusters)
+for node and capacity failures. A snapshot still marked `CREATING` is not a
+completed recovery backup.
+
 ## Verified deployment
 
 Live checks on 2026-10-18 verified the digest-pinned image on the existing
