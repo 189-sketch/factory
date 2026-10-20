@@ -1,5 +1,29 @@
 # Configuration
 
+## App configuration
+
+`machinist init` installs the default configuration under `~/.machinist`.
+`server.state = "factory"` selects the current app; `github` is a compatibility
+alias. Complete GitHub, project, agent and runner setup in the browser. Local
+workers are managed automatically after setup. Use Projects to add repositories,
+Agents to edit shared Markdown prompts, and Automations for saved jobs.
+
+Agents are independent of projects. The app offers only Standard pipeline
+(`factory`) and Single agent (`single`), not a custom workflow editor.
+
+The default listener is `127.0.0.1:7331`; deployments may override it, including
+the GKE overlay at port 7341. Runtime state lives beside
+`server.worker_token_file`, normally `~/.machinist/server`. Protect and back up
+that directory. Factory jobs use `jobs.db`, not the legacy artifact store below.
+See [setup](local-factory/README.md), [job state](local-factory/local-jobs.md),
+and [Kubernetes configuration](local-factory/kubernetes.md).
+
+## Direct commands and legacy workers
+
+The following settings apply to lower-level commands and explicit workers.
+Custom sequence APIs require `server.state = "sqlite"`; they are separate from
+the factory app and its private job store.
+
 Commands use an executor, optional prompt template, and timeout:
 
 ```toml
@@ -71,5 +95,7 @@ and replace `--agent` with `--command`.
 Legacy `[pipelines]` configuration is not supported. Use `[workflows.NAME]` with
 an ordered `steps` list for stages tracked by Machinist, or use one script command
 when the script should own its internal process. See [the task workflow guide](task-guide.md)
-and [workflow configuration](workflows.md). Pre-command databases are
-recreated once because this release intentionally consolidates the schema before active use.
+and [workflow configuration](workflows.md). The old pre-command schema is a separate legacy migration. It does not describe
+current factory recovery: `factory.db` is consistently snapshotted into `jobs.db`,
+with the original archived and publication holds preserved. See
+[job migration and recovery](local-factory/local-jobs.md#recovery-and-privacy).

@@ -45,7 +45,9 @@ still waits for a confirmed merge with a matching recorded PR head.
 
 ## When the task completes
 
-Merge the PR on GitHub when it is ready. The follow-up watcher never merges PRs.
+Merge the PR on GitHub when it is ready. The follow-up watcher never merges PRs. Optional
+[repository maintenance](automations.md#repository-maintenance) is a separate
+automation with a fixed conservative auto-merge policy.
 It completes the task only when the PR head matches Machinist's recorded head,
 GitHub reports the PR merged, and a merge commit is confirmed. The merge commit
 does not have to share the PR head's SHA. Green CI or an approval alone does not

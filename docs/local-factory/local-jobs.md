@@ -8,12 +8,16 @@ publishes changes through GitHub.
 ## Two built-in modes
 
 - **Standard pipeline** (`factory`): Triage, optional Spec and approval, Build,
-  independent Review, then human merge. Triage and Review use restricted read-only
+  independent Review, then verified merge. Triage and Review use restricted read-only
   executors. Review findings return to Build, on the same PR, up to three repairs.
 - **Single agent** (`single`): one agent performs an operational task or automation
   and returns a result. There is no separate triage, planning, or reviewer. Requested
   repository changes still require a PR and human merge. An unchanged operational
   task can succeed without a PR.
+
+Manual merge is the default. Optional
+[repository maintenance](automations.md#repository-maintenance) can auto-merge
+qualifying factory documentation PRs; single-agent deliveries are excluded.
 
 The mode is fixed at creation. There is no custom workflow editor or arbitrary
 workflow choice. Old direct/answer records remain readable only for history and
@@ -74,9 +78,9 @@ after restart, legacy store migration with receipts, a second-owner rejection,
 and stale hold release denial. UI checks cover filtering and lost-response retry.
 Full CI runs the frontend tests/build and Go race tests on Linux and macOS.
 
-The cloud destination is the operator-owned Google Cloud project `machinist-prod`.
-No cloud resource is required to run this slice locally, and no cluster is created
-as a side effect of startup.
+The [GKE control plane](cloud-control-plane.md) uses the operator-owned project
+`machinist-prod`. Local use needs no cloud resources, and startup never creates a
+cluster. A cloud control plane uses the same private runtime on its persistent disk.
 
 
 The table shows stage dots for planning, building and review. Hover a dot or focus

@@ -1,6 +1,9 @@
 # Scale AI engineering through executable workflows
 
-> Historical roadmap. For shipped stages, approvals, shared files and optional merge policies, see [the task guide](task-guide.md).
+> Historical roadmap, retained as design context. Its “today” sections describe
+> September 2026, not the current runtime. For shipped behavior, use
+> [Architecture](../ARCHITECTURE.md), [job delivery](task-guide.md), and
+> [repository maintenance](local-factory/automations.md#repository-maintenance).
 
 
 > Status: Proposed roadmap, 6 September 2026. This document describes future work. The current runtime and workflow examples are identified separately below.

@@ -76,13 +76,18 @@ The host imports commits into a disposable bare repository, verifies their repor
 head and ancestry, and chooses the repository and branch itself. It never checks
 out or runs sandbox code in the publisher. Pushes are fast-forward only. PR lookup
 precedes creation, including recovery after a lost first publication response.
-Both workflow modes still wait for human merge.
+Both modes wait for a verified merge. Human merge is the default; only qualifying
+factory documentation PRs can use the opt-in
+[repository maintenance policy](automations.md#repository-maintenance).
 
 ## Subscription credentials and failure recovery
 
-The runner host's Kubernetes credentials are separate from the Codex subscription
-Secret. If Google Cloud reports an expired login, run `gcloud auth login` on the
-host using the same `CLOUDSDK_CONFIG` as Machinist, then retry the failed run.
+The connector's Kubernetes credentials are separate from the Codex subscription
+Secret. A local or VM connector using a personal Google Cloud login may need
+`gcloud auth login` on that host, using the same `CLOUDSDK_CONFIG` as Machinist.
+The GKE control plane instead uses its rotating in-cluster service-account token;
+it does not need a personal gcloud login. An expired operator login affects
+cluster administration and port-forward access, not the in-cluster dispatcher.
 Do not reinstall gVisor or reseed the Codex Secret for a cloud login failure.
 Permission errors require checking the host identity's RBAC and cloud IAM;
 missing-resource errors identify the policy, RuntimeClass, or Secret to restore.

@@ -1,6 +1,10 @@
 # Task, stage, and artifact model
 
-Status: Initial implementation, 21 September 2026. See [Artifact workflows](artifacts.md) for supported configuration and operational limits. The design below also records future spec-editing and adoption behavior.
+Historical design, 21 September 2026. This describes the legacy sequence and
+artifact model, including proposals that were not implemented. It is not the
+current factory delivery contract. See [Architecture](../ARCHITECTURE.md) and
+[job delivery](task-guide.md) for the app, or [legacy artifact workflows](artifacts.md)
+for the separate SQLite sequence backend.
 
 ## Task: the requested work
 

@@ -48,7 +48,11 @@ deliverables.
 
 Inspect the pull request, agent review, and CI checks on GitHub. You decide when
 to merge. **Check merge status** verifies that the reviewed head was merged before
-completing the task. Machinist does not merge factory tasks automatically.
+completing the task. The [GitHub follow-up watcher](local-factory/github-followups.md)
+also confirms merges and handles qualifying CI/review feedback. Optional
+[repository maintenance](local-factory/automations.md#repository-maintenance) can
+auto-merge qualifying independently reviewed factory documentation PRs. Single-agent
+and unrelated PRs remain ineligible.
 
 Direct CLI commands remain available for scripts. `machinist run` invokes the
 configured command in a repository you supply; its prompt determines its work.

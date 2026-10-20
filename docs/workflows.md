@@ -3,8 +3,8 @@
 For the current app, start with the [factory setup guide](local-factory/README.md).
 This reference covers lower-level CLI and legacy sequence workflows. The app
 offers Standard pipeline and Single-agent modes instead of custom workflows.
-For a legacy sequence setup with `server.state = "sqlite"`, see the
-[sequence guide](task-guide.md).
+Legacy sequence APIs require `server.state = "sqlite"`. For shared file
+snapshots and storage, see [legacy artifact workflows](artifacts.md).
 
 A workflow is an ordered list of existing commands. One agent can deliver an
 entire change, including its own subagents, or separate commands can perform
@@ -27,8 +27,9 @@ backward loops, or parallel steps. Commands own their internal repair policy.
 
 ## Run a workflow
 
-Use the web job composer to choose a workflow and repository, then supply the
-issue URL or request. Or submit it to the control plane:
+For a legacy control plane configured with `server.state = "sqlite"`, submit a
+named workflow through the CLI or API. The current app composer cannot select
+these workflows:
 
 ```sh
 machinist submit --workflow=checked_delivery --repo=my-repo \

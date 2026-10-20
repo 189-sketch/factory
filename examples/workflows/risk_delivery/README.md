@@ -1,5 +1,10 @@
 # Classify then merge
 
+This is an optional legacy sequence example, not the app's repository maintenance
+automation. Use `server.state = "sqlite"` for its workflow API. The current app's
+[maintenance policy](../../../docs/local-factory/automations.md#repository-maintenance)
+has different, fixed limits and stronger provenance requirements.
+
 Build PR → independent risk review → deterministic policy → merge.
 
 Add config.toml's definitions to the server config and copy the four prompt files

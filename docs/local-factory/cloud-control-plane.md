@@ -100,8 +100,50 @@ expose the existing unauthenticated loopback API directly.
 
 ## Recovery and updates
 
-Back up the persistent runtime before updates. Keep the old image digest for
-rollback. Recreate stops the old dispatcher before a replacement starts;
+For an existing deployment, use this update sequence:
+
+1. Pause every scheduled automation and stop manual/API submission clients for
+   the entire maintenance window. Record which schedules were enabled so only
+   those are resumed afterwards. Finish or cancel active work, then gracefully
+   stop the control-plane owner so GitHub follow-up polling cannot enqueue repairs:
+
+   ```sh
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     scale deployment/machinist-control-plane --replicas=0
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     wait --for=delete pod --selector=app=machinist-control-plane --timeout=180s
+   ```
+
+   Confirm agent Jobs, Pods and credential locks are also gone. Do not force-delete
+   unreachable workloads. Keep the owner stopped until the backup is complete.
+2. Make a private, consistent SQLite backup plus a runtime archive. A raw copy of
+   `jobs.db` while SQLite is writing is not a consistent backup; use SQLite's
+   backup API with the owner stopped. Mount the claim in a temporary trusted,
+   non-root utility Pod to copy the private runtime; do not start Machinist there.
+   Remove that Pod before restarting the control plane. Protect archives as
+   credentials and never add them to the build context.
+3. Build from reviewed source, verify `machinist version` inside the image, push
+   it, verify the registry digest, and review the overlay's digest change.
+4. Run server-side validation, apply the normal GKE overlay, and wait for rollout:
+
+   ```sh
+   kubectl --context "$CLUSTER_CONTEXT" apply --dry-run=server \
+     -k deploy/kubernetes/control-plane-gke
+   kubectl --context "$CLUSTER_CONTEXT" apply -k deploy/kubernetes/control-plane-gke
+   kubectl --context "$CLUSTER_CONTEXT" -n machinist-system \
+     rollout status deployment/machinist-control-plane --timeout=180s
+   ```
+
+5. Reconnect port-forward to the replacement Pod. Confirm one healthy worker,
+   preserved job IDs, projects, automations, GitHub connection and publication
+   holds. Run a real connection check or narrow job and verify runner cleanup.
+   Only after validation, resume the previously enabled schedules and submission
+   clients. Leave schedules that were already paused unchanged.
+
+Never reapply the zero-replica bootstrap overlay during an ordinary update.
+Never restore the old laptop runtime over newer cloud history.
+
+Keep the old image digest and matching private state backup for rollback. Recreate stops the old dispatcher before a replacement starts;
 the process lock also prevents concurrent access to the store. Allow its 90-second
 termination grace period for bounded sandbox cleanup. Do not force-delete an
 unreachable dispatcher or clear a credential lock until its old agent Pods are
@@ -117,6 +159,22 @@ The PVC survives Deployment replacement and deletion. It is persistent storage,
 not a backup; deleting the PVC can delete its disk. Keep periodic private SQLite
 backups and runtime archives separately. This first deployment has no automatic
 backup service or public endpoint.
+
+## Availability limits
+
+The `standard-rwo` claim is zonal. A replacement control-plane Pod needs capacity
+in the disk's zone; healthy nodes in another zone cannot mount that claim. Node
+recovery or a capacity failure can therefore leave the app unavailable even when
+the cluster API is healthy. Recreate and a persistent disk do not provide
+cross-zone failover. Keep private backups outside the active runtime and plan
+recovery before treating this deployment as highly available.
+
+If Pods remain Pending, inspect scheduling events and disk node affinity before
+changing authentication or retrying agent work. Do not force-delete an unreachable
+Pod or clear credential locks to bypass uncertain process ownership. Follow
+[Google's Autopilot troubleshooting guide](https://docs.cloud.google.com/kubernetes-engine/docs/troubleshooting/autopilot-clusters)
+for node and capacity failures. A snapshot still marked `CREATING` is not a
+completed recovery backup.
 
 ## Verified deployment
 

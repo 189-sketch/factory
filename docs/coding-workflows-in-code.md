@@ -1,5 +1,9 @@
 # I'm replacing coding agents with code
 
+> Historical article about the optional Python workflow. The current app uses
+> a Go foreman with fixed modes and durable state. See [Architecture](../ARCHITECTURE.md)
+> and [job delivery](task-guide.md) for supported product behavior.
+
 I gave a coding agent a GitHub issue. It implemented the change, ran the checks, got a separate agent to review it, and opened a pull request.
 
 Then my automation ran two repair passes. Neither changed a line of code.
@@ -446,7 +450,7 @@ These are reasons to add state and execution controls as the workflow grows. The
 
 In this system, Blueprint describes how to approach the engineering work and supplies reusable skills. Python encodes a chosen delivery workflow. Machinist runs workflow jobs and exposes their progress and results.
 
-Update: `agent.py` now accepts an issue URL on stdin as well as a CLI argument. See [the agent workflow guide](agent-workflow.md) for that script and [the task workflow guide](task-guide.md) for managed stages, approval, and saved files. The example above describes the original experiment.
+Update: `agent.py` now accepts an issue URL on stdin as well as a CLI argument. See [the agent workflow guide](agent-workflow.md) for that script and [the legacy workflow reference](workflows.md) and [artifact guide](artifacts.md) for managed stages, approval, and saved files. The example above describes the original experiment.
 
 The next useful proof is a task that encounters a real failure, repairs it, and returns with valid evidence. I would measure human attention per accepted PR, cost, and defects across several tasks. Running more agents or producing more PRs would not answer whether the system is helping me ship better software.
 
