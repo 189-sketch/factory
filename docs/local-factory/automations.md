@@ -31,6 +31,12 @@ Choose **Repository maintenance** as the automation type, select a repository, a
 
 The agent receives a read-only checkout and a snapshot of the ten most recently updated open issues and ten PRs. PR evidence includes immutable revision diffs and check results. The report says when the repository exceeds this batch. The agent classifies work, identifies missing information or likely duplicates, and suggests existing labels. The foreman adds matching non-Machinist labels through the GitHub App. The report shows confirmed label names after a successful update. Confirmed labels may already have been present. It never removes human labels or changes routing labels, closes issues or PRs, or posts internal reports and prompts to GitHub.
 
+The foreman includes an accepted independent review head in the snapshot only
+when recorded factory history binds that review to the current implementation
+and PR revision. This is evidence for that SHA, not merge permission. It avoids
+using stale stage-status prose in a PR description as the review authority.
+The foreman still rechecks current state before any merge.
+
 Auto-merge has a fixed, conservative policy:
 
 - A recorded Machinist factory run owns the PR, with a successful independent review bound to the implementation and current head. Single-agent deliveries and unrelated PRs are ineligible.

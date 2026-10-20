@@ -449,6 +449,7 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 			return "", errors.New("another run was admitted while fetching GitHub")
 		}
 		a = &current
+		s.addMaintenanceReviewEvidence(issue.Maintenance)
 		snapshot, marshalErr := json.Marshal(issue.Maintenance)
 		if marshalErr != nil {
 			return "", marshalErr

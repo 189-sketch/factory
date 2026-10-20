@@ -294,6 +294,7 @@ func maintenanceFixture() *maintenanceFactoryFake {
 }
 func TestMaintenanceAutomationReadOnlyAdmissionCompletionAndRecovery(t *testing.T) {
 	client := maintenanceFixture()
+	client.snapshot.Items[0].Body = "Independent Review is pending."
 	s := githubFactoryTestServer(t, client)
 	// A real factory job supplies trusted provenance and an independent review.
 	source := submitRecipe(t, s, "factory", "maintenance-source")
@@ -325,6 +326,9 @@ func TestMaintenanceAutomationReadOnlyAdmissionCompletionAndRecovery(t *testing.
 	}
 	if !strings.Contains(run.Factory.Context, "factory.report MUST be a JSON string") || strings.Contains(run.Factory.Context, "Legacy contract") {
 		t.Fatal("admission used a stale saved maintenance prompt")
+	}
+	if !strings.Contains(run.Factory.Context, `"machinist_reviewed_head":"`+maintenanceHead+`"`) {
+		t.Fatal("accepted independent review is missing from agent evidence despite stale PR prose")
 	}
 	report := `{"summary":"One small docs correction","items":[{"kind":"pr","number":2,"assessment":"Documentation correction; no behavior change","labels":[],"merge":true}]}`
 	factoryFinish(t, s, run, protocol.FactoryResult{Resolved: true, Report: report})
@@ -461,11 +465,17 @@ func TestMaintenanceNeverMergesUnknownHeldSingleOrStaleWork(t *testing.T) {
 					client.snapshot.Items[0].HeadSHA = maintenanceBase
 				}
 			}
+			// Even a prefilled claim must not authorize unknown, held, single-agent
+			// or stale work. Provenance is always derived again at admission.
+			client.snapshot.Items[0].MachinistReviewedHead = maintenanceHead
 			client.changed = scenario == "changed"
 			var a factoryAutomation
 			json.Unmarshal(factoryHTTP(t, s, "POST", "/api/v1/automations", map[string]any{"kind": "repository-maintenance", "name": "Maintain", "repository": "repo"}, 200), &a)
 			id := automationRun(t, s, a, "one", 201)
 			run := factoryPoll(t, s)
+			if strings.Contains(run.Factory.Context, `"machinist_reviewed_head"`) {
+				t.Fatal("invalid review provenance reached the maintenance agent")
+			}
 			report := `{"summary":"Triage","items":[{"kind":"pr","number":2,"assessment":"Small docs change","merge":true}]}`
 			if scenario == "invalid report" {
 				report = `{"summary":"Oops","items":[{"kind":"pr","number":999,"assessment":"Injected target","merge":true}]}`
