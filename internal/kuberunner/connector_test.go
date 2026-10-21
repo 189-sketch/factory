@@ -203,7 +203,7 @@ func TestCancellationRetainsAuthAndWaitsForPodDeletion(t *testing.T) {
 				return nil, fmt.Errorf("unexpected command %s", line)
 			}
 			result, _, err := c.Execute(ctx, runner.Options{Repository: repo, RunID: "run_0123456789abcdef01234567", ArtifactKey: "lease_test", DataDirectory: t.TempDir(), Command: config.ResolvedCommand{Timeout: time.Minute}}, true)
-			if result.ProcessStopped != podGone || result.ID != "run_0123456789abcdef01234567" || result.State != runner.StateCancelled {
+			if result.CleanupUnconfirmed != !podGone || result.ProcessStopped != podGone || result.ID != "run_0123456789abcdef01234567" || result.State != runner.StateCancelled {
 				t.Fatalf("cancellation lost cleanup evidence: state=%s stopped=%v", result.State, result.ProcessStopped)
 			}
 			if err == nil || !retained || !deleted || unlocked != podGone {
@@ -222,7 +222,7 @@ func TestInstallAllowsGoProxyDownloads(t *testing.T) {
 
 func TestConnectorBeforeJobFailureHasNoOutstandingProcess(t *testing.T) {
 	result, _, err := (Connector{}).Execute(t.Context(), runner.Options{RunID: "not-started"}, true)
-	if err == nil || !result.ProcessStopped || result.ID != "" {
+	if err == nil || result.CleanupUnconfirmed || !result.ProcessStopped || result.ID != "" {
 		t.Fatal("preflight failure must not invent an active attempt")
 	}
 }

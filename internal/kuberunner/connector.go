@@ -110,6 +110,7 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 	// shutdown; preserve that evidence even when cancellation returned no result.
 	defer func() {
 		result.ProcessStopped = !created || stopped
+		result.CleanupUnconfirmed = created && !stopped
 		if created && result.ID == "" {
 			result.ID, result.State, result.ExitCode = options.RunID, runner.StateFailed, 1
 			if errors.Is(ctx.Err(), context.Canceled) {
