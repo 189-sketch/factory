@@ -72,3 +72,23 @@ func validateGitHubConnection(command evidenceCommand, repository string) error 
 	}
 	return nil
 }
+
+// Publication can follow a long agent run. Obtain current App credentials
+// rather than carrying the startup token into GitHub writes.
+func (w *Worker) refreshPublicationCredentials(ctx context.Context, alias, repository string) (context.Context, error) {
+	if w.githubTokenProvider == nil {
+		return ctx, nil
+	}
+	token, err := w.githubTokenProvider(ctx, alias)
+	if err != nil {
+		return ctx, fmt.Errorf("GitHub App connection unavailable before publication")
+	}
+	env, err := GitHubEnvironment(token, repository)
+	if err != nil {
+		return ctx, err
+	}
+	if w.config.Kubernetes != nil {
+		env = append(env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	}
+	return context.WithValue(ctx, commandEnvironmentKey{}, env), nil
+}

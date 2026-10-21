@@ -2,6 +2,8 @@ package managedworker
 
 import (
 	"context"
+	"errors"
+	"github.com/owainlewis/machinist/internal/config"
 	"os/exec"
 	"strings"
 	"testing"
@@ -128,5 +130,37 @@ func TestConnectionCheckRequiresWritePermission(t *testing.T) {
 		if err := validateGitHubConnection(command, "owner/repository"); err == nil {
 			t.Fatalf("accepted push permission %q", permission)
 		}
+	}
+}
+
+func TestPublicationRefreshesCredentialsAndRetainsKubernetesRestrictions(t *testing.T) {
+	old, err := GitHubEnvironment("old-token", "owner/repository")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(t.Context(), commandEnvironmentKey{}, old)
+	calls := 0
+	worker := &Worker{config: config.Worker{Kubernetes: &config.Kubernetes{}}, githubTokenProvider: func(_ context.Context, alias string) (string, error) {
+		if alias != "selected" {
+			t.Fatal("wrong credential scope")
+		}
+		calls++
+		return "fresh-token", nil
+	}}
+	refreshed, err := worker.refreshPublicationCredentials(ctx, "selected", "owner/repository")
+	if err != nil || calls != 1 {
+		t.Fatal("current credentials were not requested")
+	}
+	env := commandEnvironment(refreshed)
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "old-token") || !strings.Contains(joined, "GH_TOKEN=fresh-token\n") || !strings.Contains(joined, "GIT_CONFIG_GLOBAL=/dev/null") || !strings.Contains(joined, "GIT_CONFIG_SYSTEM=/dev/null") {
+		t.Fatal("stale credentials or lost isolation settings")
+	}
+	if !strings.Contains(strings.Join(commandEnvironment(ctx), "\n"), "GH_TOKEN=old-token") {
+		t.Fatal("startup context was mutated")
+	}
+	worker.githubTokenProvider = func(context.Context, string) (string, error) { return "", errors.New("private provider error") }
+	if _, err := worker.refreshPublicationCredentials(ctx, "selected", "owner/repository"); err == nil || strings.Contains(err.Error(), "private provider error") {
+		t.Fatal("credential refresh must fail closed without exposing provider internals")
 	}
 }
