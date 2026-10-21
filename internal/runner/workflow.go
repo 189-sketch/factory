@@ -28,6 +28,9 @@ var factoryContract string
 //go:embed prompts/pull-request.md
 var pullRequestPrompt string
 
+//go:embed prompts/pr-quality.md
+var prQualityPrompt string
+
 func readStepResult(path string) (*protocol.StepResult, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -54,11 +57,11 @@ func readStepResult(path string) (*protocol.StepResult, error) {
 
 func factoryPrompt(factory *protocol.FactoryContext, workspace string) string {
 	if factory.Recipe == "native-v1" {
-		return "\n\nRun this task as the primary agent. Use repository-defined native agents when useful. Children are activities within this run. Finish with one JSON object: {\"outcome\":\"complete|blocked|failed\",\"summary\":\"nonempty explanation\",\"delivery\":{\"pr_url\":\"https://github.com/owner/repo/pull/123\",\"head_sha\":\"full SHA\",\"branch\":\"branch\"}}. Omit delivery for an answer without file changes. Verify changes, push and open a PR when delivering code. Never merge. A child review is advisory; this mode has no enforced spec approval or isolated review checkout. Respect external publication holds.\nTask context:\n" + factory.Context
+		return "\n\n" + prQualityPrompt + "\n\nRun this task as the primary agent. Use repository-defined native agents when useful. Children are activities within this run. Finish with one JSON object: {\"outcome\":\"complete|blocked|failed\",\"summary\":\"nonempty explanation\",\"delivery\":{\"pr_url\":\"https://github.com/owner/repo/pull/123\",\"head_sha\":\"full SHA\",\"branch\":\"branch\"}}. Omit delivery for an answer without file changes. Verify changes, push and open a PR when delivering code. Never merge. A child review is advisory; this mode has no enforced spec approval or isolated review checkout. Respect external publication holds.\nTask context:\n" + factory.Context
 	}
 	prompt := factoryStagePrompt(factory, workspace)
 	if factory.Role == "implement" || factory.Role == "spec" {
-		prompt += "\n\n" + pullRequestPrompt
+		prompt += "\n\n" + prQualityPrompt + "\n\n" + pullRequestPrompt
 	}
 	return prompt
 }
