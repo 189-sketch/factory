@@ -7,6 +7,7 @@ import contextlib
 import io
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 spec=importlib.util.spec_from_file_location('gke_deploy',Path(__file__).with_name('deploy.py'))
@@ -70,6 +71,17 @@ class DeploymentTests(unittest.TestCase):
         delete=next(i for i,c in enumerate(calls) if c[:2]==('delete','pod'))
         restart=next(i for i,c in enumerate(calls) if '--replicas=1' in c)
         self.assertLess(backup,ready);self.assertLess(ready,config);self.assertLess(config,delete);self.assertLess(delete,restart)
+
+    def test_operator_snapshot_requires_ready_without_granting_cluster_access(self):
+        fake=FakeDeployment();fake.snapshot_backend='gcloud'
+        def get(kind,name):
+            if kind=='pvc':return {'spec':{'volumeName':'disk-pv'}}
+            return {'spec':{'csi':{'driver':'pd.csi.storage.gke.io','volumeHandle':'projects/test/zones/europe-west2-b/disks/state'}}}
+        fake.get=get
+        with patch.object(deploy.subprocess,'run') as run, patch.object(deploy.subprocess,'check_output',return_value='CREATING'):
+            with self.assertRaises(RuntimeError):fake.snapshot('backup')
+            self.assertEqual(run.call_args.args[0][:4],['gcloud','compute','disks','snapshot'])
+        self.assertEqual(fake.calls,[])
 
     def test_backup_supports_legacy_and_current_database_without_mutating_source(self):
         for name in ['jobs.db','factory.db']:

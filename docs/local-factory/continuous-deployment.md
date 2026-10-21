@@ -43,7 +43,11 @@ requested after building, and generated credential files are excluded from
 Docker contexts. Only digest-pinned images are deployed.
 
 `deploy/kubernetes/deploy.py` is used by GitHub and can also be run by an
-operator with explicit context, image digests and full source revision. It:
+operator with explicit context, image digests and full source revision. An
+operator can add `--snapshot-backend gcloud` to use existing Google Cloud access
+for a zonal disk snapshot without installing CD identities, RBAC or a snapshot
+class. This mode verifies the snapshot is `READY`; CI uses Kubernetes snapshots.
+It:
 
 1. Refuses active jobs, pending PR follow-ups, unpaused schedules or remaining
    runner workloads and credential locks. Pause schedules and finish work before

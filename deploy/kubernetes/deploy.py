@@ -89,8 +89,9 @@ def preserved(before, after):
 
 
 class Deployment:
-    def __init__(self, context):
+    def __init__(self, context, snapshot_backend="kubernetes"):
         self.context = context
+        self.snapshot_backend = snapshot_backend
 
     def k(self, *args, namespace='machinist-system', data=None, timeout=360):
         result=subprocess.run(['kubectl','--context',self.context,'-n',namespace,*args],input=json.dumps(data) if data is not None else None,text=True,capture_output=True,timeout=timeout)
@@ -110,6 +111,23 @@ class Deployment:
             if objects['items']:
                 raise RuntimeError('Runner '+kind+' remain; do not bypass uncertain process ownership')
 
+    def snapshot(self, name):
+        if self.snapshot_backend == 'gcloud':
+            claim=self.get('pvc','machinist-state')
+            volume=self.get('pv',claim['spec']['volumeName'])
+            csi=volume['spec']['csi']
+            match=re.fullmatch(r'projects/([^/]+)/zones/([^/]+)/disks/([^/]+)',csi['volumeHandle'])
+            if csi['driver']!='pd.csi.storage.gke.io' or not match:
+                raise RuntimeError('Operator snapshots require a zonal GKE Persistent Disk')
+            project,zone,disk=match.groups()
+            subprocess.run(['gcloud','compute','disks','snapshot',disk,'--project',project,'--zone',zone,'--snapshot-names',name,'--storage-location',zone.rsplit('-',1)[0],'--quiet'],check=True,capture_output=True,text=True,timeout=360)
+            status=subprocess.check_output(['gcloud','compute','snapshots','describe',name,'--project',project,'--format=value(status)'],text=True,timeout=30).strip()
+            if status!='READY':raise RuntimeError('Operator disk snapshot is not READY')
+            return
+        snapshot={'apiVersion':'snapshot.storage.k8s.io/v1','kind':'VolumeSnapshot','metadata':{'name':name},'spec':{'volumeSnapshotClassName':'machinist-state-retain','source':{'persistentVolumeClaimName':'machinist-state'}}}
+        self.k('create','-f','-',data=snapshot)
+        self.k('wait','--for=jsonpath={.status.readyToUse}=true','volumesnapshot/'+name,'--timeout=300s')
+
     def run(self, control_plane, runner, revision, output):
         pinned(control_plane); pinned(runner)
         if not re.fullmatch('[a-f0-9]{40}',revision):
@@ -121,7 +139,7 @@ class Deployment:
         old_image=old['spec']['template']['spec']['containers'][0]['image']
         proxy=self.get('deployment','machinist-egress',namespace='machinist-runners')
         name='machinist-deploy-'+revision[:8]+'-'+str(int(time.time()))
-        release={'revision':revision,'control_plane':control_plane,'runner':runner,'previous_control_plane':old_image,'previous_proxy':proxy['spec']['template']['spec']['containers'][0]['image'],'snapshot':name,'jobs_preserved':len(before['jobs'])}
+        release={'revision':revision,'control_plane':control_plane,'runner':runner,'previous_control_plane':old_image,'previous_proxy':proxy['spec']['template']['spec']['containers'][0]['image'],'snapshot':name,'snapshot_backend':self.snapshot_backend,'jobs_preserved':len(before['jobs'])}
         self.k('scale','deployment/machinist-control-plane','--replicas=0')
         self.k('wait','--for=delete','pod','-l','app=machinist-control-plane','--timeout=180s')
         self.no_runners()
@@ -133,9 +151,7 @@ class Deployment:
             self.k('create','-f','-',data=pod)
             self.k('wait','--for=condition=Ready','pod/'+name,'--timeout=300s')
             self.k('exec',name,'--','python3','-c',BACKUP,name,json.dumps(release))
-            snapshot={'apiVersion':'snapshot.storage.k8s.io/v1','kind':'VolumeSnapshot','metadata':{'name':name},'spec':{'volumeSnapshotClassName':'machinist-state-retain','source':{'persistentVolumeClaimName':'machinist-state'}}}
-            self.k('create','-f','-',data=snapshot)
-            self.k('wait','--for=jsonpath={.status.readyToUse}=true','volumesnapshot/'+name,'--timeout=300s')
+            self.snapshot(name)
             self.k('exec',name,'--','python3','-c',CONFIG,runner)
         finally:
             self.k('delete','pod',name,'--ignore-not-found=true','--wait=true','--timeout=180s')
@@ -165,8 +181,9 @@ if __name__=='__main__':
     p.add_argument('--runner',required=True,type=pinned)
     p.add_argument('--revision',required=True)
     p.add_argument('--output',default='release.json')
+    p.add_argument('--snapshot-backend',choices=['kubernetes','gcloud'],default='kubernetes',help='gcloud is for existing operator access; CI uses Kubernetes snapshots')
     a=p.parse_args()
-    try:Deployment(a.context).run(a.control_plane,a.runner,a.revision,a.output)
+    try:Deployment(a.context,a.snapshot_backend).run(a.control_plane,a.runner,a.revision,a.output)
     except (RuntimeError,ValueError,subprocess.SubprocessError) as error:
         print(str(error),file=sys.stderr)
         print('Deployment stopped. Inspect the current owner and snapshot before recovery; no state was discarded.',file=sys.stderr)
