@@ -162,7 +162,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	executorCommand := structuredCommand(options.Command.Executor, options.Command.Command)
 	native := options.Command.Adapter == "claude-stream" || options.Command.Adapter == "codex-app-server"
 	if native {
-		executorCommand, err = nativeCommand(options.Command)
+		executorCommand, err = nativeCommand(options.Command, options.Factory != nil && options.Factory.Recipe == "native-v1")
 		if err != nil {
 			return completeFailure(&result, log, runDirectory, err)
 		}
@@ -311,7 +311,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	inputResult := make(chan error, 1)
 	var nativeOutput *nativeStream
 	if native {
-		nativeOutput = &nativeStream{adapter: options.Command.Adapter, log: log, stdin: stdinWriter, model: options.Command.Model, cwd: repository, prompt: options.Command.Prompt}
+		nativeOutput = &nativeStream{adapter: options.Command.Adapter, log: log, stdin: stdinWriter, model: options.Command.Model, cwd: repository, prompt: options.Command.Prompt, structuredResult: options.Factory != nil && options.Factory.Recipe == "native-v1"}
 	}
 	if options.Command.Adapter == "codex-app-server" {
 		go func() { inputResult <- nativeOutput.start() }()

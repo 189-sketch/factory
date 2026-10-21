@@ -2,6 +2,7 @@ package managedworker
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -147,5 +148,85 @@ func TestFactoryWorkspacePreservesTaskAndReviewSnapshot(t *testing.T) {
 	spec.JobID = "../escape"
 	if _, err := worker.factoryWorkspace(context.Background(), repo, spec); err == nil {
 		t.Fatal("accepted traversal")
+	}
+}
+
+func TestNativeRetryRecoversOnlyVerifiedPublishedBranch(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	list := `[{"html_url":"https://github.com/owner/project/pull/12","head":{"ref":"docs/agent-branch","sha":"` + sha + `"}}]`
+	pr := `{"state":"open","head":{"ref":"docs/agent-branch","sha":"` + sha + `","repo":{"full_name":"owner/project"}},"base":{"repo":{"full_name":"owner/project"}}}`
+	base := map[string]string{
+		"git status --porcelain": "", "git status --porcelain --untracked-files=all": "", "git symbolic-ref --short HEAD": "docs/agent-branch",
+		"git ls-remote --heads origin refs/heads/codex/task": "",
+		"git remote": "origin", "git config --get remote.origin.url": "https://github.com/owner/project.git",
+		"gh api repos/owner/project/pulls?state=open&head=owner%3Adocs%2Fagent-branch&per_page=100": list,
+		"git rev-parse HEAD": sha,
+		"git ls-remote --heads origin refs/heads/docs/agent-branch": sha + " refs/heads/docs/agent-branch",
+		"gh api repos/owner/project/pulls/12":                       pr,
+		"git fetch origin refs/heads/docs/agent-branch":             "",
+		"git rev-parse FETCH_HEAD":                                  sha,
+	}
+	t.Run("failed result after publishing assigned branch", func(t *testing.T) {
+		factory := &protocol.FactoryContext{Recipe: "native-v1", Role: "primary", Branch: "docs/agent-branch"}
+		command := func(program string, args ...string) ([]byte, error) {
+			key := program + " " + strings.Join(args, " ")
+			value, ok := base[key]
+			if !ok {
+				return nil, fmt.Errorf("unexpected command: %s", key)
+			}
+			return []byte(value), nil
+		}
+		if !nativeFailureHasPublishedDelivery(command, factory) {
+			t.Fatal("verified assigned-branch delivery must remain retryable")
+		}
+		if factory.PRURL != "" {
+			t.Fatal("completion check mutated dispatched context")
+		}
+	})
+
+	for _, test := range []struct {
+		name, key, value string
+		fail             bool
+	}{
+		{name: "published native branch"},
+		{"uncommitted changes", "git status --porcelain", " M file", true},
+		{"assigned branch also published", "git ls-remote --heads origin refs/heads/codex/task", sha + " refs/heads/codex/task", true},
+		{"no PR", "gh api repos/owner/project/pulls?state=open&head=owner%3Adocs%2Fagent-branch&per_page=100", "[]", true},
+		{"multiple PRs", "gh api repos/owner/project/pulls?state=open&head=owner%3Adocs%2Fagent-branch&per_page=100", "[" + strings.Trim(list, "[]") + "," + strings.Trim(list, "[]") + "]", true},
+		{"unpublished local commits", "git rev-parse HEAD", strings.Repeat("b", 40), true},
+		{"PR closed", "gh api repos/owner/project/pulls/12", strings.Replace(pr, `"open"`, `"closed"`, 1), true},
+		{"PR in another repository", "gh api repos/owner/project/pulls/12", strings.ReplaceAll(pr, "owner/project", "other/project"), true},
+		{"remote moved", "git ls-remote --heads origin refs/heads/docs/agent-branch", strings.Repeat("b", 40) + " refs/heads/docs/agent-branch", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			factory := &protocol.FactoryContext{Recipe: "native-v1", Role: "primary", Branch: "codex/task"}
+			command := func(program string, args ...string) ([]byte, error) {
+				key := program + " " + strings.Join(args, " ")
+				value, ok := base[key]
+				if key == test.key || (test.key == "git status --porcelain" && key == "git status --porcelain --untracked-files=all") {
+					value = test.value
+				}
+				if !ok {
+					return nil, fmt.Errorf("unexpected command, must not discard scratch: %s", key)
+				}
+				return []byte(value), nil
+			}
+			if recoverable := nativeFailureHasPublishedDelivery(command, factory); recoverable == test.fail {
+				t.Fatalf("failed-run recovery=%v, expected %v", recoverable, !test.fail)
+			}
+			if factory.PRURL != "" {
+				t.Fatal("completion check changed dispatched context")
+			}
+			err := reconcileFactoryWorkspace(command, "origin", factory, "task")
+			if (err != nil) != test.fail {
+				t.Fatalf("error=%v", err)
+			}
+			if !test.fail && (factory.Branch != "docs/agent-branch" || factory.PRURL != "https://github.com/owner/project/pull/12" || factory.HeadSHA != sha) {
+				t.Fatalf("recovery context lost: %+v", factory)
+			}
+			if test.fail && factory.PRURL != "" {
+				t.Fatalf("unverified recovery persisted: %+v", factory)
+			}
+		})
 	}
 }

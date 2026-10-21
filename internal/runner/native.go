@@ -26,27 +26,28 @@ type Activity struct {
 }
 
 type nativeStream struct {
-	mu              sync.Mutex
-	adapter         string
-	log             *eventLog
-	stdin           io.WriteCloser
-	buffer          []byte
-	dropping        bool
-	root            string
-	turn            string
-	model           string
-	cwd             string
-	prompt          string
-	final           string
-	completed       bool
-	usage           *int64
-	active          map[string]Activity
-	toolRoles       map[string]string
-	roleRequests    map[int]string
-	nextRoleRequest int
+	mu               sync.Mutex
+	adapter          string
+	log              *eventLog
+	stdin            io.WriteCloser
+	buffer           []byte
+	dropping         bool
+	root             string
+	turn             string
+	model            string
+	cwd              string
+	prompt           string
+	final            string
+	completed        bool
+	structuredResult bool
+	usage            *int64
+	active           map[string]Activity
+	toolRoles        map[string]string
+	roleRequests     map[int]string
+	nextRoleRequest  int
 }
 
-func nativeCommand(command config.ResolvedCommand) ([]string, error) {
+func nativeCommand(command config.ResolvedCommand, structuredResult bool) ([]string, error) {
 	argv := append([]string(nil), command.Command...)
 	if len(argv) == 0 {
 		return nil, errors.New("native executor command is empty")
@@ -67,6 +68,14 @@ func nativeCommand(command config.ResolvedCommand) ([]string, error) {
 			return nil, errors.New("claude-stream requires stream-json output")
 		}
 		argv = structuredClaudeCommand(command.Executor, argv)
+		if structuredResult {
+			for _, arg := range argv {
+				if arg == "--json-schema" || strings.HasPrefix(arg, "--json-schema=") {
+					return nil, errors.New("native factory delivery owns Claude --json-schema; remove the configured schema")
+				}
+			}
+			argv = append(argv, "--json-schema", nativeResultSchema)
+		}
 		if command.Model != "" {
 			argv = append(argv, "--model", command.Model)
 		}
@@ -236,6 +245,13 @@ func (n *nativeStream) line(line []byte) error {
 			_ = json.Unmarshal(e["is_error"], &failed)
 			if failed {
 				return fmt.Errorf("Claude primary failed: %s", n.final)
+			}
+			if n.structuredResult {
+				raw := e["structured_output"]
+				if len(raw) == 0 || string(raw) == "null" {
+					return errors.New("Claude primary completed without structured delivery output")
+				}
+				n.final = string(raw)
 			}
 			n.completed = true
 		}

@@ -99,3 +99,27 @@ func TestFactoryDoesNotRenderUserTemplateTokensAgain(t *testing.T) {
 		t.Fatalf("literal user tokens failed: %v", err)
 	}
 }
+
+func TestNativePRGuidancePreservesNativeResultContract(t *testing.T) {
+	prompt := factoryPrompt(&protocol.FactoryContext{Recipe: "native-v1", Context: "assigned ticket"}, "/workspace")
+	if !strings.Contains(prompt, prQualityPrompt) || !strings.Contains(prompt, `"delivery"`) || !strings.HasSuffix(prompt, "assigned ticket") {
+		t.Fatal("native delivery must include public PR guidance, native result contract and task context")
+	}
+	if strings.Contains(prompt, "factory.pr_description") || strings.Contains(prompt, "factory.report") {
+		t.Fatal("native mode must not inherit the legacy result schema")
+	}
+	for _, factory := range []*protocol.FactoryContext{{Role: "implement"}, {Role: "spec"}, {Role: "implement", Recipe: "single"}, {Role: "implement", CommitOnly: true}} {
+		if !strings.Contains(factoryPrompt(factory, "/workspace"), prQualityPrompt) {
+			t.Fatalf("delivery mode %+v missing shared PR quality instructions", factory)
+		}
+	}
+}
+
+func TestNativePromptCarriesAssignedDeliveryContext(t *testing.T) {
+	prompt := factoryPrompt(&protocol.FactoryContext{Recipe: "native-v1", Branch: "codex/assigned", PRURL: "https://github.com/owner/repo/pull/3", HeadSHA: strings.Repeat("a", 40)}, "/workspace")
+	for _, want := range []string{`"branch":"codex/assigned"`, `"pr_url":"https://github.com/owner/repo/pull/3"`, `"head_sha":"` + strings.Repeat("a", 40) + `"`, "Do not create or switch branches", "ONLY one raw JSON object"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+}

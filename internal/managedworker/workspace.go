@@ -2,7 +2,9 @@ package managedworker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,7 +192,13 @@ func reconcileFactoryWorkspace(command evidenceCommand, remote string, factory *
 		return err
 	}
 	if current != branch {
-		return fmt.Errorf("task scratch branch differs from assigned GitHub branch")
+		if factory.Recipe != "native-v1" || factory.PRURL != "" {
+			return fmt.Errorf("task scratch branch differs from assigned GitHub branch")
+		}
+		if err := recoverNativeDelivery(command, remote, branch, current, factory); err != nil {
+			return fmt.Errorf("recover native task delivery: %w", err)
+		}
+		branch = factory.Branch
 	}
 	refs, err := run("ls-remote", "--heads", remote, "refs/heads/"+branch)
 	if err != nil {
@@ -254,4 +262,68 @@ func reconcileFactoryWorkspace(command evidenceCommand, remote string, factory *
 	}
 	_, err = run("merge", "--ff-only", expected)
 	return err
+}
+
+// A native primary may have published work on another branch before its final
+// result was lost. Adopt only an unambiguous, verified open PR at this clean HEAD.
+// No local refs or files are reset, deleted or switched during recovery.
+func recoverNativeDelivery(command evidenceCommand, remote, assigned, current string, factory *protocol.FactoryContext) error {
+	if current != assigned {
+		refs, err := command("git", "ls-remote", "--heads", remote, "refs/heads/"+assigned)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(refs)) != "" {
+			return fmt.Errorf("assigned branch already exists on GitHub; refusing ambiguous recovery")
+		}
+	}
+	_, repo, err := factoryRemote(command)
+	if err != nil {
+		return err
+	}
+	owner := strings.SplitN(repo, "/", 2)[0]
+	body, err := command("gh", "api", "repos/"+repo+"/pulls?state=open&head="+url.QueryEscape(owner+":"+current)+"&per_page=100")
+	if err != nil {
+		return err
+	}
+	var prs []struct {
+		URL  string `json:"html_url"`
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(body, &prs); err != nil {
+		return fmt.Errorf("decode recovery PRs: %w", err)
+	}
+	if len(prs) != 1 || prs[0].Head.Ref != current {
+		return fmt.Errorf("changed task branch has no unambiguous open PR; scratch preserved")
+	}
+	result := &protocol.FactoryResult{Version: 1, Role: "primary", Report: "Recovered native delivery", PRURL: prs[0].URL, HeadSHA: prs[0].Head.SHA, Branch: current}
+	if err := validateImplementationEvidence(command, result); err != nil {
+		return err
+	}
+	factory.Branch, factory.HeadSHA, factory.PRURL = result.Branch, result.HeadSHA, result.PRURL
+	return nil
+}
+
+// Failed runs may retry only when their changed workspace has verified PR delivery.
+// Use a copy so completion checks do not change the dispatched task context.
+func nativeFailureHasPublishedDelivery(command evidenceCommand, factory *protocol.FactoryContext) bool {
+	if factory == nil || factory.Recipe != "native-v1" {
+		return false
+	}
+	if _, err := answerWorkspaceState(command); err != nil {
+		return false
+	}
+	remote, _, err := factoryRemote(command)
+	if err != nil {
+		return false
+	}
+	current, err := command("git", "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return false
+	}
+	copy := *factory
+	return recoverNativeDelivery(command, remote, factory.Branch, strings.TrimSpace(string(current)), &copy) == nil
 }
