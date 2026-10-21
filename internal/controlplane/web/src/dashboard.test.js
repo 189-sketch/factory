@@ -46,41 +46,25 @@ test("failed refreshes never present stale healthy metrics",()=>{
   assert.deepEqual(view([],{loaded:false}),{kind:"loading"});
 });
 
-test("dashboard renders useful job links, missing usage and honest empty activity",async context=>{
+test("the Activity window control updates recorded activity",async context=>{
   const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});context.after(()=>server.close());
-  const {Dashboard}=await server.ssrLoadModule("/src/analytics.jsx");
-  const html=renderToStaticMarkup(React.createElement(Dashboard,{jobs:[job("ready","awaiting_merge")],loaded:true,now}));
-  assert.match(html,/<h1[^>]*>Dashboard/);assert.match(html,/href="#\/runs\?filter=pr_ready"/);assert.match(html,/href="#\/runs\/ready"/);
-  assert.match(html,/href="#\/runs">View runs/);assert.doesNotMatch(html,/#\/inbox|Open inbox/);
-  assert.match(html,/Not reported/);assert.doesNotMatch(html,/100%|\$0|<details|role="switch"/);
-  const empty=renderToStaticMarkup(React.createElement(Dashboard,{jobs:[],loaded:true,now}));
-  assert.match(empty,/Create your first run/);assert.match(empty,/0 jobs at peak/);assert.doesNotMatch(empty,/1 job at peak/);
-  const failure=renderToStaticMarkup(React.createElement(Dashboard,{jobs:[job("ready","awaiting_merge")],loaded:true,error:"offline",now}));
-  assert.match(failure,/Dashboard unavailable/);assert.doesNotMatch(failure,/PRs ready/);
-});
-
-test("the window control updates activity while retaining live work and New run starts the composer",async context=>{
-  const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});context.after(()=>server.close());
-  const {Dashboard}=await server.ssrLoadModule("/src/analytics.jsx");
+  const {ActivityPage}=await server.ssrLoadModule("/src/analytics.jsx");
   const dom=new JSDOM('<div id="root"></div>',{url:"http://localhost"});
   const previous={window:global.window,document:global.document,IS_REACT_ACT_ENVIRONMENT:global.IS_REACT_ACT_ENVIRONMENT};
   Object.assign(global,{window:dom.window,document:dom.window.document,IS_REACT_ACT_ENVIRONMENT:true});
   const root=createRoot(document.getElementById("root"));context.after(async()=>{await act(()=>root.unmount());dom.window.close();Object.assign(global,previous);});
-  let starts=0;
-  await act(()=>root.render(React.createElement(Dashboard,{jobs:[job("older","running",20)],loaded:true,now,onNewRun:()=>starts++})));
+  await act(()=>root.render(React.createElement(ActivityPage,{jobs:[job("older","running",20)],loaded:true,now})));
   assert.equal(document.querySelector('.dashboard-activity-total strong').textContent,"0");
-  assert.equal(document.querySelector('.dashboard-stat strong').textContent,"1");
   await act(()=>{const select=document.querySelector('select');select.value="30";select.dispatchEvent(new dom.window.Event("change",{bubbles:true}));});
   assert.equal(document.querySelector('.dashboard-activity-total strong').textContent,"1");
-  await act(()=>[...document.querySelectorAll("button")].find(b=>b.textContent==="New run").click());assert.equal(starts,1);
 });
 
 test("legacy servers without saved automation data never claim zero configured schedules", async context=>{
   const state=view([]);assert.equal(state.scheduled,null);assert.equal(state.automationCount,null);
   const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});context.after(()=>server.close());
-  const {Dashboard}=await server.ssrLoadModule("/src/analytics.jsx");
-  const html=renderToStaticMarkup(React.createElement(Dashboard,{jobs:[],loaded:true,now}));
+  const {ActivityPage}=await server.ssrLoadModule("/src/analytics.jsx");
+  const html=renderToStaticMarkup(React.createElement(ActivityPage,{jobs:[],loaded:true,now}));
   assert.match(html,/View configured triggers/);assert.doesNotMatch(html,/0 active schedule|0 saved automation/);
-  const known=renderToStaticMarkup(React.createElement(Dashboard,{jobs:[],automations:[],loaded:true,now}));
+  const known=renderToStaticMarkup(React.createElement(ActivityPage,{jobs:[],automations:[],loaded:true,now}));
   assert.match(known,/0 active schedules/);
 });

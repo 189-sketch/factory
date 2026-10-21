@@ -58,6 +58,14 @@ test("retired Inbox opens Runs and task actions remain available", { timeout: 15
   await eventually(() => assert.ok(document.querySelector('[role="table"][aria-label="Runs"]')));
   assert.match(document.querySelector('[role="table"]').textContent, /Task needing attention/);
   assert.match(document.querySelector('[role="table"]').textContent, /Cancelled/);
+  await act(async () => { window.location.hash = "#/dashboard"; });
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "Dashboard"));
+  assert.ok(document.querySelector('section[aria-label="Recent outcomes"] a[href="#/runs/last-task"]'));
+  await act(async () => document.querySelector('nav a[href="#/activity"]').click());
+  await eventually(() => assert.equal(document.querySelector("h1").textContent, "Activity"));
+  assert.ok(document.querySelector('[aria-label="Time window"]'));
+  assert.equal(document.querySelector('section[aria-label="Needs you"]'), null);
+
 });
 
 async function eventually(check) {
