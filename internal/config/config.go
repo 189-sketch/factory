@@ -63,13 +63,14 @@ type Repository struct {
 }
 
 type Server struct {
-	Kubernetes        *Kubernetes `toml:"kubernetes"`
-	State             string      `toml:"state"`
-	Listen            string      `toml:"listen"`
-	Database          string      `toml:"database"`
-	WorkerTokenFile   string      `toml:"worker_token_file"`
-	MaxConcurrentJobs *int        `toml:"max_concurrent_jobs"`
-	configDir         string
+	Kubernetes                     *Kubernetes `toml:"kubernetes"`
+	State                          string      `toml:"state"`
+	Listen                         string      `toml:"listen"`
+	Database                       string      `toml:"database"`
+	WorkerTokenFile                string      `toml:"worker_token_file"`
+	MaxConcurrentJobsPerRepository *int        `toml:"max_concurrent_jobs_per_repository"`
+	MaxConcurrentJobs              *int        `toml:"max_concurrent_jobs"`
+	configDir                      string
 }
 
 type Config struct {
@@ -347,6 +348,13 @@ func (s Server) ConcurrentJobLimit() int {
 	return *s.MaxConcurrentJobs
 }
 
+func (s Server) RepositoryJobLimit() int {
+	if s.MaxConcurrentJobsPerRepository == nil {
+		return 0
+	}
+	return *s.MaxConcurrentJobsPerRepository
+}
+
 func LoadCommand(definitionPath, name string) (ResolvedCommand, error) {
 	if strings.TrimSpace(name) == "" {
 		return ResolvedCommand{}, errors.New("command name is required")
@@ -575,6 +583,9 @@ func applyServerDefaults(server Server) (Server, error) {
 	}
 	if strings.TrimSpace(server.WorkerTokenFile) == "" {
 		return Server{}, errors.New("worker_token_file is required")
+	}
+	if server.MaxConcurrentJobsPerRepository != nil && *server.MaxConcurrentJobsPerRepository <= 0 {
+		return Server{}, errors.New("max_concurrent_jobs_per_repository must be positive")
 	}
 	if server.MaxConcurrentJobs != nil && *server.MaxConcurrentJobs <= 0 {
 		return Server{}, errors.New("max_concurrent_jobs must be positive")

@@ -44,6 +44,7 @@ type Store struct {
 }
 
 type Job struct {
+	WaitingReasons   []string          `json:"waiting_reasons,omitempty"`
 	GitHubSyncError  string            `json:"github_sync_error,omitempty"`
 	Maintenance      bool              `json:"maintenance,omitempty"`
 	Recipe           string            `json:"recipe,omitempty"`
