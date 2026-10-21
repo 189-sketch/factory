@@ -725,6 +725,7 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "accepted"})
 		return
 	}
+	input.Stopped = input.Stopped || lastRunStopped(task.state.Job)
 	if action == "publication_hold" || action == "release_publication" {
 		if (task.state.Job.State == "cancelled" || task.state.Job.State == "interrupted") && !input.Stopped {
 			writeError(w, 409, errors.New("confirm the previous process stopped before changing publication access"))
@@ -1253,7 +1254,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
-	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
+	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
 		writeError(w, 409, err)
 		return
 	}
@@ -1270,8 +1271,9 @@ func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, 
 		command, err := definition.ResolveCommand("primary")
 		if err == nil && s.setup != nil {
 			selection := s.setup.snapshot().Selection
-			if selection.Agent != "" {
+			if selection.Agent != "" && command.Executor != selection.Agent+"-native" {
 				command.Executor = selection.Agent + "-native"
+				command.Model = ""
 			}
 		}
 		return command, err

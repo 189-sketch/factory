@@ -20,7 +20,7 @@ func TestDetachedTreeHelper(t *testing.T) {
 	if role == "" {
 		return
 	}
-	if role == "parent" {
+	if role == "parent" || role == "orphan-parent" {
 		c := exec.Command(os.Args[0], "-test.run=^TestDetachedTreeHelper$")
 		c.Env = append(os.Environ(), "MACHINIST_TREE_HELPER=child")
 		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -28,6 +28,9 @@ func TestDetachedTreeHelper(t *testing.T) {
 			os.Exit(2)
 		}
 		_ = os.WriteFile(os.Getenv("MACHINIST_TREE_PID"), []byte(strconv.Itoa(c.Process.Pid)), 0600)
+		if role == "orphan-parent" {
+			os.Exit(0)
+		}
 		_ = c.Wait()
 	} else {
 		time.Sleep(time.Minute)
@@ -114,4 +117,28 @@ func TestCancelledBeforeLaunchIsAlreadyStopped(t *testing.T) {
 	if err == nil || result.State != StateCancelled || !result.ProcessStopped {
 		t.Fatalf("prelaunch cancel: %+v %v", result, err)
 	}
+}
+
+func TestNaturalExitStopsReparentedTool(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "orphan.pid")
+	t.Setenv("MACHINIST_TREE_HELPER", "orphan-parent")
+	t.Setenv("MACHINIST_TREE_PID", pidPath)
+	result, err := Execute(t.Context(), Options{Repository: ".", DataDirectory: dir, Command: config.ResolvedCommand{Name: "orphan", Command: []string{os.Args[0], "-test.run=^TestDetachedTreeHelper$"}, Timeout: time.Minute}, Stdout: io.Discard, Stderr: io.Discard})
+	b, _ := os.ReadFile(pidPath)
+	pid, _ := strconv.Atoi(string(b))
+	if pid <= 0 {
+		t.Fatal("missing tool pid")
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if err != nil || !result.ProcessStopped {
+		t.Fatalf("cleanup failed: %+v %v", result, err)
+	}
+	for i := 0; i < 100; i++ {
+		if syscall.Kill(pid, 0) == syscall.ESRCH {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("reparented tool %d survived", pid)
 }

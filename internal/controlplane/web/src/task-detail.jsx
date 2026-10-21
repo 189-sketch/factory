@@ -491,7 +491,7 @@ function TaskActions({ job, result, onAction }) {
   const [releaseConfirmed, setReleaseConfirmed] = useState(false);
   const latest = job.runs.at(-1);
   const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/)?.[0];
-  const needsStopped = ["interrupted", "cancelled"].includes(job.state);
+  const needsStopped = ["interrupted", "cancelled"].includes(job.state) && !latest?.process_stopped;
   const retryable = ["blocked", "failed", "interrupted", "cancelled"].includes(job.state);
   const humanDecision = job.state === "blocked" && job.workflow?.factory?.verdict === "human_decision_needed";
   const canRequest = job.recipe !== "answer" && (job.state === "awaiting_merge" || humanDecision || (job.state === "awaiting_approval" && latest?.reviewed_run_id) || (["failed", "blocked"].includes(job.state) && latest?.command === "review" && prURL));

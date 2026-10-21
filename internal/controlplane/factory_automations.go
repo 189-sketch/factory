@@ -149,7 +149,7 @@ func (s *GitHubFactoryServer) saveAutomation(w http.ResponseWriter, r *http.Requ
 	if id == "" {
 		if a.Kind == "" {
 			if definition, loadErr := config.LoadDefinitions(s.definitionPath); loadErr == nil {
-				if _, ok := definition.Commands["primary"]; ok && (s.setup == nil || s.setup.snapshot().Selection.Host != "kubernetes") {
+				if _, resolveErr := definition.ResolveCommand("primary"); resolveErr == nil && (s.setup == nil || s.setup.snapshot().Selection.Host != "kubernetes") {
 					a.Recipe = "native-v1"
 				}
 			}
@@ -405,6 +405,16 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 	issue := GitHubIssue{Title: a.Name, Body: a.Prompt, HTMLURL: "local:automation_" + localID, State: "open", CreatedAt: now, UpdatedAt: now}
 	recipe := "single"
 	if a.Recipe == "native-v1" && a.Kind == "" {
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			return "", errors.New("native-agent automations require a host worker; select a host worker before running this automation")
+		}
+		definition, err := config.LoadDefinitions(s.definitionPath)
+		if err != nil {
+			return "", err
+		}
+		if _, err = definition.ResolveCommand("primary"); err != nil {
+			return "", fmt.Errorf("configure a valid primary command before running this automation: %w", err)
+		}
 		recipe = a.Recipe
 	}
 	if a.Kind == "repository-maintenance" {

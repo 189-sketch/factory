@@ -167,6 +167,16 @@ func TestCancellationFinalEventsAreBoundedAndFenced(t *testing.T) {
 	if current = factoryJob(t, s, job["id"]); current.State != "cancelled" || current.Runs[0].CompletedAt.IsZero() {
 		t.Fatal("lost stop acknowledgment on replay")
 	}
+	if !current.Runs[0].ProcessStopped {
+		t.Fatal("lost confirmed shutdown flag")
+	}
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/retry", map[string]string{"run_id": run.ID}, 200)
+	next := factoryPoll(t, s)
+	if next == nil {
+		t.Fatal("confirmed run could not retry")
+	}
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/cancel", map[string]string{"run_id": next.ID}, 200)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/retry", map[string]string{"run_id": next.ID}, 409)
 }
 func TestCancelledUploadGrantExpires(t *testing.T) {
 	local, e := openFactoryLocalStore(filepath.Join(t.TempDir(), "events.db"))

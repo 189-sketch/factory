@@ -26,13 +26,14 @@ export function reduceActivity(events, runState) {
     }
   }
   const stopped = ["interrupted", "cancelled", "timed_out"].includes(runState);
-  return { children: [...children.values()].map(child => { const report=native.reports.get(child.native_id) || child.summary || reports.get(child.native_id) || ""; return {...child,summary:report,status: stopped && child.status === "running" ? "interrupted" : child.status}; }), logs };
+  return { children: [...children.values()].map(child => { const report=native.messages.get(child.native_id) || native.messages.get(native.agents.get(child.native_id)?.tool) || reports.get(child.native_id) || reports.get(native.agents.get(child.native_id)?.tool) || native.reports.get(child.native_id) || child.summary || ""; return {...child,summary:report,status: stopped && child.status === "running" ? "interrupted" : child.status}; }), logs };
 }
 
 function nativeIdentities(events) {
-  const agents = new Map(), roots = new Set(), streams = new Map(), toolRoles=new Map(), reports=new Map(), roles=new Map();
+  const agents = new Map(), roots = new Set(), streams = new Map(), toolRoles=new Map(), reports=new Map(), roles=new Map(), messages=new Map();
   let classified = false;
   const observe = value => {
+ if(value.type==="assistant" && (value.agent_id || value.parent_tool_use_id)) { const text=(value.message?.content || []).filter(part=>part.type==="text").map(part=>part.text).join("\n"); if(text) messages.set(value.agent_id || value.parent_tool_use_id,text); }
     for (const part of value.message?.content || []) {
       if(part.type==="tool_use" && ["Agent","Task"].includes(part.name) && part.input?.subagent_type) toolRoles.set(part.id,part.input.subagent_type);
     }
@@ -45,7 +46,7 @@ function nativeIdentities(events) {
     if(value.type==="system" && value.subtype==="task_notification" && value.summary) reports.set(value.task_id || value.agent_id,value.summary);
     if (value.id === 4 && value.result?.thread?.id) roots.add(value.result.thread.id);
     const item = value.params?.item;
-    if(value.method==="item/completed" && item?.type==="agentMessage" && value.params?.threadId) reports.set(value.params.threadId,item.text);
+    if(value.method==="item/completed" && item?.type==="agentMessage" && value.params?.threadId) messages.set(value.params.threadId,item.text);
     if (item?.type === "subAgentActivity") {
       classified = true;
       if (["started", "completed", "failed", "interrupted"].includes(item.kind)) {
@@ -72,7 +73,7 @@ function nativeIdentities(events) {
   }
   for (const state of streams.values()) { try { observe(JSON.parse(state.pending)); } catch { /* Partial live line. */ } }
   for(const [id,agent] of agents) agent.role=roles.get(id) || toolRoles.get(agent.tool);
- return {agents, roots, classified,reports};
+ return {agents, roots, classified,reports,messages};
 }
 
 export function pollRunActivity(run) {

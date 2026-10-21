@@ -93,3 +93,30 @@ test("selecting a role opens its full report without a duplicate overview feed",
  await React.act(async()=>document.querySelector('[aria-label="Choose an agent report"] button').click());
  assert.match(visible.textContent,/FULL_FIRST_REPORT/);assert.doesNotMatch(visible.textContent,/FULL_SECOND_REPORT/);
 });
+
+test("full Claude child reports survive a later short notification",()=>{
+ const events=[rawEvent({type:"system",subtype:"task_started",task_type:"local_agent",task_id:"a",tool_use_id:"tool",description:"Review"}),activity("a","completed","end"),{type:"agent.message",message:JSON.stringify({native_id:"a",primary:false,text:"Full findings. Details that must survive."})},rawEvent({type:"system",subtype:"task_notification",task_id:"a",summary:"Accepted"})];
+ assert.equal(reduceActivity(events,"succeeded").children[0].summary,"Full findings. Details that must survive.");
+ events[2].message=JSON.stringify({native_id:"tool",primary:false,text:"Historical full findings."});
+ assert.equal(reduceActivity(events,"succeeded").children[0].summary,"Historical full findings.");
+});
+
+test("confirmed process shutdown permits retry without another manual assertion",async context=>{
+ const {createServer}=await import("vite");const React=await import("react");const {renderToStaticMarkup}=await import("react-dom/server");
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});context.after(()=>server.close());const {TaskDetail}=await server.ssrLoadModule("/src/task-detail.jsx");
+ const job={id:"cancel",recipe:"native-v1",state_backend:"local",state:"cancelled",repository:"example/repo",task:{title:"Cancelled",spec:"Read only"},workflow:{factory:{}},runs:[{id:"run",state:"cancelled",process_stopped:true}]};
+ let html=renderToStaticMarkup(React.createElement(TaskDetail,{job,loaded:true}));assert.doesNotMatch(html,/I have verified the previous worker/);
+ job.runs[0].process_stopped=false;html=renderToStaticMarkup(React.createElement(TaskDetail,{job,loaded:true}));assert.match(html,/I have verified the previous worker/);
+});
+
+test("raw full reports retain their tail beyond the normalized message limit",()=>{
+ const full="Evidence ".repeat(1400)+"DISTINCT_FINAL_FINDING";
+ const events=[rawEvent({type:"system",subtype:"task_started",task_type:"local_agent",task_id:"a",tool_use_id:"tool"}),activity("a","completed","end"),rawEvent({type:"assistant",agent_id:"a",parent_tool_use_id:"tool",message:{content:[{type:"text",text:full}]}}),{type:"agent.message",message:JSON.stringify({native_id:"a",primary:false,text:full.slice(0,8192)+"[truncated]"})},rawEvent({type:"system",subtype:"task_notification",task_id:"a",summary:"Accepted"})];
+ assert.equal(reduceActivity(events,"succeeded").children[0].summary,full);
+});
+
+test("raw Codex reports retain their tail beyond the normalized limit",()=>{
+ const full="Evidence ".repeat(1400)+"CODEX_DISTINCT_FINAL_FINDING";
+ const events=[rawEvent({method:"item/started",params:{item:{type:"subAgentActivity",kind:"started",agentThreadId:"a",agentPath:"/root/reviewer"}}}),activity("a","completed","end"),rawEvent({method:"item/completed",params:{threadId:"a",item:{type:"agentMessage",text:full}}}),{type:"agent.message",message:JSON.stringify({native_id:"a",primary:false,text:full.slice(0,8192)+"[truncated]"})}];
+ assert.equal(reduceActivity(events,"succeeded").children[0].summary,full);
+});

@@ -19,13 +19,27 @@ func configureProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func terminateProcessTree(process *os.Process) error {
+func terminateProcessTree(process *os.Process, owners ...string) error {
 	if process == nil {
 		return nil
 	}
 	// Snapshot ancestry before stopping the harness: tool PTYs can create their
 	// own process groups, so signalling only the harness group misses them.
 	descendants, scanErr := processDescendants(process.Pid)
+	if len(owners) > 0 && owners[0] != "" {
+		owned, err := ownedProcesses(owners[0])
+		scanErr = errors.Join(scanErr, err)
+		seen := map[int]bool{process.Pid: true}
+		for _, pid := range descendants {
+			seen[pid] = true
+		}
+		for _, pid := range owned {
+			if !seen[pid] {
+				descendants = append(descendants, pid)
+				seen[pid] = true
+			}
+		}
+	}
 	var cleanupErr error
 	for i := len(descendants) - 1; i >= 0; i-- {
 		pid := descendants[i]
@@ -114,5 +128,34 @@ func processDescendants(root int) ([]int, error) {
 		}
 	}
 	visit(root)
+	return result, nil
+}
+
+// A random per-execution marker is inherited by tools even after their parent
+// exits. Do not log ps output: it contains process environments. This is cleanup
+// ownership, not a sandbox; tools can deliberately remove inherited variables.
+func ownedProcesses(owner string) ([]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := exec.CommandContext(ctx, "ps", "axeww", "-o", "pid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate owned command processes: %w", err)
+	}
+	marker := "MACHINIST_PROCESS_OWNER=" + owner
+	var result []int
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, field := range fields[1:] {
+			if field == marker {
+				if pid, e := strconv.Atoi(fields[0]); e == nil {
+					result = append(result, pid)
+				}
+				break
+			}
+		}
+	}
 	return result, nil
 }
