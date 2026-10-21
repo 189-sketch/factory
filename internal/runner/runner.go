@@ -265,6 +265,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 			return completeFailure(&result, log, runDirectory, err)
 		}
 	}
+	processOwner, err := randomID("owner", 16)
+	if err != nil {
+		return completeFailure(&result, log, runDirectory, err)
+	}
+	command.Env = append(command.Env, "MACHINIST_PROCESS_OWNER="+processOwner)
 	configureProcess(command)
 
 	stdinReader, stdinWriter, err := os.Pipe()
@@ -297,7 +302,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	closeFiles(stdinReader, stdoutWriter, stderrWriter)
 	if err := log.append("process.started", "", fmt.Sprintf("pid=%d", command.Process.Pid)); err != nil {
 		_ = stdinWriter.Close()
-		_ = terminateProcessTree(command.Process)
+		_ = terminateProcessTree(command.Process, processOwner)
 		_, _ = command.Process.Wait()
 		closeFiles(stdoutReader, stderrReader)
 		return completeFailure(&result, log, runDirectory, err)
@@ -341,7 +346,7 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
-	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
+	state, exitCode, outcome := supervise(ctx, command.Process, processOwner, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
 	var cleanupFailure *processCleanupError
 	result.ProcessStopped = !errors.As(outcome, &cleanupFailure)
 	if nativeOutput != nil {
@@ -426,7 +431,7 @@ func validArtifactKey(value string) bool {
 	return true
 }
 
-func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {
+func supervise(ctx context.Context, process *os.Process, processOwner string, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	timeoutAt := time.Now().Add(timeout)
@@ -442,7 +447,7 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 				stop.BeforeProcessStop()
 			}
 		}
-		cleanupErr := terminateProcessTree(process)
+		cleanupErr := terminateProcessTree(process, processOwner)
 		closeInput()
 		closeStreams()
 		waited := <-processResult
@@ -455,7 +460,7 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 	for {
 		select {
 		case waited := <-processResult:
-			killErr := terminateProcessTree(process)
+			killErr := terminateProcessTree(process, processOwner)
 			closeInput()
 			drainDeadline := earlierDeadline(timeoutAt, time.Now().Add(outputDrainGrace))
 			setOutputDeadline(drainDeadline, outputWriters...)
