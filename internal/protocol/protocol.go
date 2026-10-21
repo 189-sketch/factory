@@ -54,6 +54,7 @@ type Heartbeat struct {
 }
 
 type Completion struct {
+	ProcessStopped   bool            `json:"process_stopped,omitempty"`
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`
 	InstanceID       string          `json:"instance_id"`

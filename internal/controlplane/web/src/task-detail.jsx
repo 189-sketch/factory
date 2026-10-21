@@ -342,6 +342,8 @@ function NativeTaskDetail({ job, error, onWorkflowAction }) {
     <Tabs key={job.id} label="Run sections" items={[
       { id: "overview", label: "Overview", content: <>
         <section className="run-outcome" aria-label="Run outcome"><h2>{job.state === "succeeded" ? "Result" : job.state === "failed" ? "What went wrong" : job.state === "blocked" ? "Needs your input" : "Current status"}</h2>
+          {latest?.phase === "stopping" && <p role="status">Stopping agent processes and collecting final activity…</p>}
+          {latest?.phase === "stop_unconfirmed" && <p role="status">Cancellation was requested, but process shutdown could not be confirmed.</p>}
           {summary && <RunMarkdown>{summary}</RunMarkdown>}
           {job.state === "running" ? <RunActivity run={latest} /> : !summary && <p className="run-empty">{job.state === "queued" ? "Waiting for a runner to pick up this task." : "No result was reported."}</p>}
           {job.workflow?.factory?.pr_url && <a className="factory-spec-link" href={job.workflow.factory.pr_url} target="_blank" rel="noreferrer">Open pull request<ArrowRight size={16} aria-hidden="true" /></a>}

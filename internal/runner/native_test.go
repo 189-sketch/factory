@@ -64,7 +64,7 @@ func TestNativeCodexChildLifecycleAndPrimary(t *testing.T) {
 }
 func TestNativeClaudeFailureIsOwnedByPrimary(t *testing.T) {
 	n, _, _ := testNative(t, "claude-stream")
-	for _, line := range []string{`{"type":"system","subtype":"task_started","task_id":"child1","description":"Reader"}`, `{"type":"system","subtype":"task_notification","task_id":"child1","status":"failed","summary":"read failed"}`, `{"type":"result","parent_tool_use_id":"child1","is_error":true,"result":"CHILD"}`, `{"type":"result","is_error":false,"result":"PARENT"}`} {
+	for _, line := range []string{`{"type":"system","subtype":"task_started","task_id":"child1","task_type":"local_agent","description":"Reader"}`, `{"type":"system","subtype":"task_notification","task_id":"child1","status":"failed","summary":"read failed"}`, `{"type":"result","parent_tool_use_id":"child1","is_error":true,"result":"CHILD"}`, `{"type":"result","is_error":false,"result":"PARENT"}`} {
 		feedNative(t, n, line+"\n")
 	}
 	if n.final != "PARENT" || n.active["child1"].Status != "failed" {
@@ -148,5 +148,39 @@ func TestNativeDefaultModelTravelsInRequest(t *testing.T) {
 	}
 	if !strings.Contains(input.String(), `"model":"account-default"`) {
 		t.Fatalf("default absent from request: %s", input.String())
+	}
+}
+
+func TestClaudeOnlyKnownAgentsAndStableLabels(t *testing.T) {
+	n, _, path := testNative(t, "claude-stream")
+	for _, line := range []string{
+		`{"type":"system","subtype":"task_started","task_id":"shell","task_type":"local_bash","description":"npm test"}`,
+		`{"type":"system","subtype":"task_started","task_id":"reader","task_type":"local_agent","description":"Review code","tool_use_id":"tool-reader"}`,
+		`{"type":"system","subtype":"task_progress","task_id":"reader","description":"Running git diff"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"shell","status":"completed"}`,
+		`{"type":"assistant","agent_id":"reader","parent_tool_use_id":"tool-reader","message":{"content":[{"type":"text","text":"Report"}]}}`,
+		`{"type":"system","subtype":"task_notification","task_id":"reader","status":"completed","description":"Running tests","summary":"Accepted"}`,
+	} {
+		feedNative(t, n, line+"\n")
+	}
+	if len(n.active) != 1 || n.active["reader"].Name != "Review code" || n.active["reader"].Status != "completed" {
+		t.Fatalf("bad projection: %+v", n.active)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), `\"native_id\":\"reader\"`) || strings.Contains(string(raw), `\"native_id\":\"tool-reader\"`) {
+		t.Fatal("wrong child message identity")
+	}
+}
+func TestCodexInteractionDoesNotCreateRootOrResetLifecycle(t *testing.T) {
+	n, _, _ := testNative(t, "codex-app-server")
+	for _, item := range []string{
+		`{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/root/reviewer"}`,
+		`{"type":"subAgentActivity","kind":"interacted","agentThreadId":"child"}`,
+		`{"type":"subAgentActivity","kind":"interacted","agentThreadId":"primary","agentPath":"/root"}`,
+	} {
+		feedNative(t, n, `{"method":"item/started","params":{"item":`+item+`}}`+"\n")
+	}
+	if len(n.active) != 1 || n.active["child"].Status != "running" {
+		t.Fatalf("bad interaction: %+v", n.active)
 	}
 }

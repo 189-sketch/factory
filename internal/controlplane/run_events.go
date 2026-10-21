@@ -68,7 +68,13 @@ func (s *GitHubFactoryServer) ingestEvents(w http.ResponseWriter, r *http.Reques
 	s.liveMu.Lock()
 	defer s.liveMu.Unlock()
 	lease := s.leases[r.PathValue("id")]
-	if lease == nil || time.Since(lease.last) > leaseDuration || lease.instance != p.InstanceID || lease.spec.LeaseToken != p.LeaseToken {
+	cleanup := false
+	if lease == nil {
+		lease = s.cleanupLeases[r.PathValue("id")]
+		cleanup = lease != nil
+	}
+	validTime := lease != nil && ((!cleanup && time.Since(lease.last) <= leaseDuration) || (cleanup && time.Now().Before(lease.cleanupUntil)))
+	if !validTime || lease.instance != p.InstanceID || lease.spec.LeaseToken != p.LeaseToken {
 		writeError(w, 409, ErrLeaseConflict)
 		return
 	}

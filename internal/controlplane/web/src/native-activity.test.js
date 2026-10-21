@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reduceActivity } from "./native-activity.js";
+import { reduceActivity, pollRunActivity } from "./native-activity.js";
 const activity = (id, status, time) => ({ type: "agent.activity", time, message: JSON.stringify({ native_id: id, name: "Reader", status }) });
 test("parallel identities, primary log and honest interruption", () => {
  const events = [activity("a", "running", "start"), activity("b", "running", "later"), activity("a", "failed", "end"), { type: "agent.message", message: JSON.stringify({ primary: false, text: "CHILD" }) }, { type: "agent.message", message: JSON.stringify({ primary: true, text: "PARENT" }) }];
@@ -54,4 +54,20 @@ test("native run separates outcome, logs, history and diagnostics", async contex
   assert.match(html, /Attempts \(2\)/);
   assert.match(html, /required result format/);
   assert.doesNotMatch(html, /<details|<summary|invalid character/);
+});
+
+const rawEvent = object => ({type:"process.output",stream:"stdout",encoding:"base64",data:Buffer.from(JSON.stringify(object)+"\n").toString("base64")});
+test("historical Claude graph excludes shell tasks and restores delegation names",()=>{
+ const events=[rawEvent({type:"system",subtype:"task_started",task_type:"local_agent",task_id:"reader",description:"Review code"}),rawEvent({type:"system",subtype:"task_started",task_type:"local_bash",task_id:"shell",description:"npm test"}),activity("reader","running","start"),activity("shell","completed","later"),{...activity("reader","completed","end"),message:JSON.stringify({native_id:"reader",name:"Running git diff",status:"completed",summary:"Accepted"})}];
+ const result=reduceActivity(events,"succeeded");assert.equal(result.children.length,1);assert.equal(result.children[0].name,"Review code");assert.equal(result.children[0].summary,"Accepted");
+});
+test("historical Codex excludes the primary and interactions preserve child state",()=>{
+ const events=[rawEvent({id:4,result:{thread:{id:"root"}}}),rawEvent({method:"item/started",params:{item:{type:"subAgentActivity",kind:"started",agentThreadId:"child",agentPath:"/root/reviewer"}}}),activity("child","running","start"),activity("child","unknown","interacted"),activity("root","unknown","interacted")];
+ const result=reduceActivity(events,"running");assert.equal(result.children.length,1);assert.equal(result.children[0].status,"running");assert.equal(result.children[0].name,"/root/reviewer");
+});
+
+test("cancelled activity continues polling until cleanup acknowledgment",()=>{
+ assert.equal(pollRunActivity({state:"cancelled",phase:"stopping"}),true);
+ assert.equal(pollRunActivity({state:"cancelled",completed_at:"2026-10-21T10:00:00Z"}),false);
+ assert.equal(pollRunActivity({state:"cancelled"}),false);
 });

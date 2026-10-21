@@ -15,7 +15,7 @@ Host workers use existing CLI subscription sign-in. Native adapters remove inher
 
 Each run stores `native-input.json` locally, with the rendered primary prompt, adapter, argv, model, definition hash, and hashes of relevant repository configuration. Raw stdout/stderr remain in `events.jsonl`. Normalized child observations and primary/child messages share that spool. Unknown native events remain in raw output. Only primary completion and primary usage determine the run result. Child failures are observations the primary can recover from.
 
-Workers send bounded, lease-authenticated event batches to `POST /api/v1/runs/{id}/events`. Sequence IDs are contiguous; identical replay is acknowledged, and conflicting payloads or stale leases are rejected. An acknowledged cursor is saved beside the worker spool. SQLite stores activity separately from the lifecycle journal. `GET /api/v1/runs/{id}/events?after=N` returns up to 128 events and the next cursor. The UI polls this API and displays connection loss with the last observations. Completion waits for pending event delivery. Timeout, cancellation, or a stale lease stops the owned process group. Confirmed interruption marks unfinished children interrupted; successful primary completion without a child completion signal leaves that child's status unknown.
+Workers send bounded, lease-authenticated event batches to `POST /api/v1/runs/{id}/events`. Sequence IDs are contiguous; identical replay is acknowledged, and conflicting payloads or stale leases are rejected. An acknowledged cursor is saved beside the worker spool. SQLite stores activity separately from the lifecycle journal. `GET /api/v1/runs/{id}/events?after=N` returns up to 128 events and the next cursor. The UI polls this API and displays connection loss with the last observations. Completion waits for pending event delivery. Timeout, cancellation, or a stale lease stops the owned process group and enumerated descendants, including tools in separate process groups. A failed descendant scan or kill is reported as cleanup failure rather than confirmed shutdown. Interrupted runs mark unfinished child observations interrupted; successful primary completion without a child completion signal leaves that child's status unknown.
 
 The primary returns one JSON object:
 
@@ -40,3 +40,22 @@ MACHINIST_NATIVE_LIVE=1 MACHINIST_CODEX_LIVE_MODEL=ACCOUNT_SUPPORTED_MODEL go te
 The live test uses a temporary Git worktree and the host's existing login. It verifies repository child discovery using a value present only in the child's definition. Codex uses a temporary trusted configuration and a read-only symlink to the existing login; the user's saved configuration is unchanged. No API keys are used. Set `MACHINIST_NATIVE_LIVE_EXTENDED=1` to check two repeated, parallel child identities, live activity before completion, and missing-file recovery in both harnesses. The deterministic tests cover framing, parallel identities, child failure, primary-result isolation, unknown events, cancellation, timeout, durable replay, sequence conflicts, and stale leases.
 
 Protocol references: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [Codex custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents).
+
+## Cancellation and graph verification (2026-10-21)
+
+Cancellation immediately revokes execution. For two minutes, that same worker instance and lease token may upload the remaining events and acknowledge process shutdown. This permission cannot renew execution or apply an agent result. A shutdown acknowledgment is independent of agent success, so a completion racing cancellation cannot publish work or revive the cancelled job. The acknowledgment and terminal events survive journal replay. The cleanup permission, like execution leases, is in memory; a server restart during cleanup or an expired permission leaves shutdown unconfirmed and requires operator verification.
+
+The UI polls while cleanup is pending and distinguishes stopping from unconfirmed shutdown. Stop confirmation is carried from the runner before cancelled post-run checks can return early.
+
+Claude activity accepts only `local_agent` starts and subsequent events for known agent IDs. Shell tasks remain diagnostic output. Original delegation names remain stable; current progress is separate. Codex interactions do not reset child lifecycle state, and the primary thread is excluded from child activity. Existing graphs reconstruct identity classification and original names from retained raw output, without deleting history. Older histories without explicit identity evidence retain their normalized fallback; unknown task types are not inferred as agents for new runs.
+
+Real host probes used the existing subscriptions and one native child running a uniquely tagged 120-second Node timer. Cancellation was requested only after its process was present. Neither probe required manual cleanup:
+
+| Harness | Run | Stop observed after cancel request | Server / local spool / acknowledged events |
+| --- | --- | --- | --- |
+| Claude | `run_4632bf55775e256ae8565542` | 7.258 seconds | 56 / 56 / 56 |
+| Codex | `run_4f0e8dce63dcda5d6bf4ac62` | 0.729 seconds | 82 / 82 / 82 |
+
+Both included `run.completed` on the server and a persisted stop acknowledgment. Timing includes waiting for the worker's next heartbeat and is not a termination-latency benchmark. An unrelated product preview remained healthy. Historical replay reduced the bootstrap graph from twelve identities to three real agents, the repair run from twenty-five to four, and the Codex acceptance run from four to three. The corrected bootstrap graph was also checked in the browser.
+
+Verification: full `go test ./...`, focused `go vet`, 73 UI tests and production UI build passed. Regression checks cover separate-session descendants with an unrelated sentinel, enumeration failure, cancellation before launch, worker stop-confirmation retention, expired/wrong cleanup tokens, completion racing cancellation, durable stop replay, stable labels and historical classification. Descendant enumeration is host cleanup, not an OS isolation boundary against deliberately detached or reparented processes. Shared-host process authority remains a separate limitation.

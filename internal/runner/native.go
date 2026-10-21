@@ -19,6 +19,7 @@ type Activity struct {
 	NativeID        string `json:"native_id"`
 	Name            string `json:"name,omitempty"`
 	Status          string `json:"status"`
+	Detail          string `json:"detail,omitempty"`
 	Summary         string `json:"summary,omitempty"`
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 }
@@ -129,10 +130,13 @@ func (n *nativeStream) observe(a Activity) error {
 	a.NativeID = truncateNative(a.NativeID, 512)
 	a.Name = truncateNative(a.Name, 2048)
 	a.Summary = truncateNative(a.Summary, 8<<10)
+	a.Detail = truncateNative(a.Detail, 2048)
 	a.ParentToolUseID = truncateNative(a.ParentToolUseID, 512)
 	a.Status = truncateNative(a.Status, 64)
 	previous := n.active[a.NativeID]
-	if a.Name == "" {
+	if previous.Name != "" {
+		a.Name = previous.Name
+	} else if a.Name == "" {
 		a.Name = previous.Name
 	}
 	if a.ParentToolUseID == "" {
@@ -159,6 +163,14 @@ func (n *nativeStream) line(line []byte) error {
 			if id == "" {
 				id = str("agent_id")
 			}
+			if sub == "task_started" && str("task_type") != "local_agent" {
+				return nil
+			}
+			if sub != "task_started" {
+				if _, known := n.active[id]; !known {
+					return nil
+				}
+			}
 			status := "running"
 			if sub == "task_notification" {
 				status = str("status")
@@ -166,7 +178,12 @@ func (n *nativeStream) line(line []byte) error {
 					status = "unknown"
 				}
 			}
-			return n.observe(Activity{NativeID: id, Name: str("description"), Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
+			name, detail := str("description"), ""
+			if sub != "task_started" {
+				detail = name
+				name = ""
+			}
+			return n.observe(Activity{NativeID: id, Name: name, Detail: detail, Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
 		}
 		if typ == "assistant" {
 			var message struct {
@@ -178,7 +195,17 @@ func (n *nativeStream) line(line []byte) error {
 			_ = json.Unmarshal(e["message"], &message)
 			for _, part := range message.Content {
 				if part.Type == "text" {
-					if err := n.message(part.Text, str("parent_tool_use_id"), str("parent_tool_use_id") == ""); err != nil {
+					parent := str("parent_tool_use_id")
+					id := str("agent_id")
+					if id == "" && parent != "" {
+						for key, a := range n.active {
+							if a.ParentToolUseID == parent {
+								id = key
+								break
+							}
+						}
+					}
+					if err := n.message(part.Text, id, parent == "" && str("agent_id") == ""); err != nil {
 						return err
 					}
 				}
@@ -312,7 +339,7 @@ func (n *nativeStream) line(line []byte) error {
 		}
 	}
 	p := response.Params
-	if p.Item.Type == "subAgentActivity" {
+	if p.Item.Type == "subAgentActivity" && p.Item.AgentThreadID != n.root {
 		status := "unknown"
 		switch p.Item.Kind {
 		case "started":
@@ -323,6 +350,9 @@ func (n *nativeStream) line(line []byte) error {
 			status = "failed"
 		case "interrupted":
 			status = "interrupted"
+		}
+		if status == "unknown" {
+			return nil
 		}
 		// item/completed is the end of a notification, not the child lifecycle.
 		if response.Method == "item/started" {

@@ -262,6 +262,14 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			} else {
 				s.repair(issue.HTMLURL)
 			}
+		case "stopped":
+			if s.Job.State != "cancelled" || run.State != "cancelled" {
+				return nil, ErrWorkflowAction
+			}
+			run.CompletedAt = comment.CreatedAt
+			run.ExitCode, run.Error = event.ExitCode, event.Error
+			duration := max(int64(0), comment.CreatedAt.Sub(run.StartedAt).Milliseconds())
+			run.DurationMillis = &duration
 		case "cancel":
 			if s.Job.State == "succeeded" || s.Job.State == "cancelled" {
 				return nil, ErrWorkflowAction

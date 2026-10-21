@@ -3,10 +3,14 @@
 package runner
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -19,13 +23,23 @@ func terminateProcessTree(process *os.Process) error {
 	if process == nil {
 		return nil
 	}
+	// Snapshot ancestry before stopping the harness: tool PTYs can create their
+	// own process groups, so signalling only the harness group misses them.
+	descendants, scanErr := processDescendants(process.Pid)
+	var cleanupErr error
+	for i := len(descendants) - 1; i >= 0; i-- {
+		pid := descendants[i]
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop descendant %d: %w", pid, err))
+		}
+	}
 	err := syscall.Kill(-process.Pid, syscall.SIGKILL)
 	if ignorableProcessTreeTerminationError(err, func() error {
 		return syscall.Kill(-process.Pid, 0)
 	}) {
-		return nil
+		return errors.Join(scanErr, cleanupErr)
 	}
-	return err
+	return errors.Join(err, scanErr, cleanupErr)
 }
 
 func ignorableProcessTreeTerminationError(err error, probeProcessGroup func() error) bool {
@@ -63,4 +77,42 @@ func processExitCode(state *os.ProcessState) int {
 
 func terminatedExitCode() int {
 	return 128 + int(syscall.SIGKILL)
+}
+
+// ps is available on both supported Unix hosts. Bound the scan so an unhealthy
+// host cannot hang cancellation. Only processes connected to this root by PPID
+// are selected; names and command lines never confer ownership.
+func processDescendants(root int) ([]int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	raw, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("enumerate command descendants: %w", err)
+	}
+	children := map[int][]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, e1 := strconv.Atoi(fields[0])
+		parent, e2 := strconv.Atoi(fields[1])
+		if e1 == nil && e2 == nil {
+			children[parent] = append(children[parent], pid)
+		}
+	}
+	var result []int
+	seen := map[int]bool{root: true}
+	var visit func(int)
+	visit = func(parent int) {
+		for _, pid := range children[parent] {
+			if !seen[pid] {
+				seen[pid] = true
+				result = append(result, pid)
+				visit(pid)
+			}
+		}
+	}
+	visit(root)
+	return result, nil
 }

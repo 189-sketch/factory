@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useId } from "react";
 import Markdown from "react-markdown";
 import { Check, Circle, CircleAlert, LoaderCircle } from "lucide-react";
-import { reduceActivity } from "./native-activity.js";
+import { reduceActivity, pollRunActivity } from "./native-activity.js";
 import { formatDurationMillis } from "./run-metrics.js";
 
 export function useRunEvents(run) {
@@ -30,11 +30,11 @@ export function useRunEvents(run) {
         retry = true;
         if (!stopped) setSnapshot(previous => ({ ...previous, error: failure.message, loaded: true }));
       }
-      if (!stopped && (retry || ["running", "queued"].includes(run?.state))) timer = setTimeout(poll, 2000);
+      if (!stopped && (retry || pollRunActivity(run))) timer = setTimeout(poll, 2000);
     }
     poll();
     return () => { stopped = true; clearTimeout(timer); controller.abort(); };
-  }, [run?.id, run?.state]);
+  }, [run?.id, run?.state, run?.phase, run?.completed_at]);
   const current = snapshot.id === run?.id ? snapshot : { events: [], error: "", loaded: false };
   return { ...current, ...reduceActivity(current.events, run?.state) };
 }

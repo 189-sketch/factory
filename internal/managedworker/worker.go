@@ -207,7 +207,7 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 }
 
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
-	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
+	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1, ProcessStopped: true}
 	repository, err := w.config.ResolveRepository(spec.Repository)
 	if err != nil {
 		completion.Error = err.Error()
@@ -366,6 +366,15 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			result.ExitCode = 1
 		}
 	}
+	completion.ProcessStopped = result.ProcessStopped
+	if ctx.Err() != nil && result.ID != "" {
+		completion.State = string(result.State)
+		completion.ExitCode = result.ExitCode
+		if runErr != nil {
+			completion.Error = runErr.Error()
+		}
+		return completion
+	}
 	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || (spec.Factory.Recipe == "single" || spec.Factory.Recipe == "native-v1") || spec.Factory.Role == "triage") {
 		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
 		if (stateErr != nil || after != answerHead) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
@@ -384,6 +393,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		}
 	}
 	if result.ID != "" {
+		completion.ProcessStopped = result.ProcessStopped
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
