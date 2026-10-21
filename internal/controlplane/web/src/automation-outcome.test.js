@@ -17,7 +17,7 @@ test("outcomes belong to the selected latest job and latest attempt, never an ol
 
 test("no-change reports and connection checks do not claim delivered code", () => {
   assert.equal(automationOutcome(automation, job).text, job.runs[0].summary);
-  assert.equal(automationOutcome(automation, { ...job, workflow: { factory: { pr_url: "https://github.com/owner/repo/pull/2" } } }).link.label, "View report");
+  assert.equal(automationOutcome(automation, { ...job, workflow: { factory: { pr_url: "https://github.com/owner/repo/pull/2" } } }).link.label, "View PR");
   assert.match(automationOutcome(automation, { ...job, runs: [{ summary: "PONG" }] }).text, /Connection check.*no recurring work delivered/);
   assert.match(automationOutcome(automation, { ...job, runs: [] }).text, /no outcome summary/);
 });
@@ -56,4 +56,11 @@ test("recorded PONG directory probe is identified as a connection check", () => 
  const result = automationOutcome({last_job:"probe"}, {id:"probe",state:"succeeded",runs:[{state:"succeeded",summary:"PONG — Actual directory: /source/repository. All requested checks passed."}]});
  assert.match(result.text,/Connection check/);
  assert.match(result.text,/no recurring work delivered/);
+});
+
+test("verified delivery is not hidden by incidental no-code-change wording", () => {
+ for (const summary of ["Updated the docs; no code changes were needed", "Applied the fix; nothing to update in tests"]) {
+  const result=automationOutcome(automation,{...job,runs:[{summary}],workflow:{factory:{pr_url:"https://github.com/owner/repo/pull/2"}}});
+  assert.equal(result.link.label,"View PR");
+ }
 });

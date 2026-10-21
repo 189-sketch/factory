@@ -40,7 +40,6 @@ export function automationOutcome(a, job) {
   const connectionCheck = /^pong(?:[.!]?$|\s*[—–:]\s*|\s+-\s+)/i.test(summary || report);
   if (connectionCheck) return { text: "Connection check returned PONG; no recurring work delivered.", link: runLink };
   const text = summary || report || ({ succeeded: "Run completed; no outcome summary recorded.", cancelled: "Run cancelled.", blocked: "Run blocked. Open the run for details.", awaiting_approval: "Specification awaiting approval.", awaiting_merge: "PR awaiting merge." }[job.state] || "No outcome summary recorded.");
-  const noChanges = /\bno (?:code )?changes\b|\bnothing to (?:change|update)\b/i.test(text);
-  const pr = !noChanges && ["succeeded", "awaiting_merge"].includes(job.state) ? pullURL(job.workflow?.factory?.pr_url) : null;
+  const pr = ["succeeded", "awaiting_merge"].includes(job.state) ? pullURL(job.workflow?.factory?.pr_url) : null;
   return { text, link: pr ? { href: pr, label: "View PR", external: true } : { ...runLink, label: latest?.report ? "View report" : "View run" } };
 }

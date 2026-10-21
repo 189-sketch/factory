@@ -22,6 +22,8 @@ test("mobile navigation has a dedicated bottom navigation treatment", async () =
   const styles = await readFile(new URL("./styles.css", import.meta.url), "utf8");
 
   assert.match(styles, /\.app-sidebar nav \{ position: fixed;[^}]*bottom: 0;/);
-  assert.match(styles, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(styles, /grid-template-columns:repeat\(5,minmax\(0,1fr\)\)/);
+  assert.doesNotMatch(styles, /grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(styles, /padding-bottom: calc\(4\.15rem \+ env\(safe-area-inset-bottom\)\)/);
 });
