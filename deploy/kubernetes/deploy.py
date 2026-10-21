@@ -159,17 +159,23 @@ class Deployment:
         self.k('rollout','status','deployment/machinist-egress','--timeout=300s',namespace='machinist-runners')
         self.k('set','image','deployment/machinist-control-plane','machinist='+control_plane)
         self.k('annotate','deployment/machinist-control-plane','machinist.dev/revision='+revision,'machinist.dev/state-snapshot='+name,'--overwrite')
-        self.k('scale','deployment/machinist-control-plane','--replicas=1')
-        self.k('rollout','status','deployment/machinist-control-plane','--timeout=300s')
-        expected=time.monotonic()+90
-        while True:
-            after=self.status()
-            if after['connected']:break
-            if time.monotonic()>expected:raise RuntimeError('Dispatcher did not reconnect')
-            time.sleep(3)
-        preserved(before,after)
-        self.k('exec','deployment/machinist-control-plane','--','python3','-c',CHECK)
-        self.no_runners()
+        try:
+            self.k('scale','deployment/machinist-control-plane','--replicas=1')
+            self.k('rollout','status','deployment/machinist-control-plane','--timeout=300s')
+            expected=time.monotonic()+90
+            while True:
+                after=self.status()
+                if after['connected']:break
+                if time.monotonic()>expected:raise RuntimeError('Dispatcher did not reconnect')
+                time.sleep(3)
+            preserved(before,after)
+            self.k('exec','deployment/machinist-control-plane','--','python3','-c',CHECK)
+            self.no_runners()
+        except (RuntimeError, ValueError, subprocess.SubprocessError):
+            # Quarantine an unverified release without restoring an old binary
+            # over state that may already have migrated. Preserve runner evidence.
+            self.k('scale','deployment/machinist-control-plane','--replicas=0')
+            raise
         Path(output).write_text(json.dumps(release,indent=2)+'\n')
         print(json.dumps(release,indent=2))
 

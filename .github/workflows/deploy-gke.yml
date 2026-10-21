@@ -94,9 +94,17 @@ jobs:
           project_id: ${{ env.PROJECT }}
       - name: Back up, deploy and verify
         if: steps.gate.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
+          current=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$REVISION" != "$current" ]; then
+            echo 'Skipping superseded revision before changing production.'
+            exit 0
+          fi
           python3 deploy/kubernetes/deploy.py \
             --context "gke_${PROJECT}_${REGION}_${CLUSTER}" \
             --control-plane "$CONTROL_PLANE_IMAGE" --runner "$RUNNER_IMAGE" \

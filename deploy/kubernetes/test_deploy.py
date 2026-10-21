@@ -6,6 +6,8 @@ import sqlite3
 import contextlib
 import io
 import tempfile
+import textwrap
+import os
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -71,6 +73,42 @@ class DeploymentTests(unittest.TestCase):
         delete=next(i for i,c in enumerate(calls) if c[:2]==('delete','pod'))
         restart=next(i for i,c in enumerate(calls) if '--replicas=1' in c)
         self.assertLess(backup,ready);self.assertLess(ready,config);self.assertLess(config,delete);self.assertLess(delete,restart)
+
+    def test_final_main_gate_skips_stale_revision_and_fails_closed(self):
+        workflow=(Path(__file__).parents[2]/'.github/workflows/deploy-gke.yml').read_text()
+        step=workflow.split('      - name: Back up, deploy and verify',1)[1]
+        script=textwrap.dedent(step.split('        run: |\n',1)[1].split('          python3 deploy/kubernetes/deploy.py',1)[0])
+        for current, failed, expected in [('a'*40,False,True),('b'*40,False,False),('',True,False)]:
+            gh='gh() { return 1; }\n' if failed else 'gh() { printf %s '+current+'; }\n'
+            result=subprocess.run(['bash','-c',gh+script+'printf MUTATED'],env={**os.environ,'REVISION':'a'*40,'GH_REPO':'owainlewis/machinist'},text=True,capture_output=True)
+            self.assertEqual('MUTATED' in result.stdout,expected)
+            self.assertEqual(result.returncode!=0,failed)
+
+    def test_post_start_failures_stop_unverified_owner(self):
+        for phase in ['rollout', 'history', 'check', 'cleanup']:
+            fake=FakeDeployment()
+            original_k=fake.k
+            def k(*args, **kwargs):
+                if phase=='rollout' and args[:3]==('rollout','status','deployment/machinist-control-plane'):
+                    raise RuntimeError('rollout timed out')
+                if phase=='check' and deploy.CHECK in args:
+                    raise RuntimeError('sandbox check failed')
+                return original_k(*args, **kwargs)
+            fake.k=k
+            if phase=='history':
+                changed=copy.deepcopy(STATE); changed['jobs']={}
+                states=iter([copy.deepcopy(STATE), changed]); fake.status=lambda: next(states)
+            if phase=='cleanup':
+                def no_runners():
+                    if any('--replicas=1' in c for c in fake.calls):
+                        raise RuntimeError('runner remains')
+                fake.no_runners=no_runners
+            with tempfile.TemporaryDirectory() as temp:
+                output=Path(temp)/'release.json'
+                with self.assertRaises(RuntimeError):fake.run(IMAGE,IMAGE,'a'*40,output)
+                self.assertFalse(output.exists())
+            self.assertIn('--replicas=1',next(c for c in fake.calls if '--replicas=1' in c))
+            self.assertEqual(fake.calls[-1],('scale','deployment/machinist-control-plane','--replicas=0'))
 
     def test_operator_snapshot_requires_ready_without_granting_cluster_access(self):
         fake=FakeDeployment();fake.snapshot_backend='gcloud'
