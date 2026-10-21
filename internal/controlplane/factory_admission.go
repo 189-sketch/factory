@@ -46,7 +46,8 @@ func (s *GitHubFactoryServer) admissionUsage(ctx context.Context) factoryAdmissi
 			continue
 		}
 		run := job.Runs[len(job.Runs)-1]
-		uncertain := (run.State == "cancelled" || run.State == "interrupted") && !run.StartedAt.IsZero() && !run.ProcessStopped && run.CompletedAt.IsZero() && !confirmed[job.ID] && task.state.StopConfirmedRun != run.ID
+		unfinished := (run.State == "cancelled" || run.State == "interrupted") && !run.StartedAt.IsZero() && run.CompletedAt.IsZero()
+		uncertain := !run.ProcessStopped && (run.CleanupUnconfirmed || (unfinished && !confirmed[job.ID] && task.state.StopConfirmedRun != run.ID))
 		if run.State != "running" && !uncertain {
 			continue
 		}

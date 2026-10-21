@@ -272,3 +272,93 @@ func TestFactoryAdmissionConcurrentPollsRespectCaps(t *testing.T) {
 		t.Fatalf("concurrent admission: %v", admitted)
 	}
 }
+
+func TestFactoryAdmissionFailedCleanupPersistsUntilConfirmedRetry(t *testing.T) {
+	for _, mode := range []string{"stopped", "legacy", "unsafe"} {
+		t.Run(mode, func(t *testing.T) {
+			unsafe := mode == "unsafe"
+			s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+			s.repositories["other"] = "owner/other"
+			id := admissionSubmit(t, s, "repo")
+			a := admissionWorker("a", "repo")
+			run := admissionPoll(t, s, a)
+			completion := protocol.Completion{InstanceID: a.InstanceID, LeaseToken: run.LeaseToken, State: "failed", ExitCode: 1, Error: "process enumeration failed", CleanupUnconfirmed: unsafe, ProcessStopped: mode == "stopped"}
+			factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+			admissionSubmit(t, s, "repo")
+			admissionSubmit(t, s, "other")
+			if unsafe {
+				for _, restart := range []bool{false, true} {
+					if restart {
+						s = restartFactoryTestServer(t, s, newMemoryFactoryGitHub())
+					}
+					job := factoryJob(t, s, id)
+					if !job.Runs[0].CleanupUnconfirmed || job.Runs[0].CompletedAt.IsZero() {
+						t.Fatalf("lost completion evidence: %+v", job.Runs[0])
+					}
+					if r := admissionPoll(t, s, admissionWorker("b", "other")); r != nil {
+						t.Fatal("global slot released")
+					}
+					s.maxConcurrent = 3
+					if r := admissionPoll(t, s, admissionWorker("b", "repo")); r != nil {
+						t.Fatal("repository conflict admitted")
+					}
+					if r := admissionPoll(t, s, admissionWorker("a", "other")); r != nil {
+						t.Fatal("worker conflict admitted")
+					}
+					s.maxConcurrent = 1
+				}
+				factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/retry", map[string]any{"run_id": run.ID}, 409)
+			}
+			factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/retry", map[string]any{"run_id": run.ID, "previous_process_stopped": unsafe}, 200)
+			s = restartFactoryTestServer(t, s, newMemoryFactoryGitHub())
+			if r := admissionPoll(t, s, a); r == nil || r.JobID != id {
+				t.Fatalf("confirmed/safe retry blocked: %+v", r)
+			}
+		})
+	}
+}
+
+func TestFactoryAdmissionHealthRespectsCapacityAndReplay(t *testing.T) {
+	for _, constraint := range []string{"global", "repository", "worker"} {
+		t.Run(constraint, func(t *testing.T) {
+			s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+			id := admissionSubmit(t, s, "repo")
+			a := admissionWorker("a", "repo")
+			run := admissionPoll(t, s, a)
+			s.maxConcurrent = 3
+			if constraint == "global" {
+				s.maxConcurrent = 1
+			}
+			if constraint == "repository" {
+				s.maxPerRepository = 1
+			}
+			s.setup = &onboarding{server: s, settings: setupSettings{Finished: true}, health: &setupHealth{spec: protocol.RunSpec{ID: "health", Repository: "repo", Executor: "codex", HealthCheck: true}}}
+			p := admissionWorker("b", "repo")
+			p.HealthChecks = true
+			if constraint == "worker" {
+				p.Name = "a"
+			}
+			if r := admissionPoll(t, s, p); r != nil {
+				t.Fatalf("health bypassed %s: %+v", constraint, r)
+			}
+			a.HealthChecks = true
+			if r := admissionPoll(t, s, a); r == nil || r.ID != run.ID {
+				t.Fatalf("health displaced active lease: %+v", r)
+			}
+			factoryHTTP(t, s, "POST", "/api/v1/jobs/"+id+"/cancel", map[string]string{"run_id": run.ID}, 200)
+			if r := admissionPoll(t, s, p); r != nil {
+				t.Fatal("health bypassed uncertain cleanup")
+			}
+			factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", protocol.Completion{InstanceID: a.InstanceID, LeaseToken: run.LeaseToken, ProcessStopped: true}, 204)
+			p = admissionWorker("c", "repo")
+			p.HealthChecks = true
+			health := admissionPoll(t, s, p)
+			if health == nil || !health.HealthCheck {
+				t.Fatalf("health not admitted after cleanup: %+v", health)
+			}
+			if r := admissionPoll(t, s, p); r == nil || r.ID != health.ID {
+				t.Fatal("health lease not replayed")
+			}
+		})
+	}
+}

@@ -64,4 +64,7 @@ type Completion struct {
 	Error            string          `json:"error,omitempty"`
 	Result           json.RawMessage `json:"result,omitempty"`
 	Events           string          `json:"events,omitempty"`
+
+	// Explicit runner cleanup failure; absence preserves historical completion semantics.
+	CleanupUnconfirmed bool `json:"cleanup_unconfirmed,omitempty"`
 }

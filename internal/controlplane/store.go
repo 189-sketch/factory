@@ -93,6 +93,8 @@ type Run struct {
 	CompletedAt    time.Time          `json:"completed_at,omitempty"`
 	DurationMillis *int64             `json:"duration_millis,omitempty"`
 	TokenUsage     *int64             `json:"token_usage,omitempty,string"`
+
+	CleanupUnconfirmed bool `json:"cleanup_unconfirmed,omitempty"`
 }
 
 type Worker struct {

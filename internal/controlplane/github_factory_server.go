@@ -884,6 +884,16 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		s.workerCapabilities = map[string]protocol.PollRequest{}
 	}
 	s.workerCapabilities[p.InstanceID] = p
+	if err := s.refresh(r.Context(), false); err != nil {
+		writeError(w, 502, err)
+		return
+	}
+	for _, lease := range s.liveLeases() {
+		if lease.instance == p.InstanceID {
+			writeJSON(w, 200, protocol.PollResponse{Run: &lease.spec})
+			return
+		}
+	}
 	if s.setup != nil {
 		if check := s.setup.claimHealth(p); check != nil {
 			writeJSON(w, 200, protocol.PollResponse{Run: check})
@@ -895,16 +905,6 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		if !s.setup.snapshot().Finished {
 			writeJSON(w, 200, protocol.PollResponse{})
-			return
-		}
-	}
-	if err := s.refresh(r.Context(), false); err != nil {
-		writeError(w, 502, err)
-		return
-	}
-	for _, lease := range s.liveLeases() {
-		if lease.instance == p.InstanceID {
-			writeJSON(w, 200, protocol.PollResponse{Run: &lease.spec})
 			return
 		}
 	}
@@ -1217,7 +1217,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	step := &protocol.StepResult{Outcome: "failed", Summary: p.Error, Factory: &protocol.FactoryResult{Version: 1, Role: lease.spec.Factory.Role}}
 	decodeErr := json.Unmarshal(p.Result, &result)
-	if p.State == "succeeded" {
+	if p.State == "succeeded" && !p.CleanupUnconfirmed {
 		if err = decodeErr; err == nil {
 			step, err = protocol.ParseStepResult(result.StepResult)
 		}
@@ -1271,7 +1271,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
-	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
+	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", CleanupUnconfirmed: p.CleanupUnconfirmed, Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
 		writeError(w, 409, err)
 		return
 	}
