@@ -18,6 +18,64 @@ that directory. Factory jobs use `jobs.db`, not the legacy artifact store below.
 See [setup](local-factory/README.md), [job state](local-factory/local-jobs.md),
 and [Kubernetes configuration](local-factory/kubernetes.md).
 
+## Factory admission and capacity
+
+Both limits are optional positive integers. Omitting them leaves admission
+unlimited, as before. The repository limit applies to each project alias in the
+factory app (not the legacy SQLite command scheduler):
+
+```toml
+[server]
+max_concurrent_jobs = 4
+max_concurrent_jobs_per_repository = 1
+```
+
+Eligible projects take turns at dispatch. Within each project, eligible jobs
+are ordered by creation time, with job ID breaking ties. Unsupported jobs do not
+block other eligible work. The round-robin cursor is local to the server process
+and resets on restart. Replaying a live lease does not consume another slot or
+advance the turn.
+
+The built-in managed worker executes one job at a time. A single Kubernetes
+Codex credential stream also executes serially, enforced by its existing
+exclusive credential lock. Raising admission limits does not make one
+subscription parallel. Multiple eligible, independently provisioned workers can
+consume global capacity; do not clone credentials or remove locks to obtain
+parallelism.
+
+Cancelled or interrupted started attempts without confirmed shutdown still
+occupy a slot and block new work in their repository and on the same named
+worker. Expiring a heartbeat or cleanup-upload grant is not proof of shutdown.
+The existing stopped acknowledgement or explicit stopped confirmation on retry,
+publication access changes, or automation rerun releases the covered uncertainty.
+
+A runner that cannot enumerate or stop its descendants reports explicit
+`cleanup_unconfirmed` evidence, even when the attempt has finished as failed.
+That evidence survives restart and reserves the global, repository and worker
+slots. Verify the old process and tools have stopped, then retry the current run
+with `previous_process_stopped: true`; retry without confirmation is rejected.
+Safely stopped failures and old history without this new evidence retain their
+existing retry behavior. No credential locks are cleared by confirmation.
+Connection checks use the same global and repository capacity and worker
+ownership rules as jobs; a worker's existing lease is replayed first.
+
+`GET /api/v1/status` adds `capacity` with the configured limits (zero means no
+configured cap), occupied slots by repository, connected factory-worker count,
+and `effective_capacity_upper_bound`. The upper bound is the lesser of the
+global limit and recently seen distinct worker names; it is not a count of free
+slots or a promise of parallel execution. Job compatibility, repository caps,
+cleanup and shared credentials can reduce actual capacity. Managed-worker and
+Kubernetes credential-stream parallelism are each reported as one.
+`credential_lock_state` is `unobserved`: lock ownership and subscription
+capacity are not measured by the control plane.
+
+Queued jobs add `waiting_reasons`: `awaiting_runner` (no recently seen compatible
+worker), `runner_busy`, `global_capacity`, `repository_capacity`,
+`cleanup_unconfirmed`, `publication_hold`, or `awaiting_dispatch`.
+`credential_serialization_possible` additionally identifies compatible
+Kubernetes runners subject to the exclusive stream lock; it does not claim the
+job is currently waiting on that lock. These fields contain no credentials.
+
 ## Direct commands and legacy workers
 
 The following settings apply to lower-level commands and explicit workers.

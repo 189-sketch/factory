@@ -35,6 +35,13 @@ func (w *Worker) publishCandidate(ctx context.Context, workspace, bundle string,
 	if err != nil {
 		return err
 	}
+	if spec.GitHubRepository != "" && !strings.EqualFold(repository, spec.GitHubRepository) {
+		return fmt.Errorf("publication workspace no longer matches the selected GitHub repository")
+	}
+	ctx, err = w.refreshPublicationCredentials(ctx, spec.Repository, repository)
+	if err != nil {
+		return err
+	}
 	base, err := repositoryCommand(ctx, workspace)("git", "rev-parse", "HEAD")
 	if err != nil {
 		return err

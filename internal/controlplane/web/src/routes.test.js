@@ -27,8 +27,8 @@ test("removed workflow configuration routes return to runs",()=>{
  for(const hash of ["#/workflows","#/commands"]) assert.deepEqual(routeFromHash(hash),{view:"runs",jobID:""});
 });
 
-test("dashboard is the default page and analytics remains a compatible alias", () => {
-  for (const hash of ["", "#/", "#/dashboard", "#/analytics"]) assert.deepEqual(routeFromHash(hash), {view:"dashboard",jobID:""});
+test("dashboard is the default page and analytics opens Activity", () => {
+  for (const hash of ["", "#/", "#/dashboard"]) assert.deepEqual(routeFromHash(hash), {view:"dashboard",jobID:""});
 });
 
 test("dashboard links open the exact run filter without accepting arbitrary filters", () => {
@@ -36,4 +36,8 @@ test("dashboard links open the exact run filter without accepting arbitrary filt
     assert.deepEqual(routeFromHash(`#/runs?filter=${filter}`),{view:"runs",jobID:"",filter});
   }
   assert.deepEqual(routeFromHash("#/runs?filter=unknown"),{view:"runs",jobID:""});
+});
+
+test("Activity and legacy analytics routes open analytics", () => {
+  for (const hash of ["#/activity", "#/analytics"]) assert.deepEqual(routeFromHash(hash), {view:"activity",jobID:""});
 });

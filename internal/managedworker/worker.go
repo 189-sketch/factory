@@ -371,6 +371,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			result.ExitCode = 1
 		}
 	}
+	completion.CleanupUnconfirmed = result.CleanupUnconfirmed
 	completion.ProcessStopped = result.ProcessStopped
 	if ctx.Err() != nil && result.ID != "" {
 		completion.State = string(result.State)

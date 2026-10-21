@@ -43,6 +43,9 @@ type GitHubFactoryServer struct {
 	cleanupLeases        map[string]*githubLease
 	loaded               time.Time
 	maxConcurrent        int
+	maxPerRepository     int
+	dispatchCursor       string
+	workerCapabilities   map[string]protocol.PollRequest
 	githubFollowupCursor string
 	githubSyncErrors     map[string]string
 	handler              http.Handler
@@ -72,6 +75,7 @@ func NewGitHubFactoryServer(path, token string, maxConcurrent int) (*GitHubFacto
 	if err != nil {
 		return nil, err
 	}
+	s.maxPerRepository = definition.Server.RepositoryJobLimit()
 	s.setup, err = newOnboarding(s)
 	if err != nil {
 		s.Close()
@@ -174,6 +178,7 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/onboarding/repositories", s.onboardingRepositories)
 	mux.HandleFunc("GET /api/v1/onboarding/worker-config", s.onboardingWorkerConfig)
 	mux.HandleFunc("POST /api/v1/onboarding/{action...}", s.auth.authorizeSubmission(s.onboardingAction))
+	mux.HandleFunc("PUT /api/v1/projects/defaults", s.auth.authorizeSubmission(s.updateProjectDefaults))
 	mux.HandleFunc("POST /api/v1/projects", s.auth.authorizeSubmission(s.addProject))
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
@@ -357,9 +362,13 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobs := []Job{}
+	usage := s.admissionUsage(r.Context())
 	leases := s.liveLeases()
 	for _, task := range s.tasks {
 		job := task.state.Job
+		if job.State == "queued" {
+			job.WaitingReasons = s.waitingReasons(r.Context(), task, usage)
+		}
 		if followupEligible(task) {
 			job.GitHubSyncError = s.githubSyncErrors[job.ID]
 		}
@@ -396,7 +405,7 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"automations": automations, "onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
+	writeJSON(w, 200, map[string]any{"capacity": s.capacityStatus(usage), "automations": automations, "onboarding": onboardingState, "jobs": jobs, "workers": workers, "commands": []string{}, "workflows": []string{"factory"}, "repositories": s.repositoryNames(), "repository_mappings": s.repositories, "triggers": []any{}, "csrf_token": s.auth.csrfToken, "state_backend": "local"})
 }
 func (s *GitHubFactoryServer) catalog(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
@@ -524,29 +533,6 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("choose a recipe; executors and models use the configured agent profile"))
 		return
 	}
-	recipe := input.Recipe
-	if recipe == "" {
-		recipe = "factory"
-	}
-	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
-		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
-		return
-	}
-	if recipe == "native-v1" {
-		definition, loadErr := config.LoadDefinitions(s.definitionPath)
-		if loadErr != nil {
-			writeError(w, 400, loadErr)
-			return
-		}
-		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
-			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
-			return
-		}
-		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
-			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
-			return
-		}
-	}
 	if len(input.ClientRequestID) > 128 || strings.TrimSpace(input.ClientRequestID) != input.ClientRequestID {
 		writeError(w, 400, errors.New("invalid client request ID"))
 		return
@@ -576,6 +562,46 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, 500, err)
+			return
+		}
+	}
+	defaults := projectDefaults{}
+	selection := setupSelection{}
+	if s.setup != nil {
+		state := s.setup.snapshot()
+		defaults = state.ProjectDefaults[repo]
+		selection = state.Selection
+	}
+	if input.Recipe != "" {
+		defaults.Recipe = input.Recipe
+	}
+	if input.ProjectInstructions != nil {
+		defaults.Instructions = strings.TrimSpace(*input.ProjectInstructions)
+	}
+	if err := validateProjectDefaults(defaults, selection); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	recipe := defaults.Recipe
+	if recipe == "" {
+		recipe = "factory"
+	}
+	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
+		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
+		return
+	}
+	if recipe == "native-v1" {
+		definition, loadErr := config.LoadDefinitions(s.definitionPath)
+		if loadErr != nil {
+			writeError(w, 400, loadErr)
+			return
+		}
+		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
+			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
+			return
+		}
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
 			return
 		}
 	}
@@ -639,6 +665,18 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(existing) > 0 {
+		// Keep the admitted prompt, including its instructions, when linking again.
+		stored, err := s.local.tasks(r.Context())
+		if err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		for _, task := range stored {
+			if task.issue.HTMLURL == issue.HTMLURL {
+				issue = task.issue
+				break
+			}
+		}
 		current, reduceErr := s.reduceLocal(issue, existing, input.Repository)
 		if reduceErr != nil {
 			writeError(w, 409, reduceErr)
@@ -649,7 +687,7 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}, input.ClientRequestID, fingerprint, input.Recipe); err != nil {
+	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository, projectInstructions: defaults.Instructions}, input.ClientRequestID, fingerprint, recipe); err != nil {
 		writeError(w, 500, err)
 		return
 	}
@@ -743,7 +781,7 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, errors.New("job is not held"))
 			return
 		}
-		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: action, Feedback: input.Feedback}); err != nil {
+		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: action, Feedback: input.Feedback, Stopped: input.Stopped}); err != nil {
 			writeError(w, 409, err)
 			return
 		}
@@ -842,6 +880,20 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Lock()
 	s.workers[p.InstanceID] = Worker{InstanceID: p.InstanceID, Name: p.Name, LastSeenAt: time.Now().UTC(), Repositories: p.Repositories, Executors: p.Executors, ReadOnlyExecutors: p.ReadOnlyExecutors}
 	s.liveMu.Unlock()
+	if s.workerCapabilities == nil {
+		s.workerCapabilities = map[string]protocol.PollRequest{}
+	}
+	s.workerCapabilities[p.InstanceID] = p
+	if err := s.refresh(r.Context(), false); err != nil {
+		writeError(w, 502, err)
+		return
+	}
+	for _, lease := range s.liveLeases() {
+		if lease.instance == p.InstanceID {
+			writeJSON(w, 200, protocol.PollResponse{Run: &lease.spec})
+			return
+		}
+	}
 	if s.setup != nil {
 		if check := s.setup.claimHealth(p); check != nil {
 			writeJSON(w, 200, protocol.PollResponse{Run: check})
@@ -856,21 +908,12 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.refresh(r.Context(), false); err != nil {
-		writeError(w, 502, err)
-		return
-	}
-	for _, lease := range s.liveLeases() {
-		if lease.instance == p.InstanceID {
-			writeJSON(w, 200, protocol.PollResponse{Run: &lease.spec})
-			return
-		}
-	}
 	if !p.Factory || !p.Workflows {
 		writeJSON(w, 200, protocol.PollResponse{})
 		return
 	}
-	if s.maxConcurrent > 0 && len(s.liveLeases()) >= s.maxConcurrent {
+	usage := s.admissionUsage(r.Context())
+	if usage.workers[p.Name] || (s.maxConcurrent > 0 && usage.total >= s.maxConcurrent) {
 		writeJSON(w, 200, protocol.PollResponse{})
 		return
 	}
@@ -880,21 +923,13 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	executors := stringSet(p.Executors)
 	repositories := stringSet(p.Repositories)
-	readonly := stringSet(p.ReadOnlyExecutors)
-	ids := make([]string, 0, len(s.tasks))
-	for id := range s.tasks {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		task := s.tasks[id]
+	for _, task := range s.dispatchOrder() {
 		state := task.state
-		if state.Job.Recipe == "native-v1" && (!p.NativeAgents || p.Runtime == "kubernetes") {
+		if usage.uncertainRepositories[state.Job.Repository] || (s.maxPerRepository > 0 && usage.repositories[state.Job.Repository] >= s.maxPerRepository) {
 			continue
 		}
-		if (state.Job.Recipe == "single" && !p.SingleAgent) || (state.Job.Recipe != "single" && !p.Reviews) {
+		if !s.workerSupports(r.Context(), task, p) {
 			continue
 		}
 		if state.Job.State == "queued" && repositories[state.Job.Repository] && task.issue.Number > 0 {
@@ -935,25 +970,6 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		role := state.Role
-		capable := true
-		for _, stage := range state.Job.Workflow.Steps {
-			command, err := s.jobCommand(r.Context(), task, stage)
-			if err != nil {
-				writeError(w, 502, err)
-				return
-			}
-			if state.Job.Recipe == "native-v1" && p.Adapters[command.Executor] != "claude-stream" && p.Adapters[command.Executor] != "codex-app-server" {
-				capable = false
-				break
-			}
-			if !executors[command.Executor] || !supportsModel(p.Models, command.Executor, command.Model) || ((stage == "review" || stage == "triage" || state.Job.Recipe == "answer") && !readonly[command.Executor]) {
-				capable = false
-				break
-			}
-		}
-		if !capable {
-			continue
-		}
 		command, err := s.jobCommand(r.Context(), task, role)
 		if err != nil {
 			writeError(w, 502, err)
@@ -982,6 +998,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 409, err)
 			return
 		}
+		s.dispatchCursor = state.Job.Repository
 		token, err := randomID("lease", 24)
 		if err != nil {
 			writeError(w, 500, err)
@@ -989,7 +1006,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		f := task.state.Job.Workflow.Factory
 		var brief strings.Builder
-		fmt.Fprintf(&brief, "Task requirements:\n%s\n", task.issue.Body)
+		fmt.Fprintf(&brief, "Task requirements:\n%s\n", state.Job.Task.Spec)
 		for _, stage := range []string{"triage", "spec", "implement", "review"} {
 			if report := task.state.Reports[stage]; report != "" {
 				fmt.Fprintf(&brief, "\n%s handoff:\n%s\n", stage, report)
@@ -1022,7 +1039,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(issueURL, "local:") {
 			issueURL = ""
 		}
-		spec := protocol.RunSpec{ID: run.ID, JobID: id, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, GitHubRepository: task.repo, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Recipe: state.Job.Recipe, Role: role, SpecURL: f.SpecURL, IssueURL: issueURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
+		spec := protocol.RunSpec{ID: run.ID, JobID: state.Job.ID, Command: role, CommandHash: hash, Executor: command.Executor, Model: command.Model, Repository: state.Job.Repository, GitHubRepository: task.repo, RenderedPrompt: prompt, Workflow: true, TimeoutMillis: command.Timeout.Milliseconds(), LeaseToken: token, Task: state.Job.Task, Factory: &protocol.FactoryContext{Recipe: state.Job.Recipe, Role: role, SpecURL: f.SpecURL, IssueURL: issueURL, Context: brief.String(), PRURL: f.PRURL, HeadSHA: f.HeadSHA, Branch: branch}}
 		s.liveMu.Lock()
 		s.leases[run.ID] = &githubLease{spec: spec, instance: p.InstanceID, last: time.Now()}
 		s.liveMu.Unlock()
@@ -1200,7 +1217,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	step := &protocol.StepResult{Outcome: "failed", Summary: p.Error, Factory: &protocol.FactoryResult{Version: 1, Role: lease.spec.Factory.Role}}
 	decodeErr := json.Unmarshal(p.Result, &result)
-	if p.State == "succeeded" {
+	if p.State == "succeeded" && !p.CleanupUnconfirmed {
 		if err = decodeErr; err == nil {
 			step, err = protocol.ParseStepResult(result.StepResult)
 		}
@@ -1254,7 +1271,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
-	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
+	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", CleanupUnconfirmed: p.CleanupUnconfirmed, Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
 		writeError(w, 409, err)
 		return
 	}

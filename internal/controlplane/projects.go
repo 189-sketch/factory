@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 )
 
 // commitProject shares the existing setup and execution paths. It never changes
@@ -125,4 +127,70 @@ func (s *GitHubFactoryServer) addProject(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, 201, map[string]any{"repository": input.Repository, "remote_setup_required": state.Selection.Host == "remote"})
+}
+
+// updateProjectDefaults changes submission metadata only: no checkout changes,
+// worker restarts, or mutations of already admitted work.
+func (s *GitHubFactoryServer) updateProjectDefaults(w http.ResponseWriter, r *http.Request) {
+	if s.setup == nil {
+		writeError(w, 404, errors.New("project settings unavailable"))
+		return
+	}
+	if !limitRequestBody(w, r, maxRequestBytes) {
+		return
+	}
+	var input struct {
+		Repository string `json:"repository"`
+		projectDefaults
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeDecodeError(w, err)
+		return
+	}
+	o := s.setup
+	o.configureMu.Lock()
+	defer o.configureMu.Unlock()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.settings.Finished {
+		writeError(w, 409, errors.New("complete setup first"))
+		return
+	}
+	if _, ok := o.settings.projectPaths()[input.Repository]; !ok {
+		writeError(w, 404, errors.New("unknown project"))
+		return
+	}
+	if err := validateProjectDefaults(input.projectDefaults, o.settings.Selection); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	input.Instructions = strings.TrimSpace(input.Instructions)
+	previous := o.settings.ProjectDefaults
+	next := make(map[string]projectDefaults, len(previous)+1)
+	for key, value := range previous {
+		next[key] = value
+	}
+	next[input.Repository] = input.projectDefaults
+	o.settings.ProjectDefaults = next
+	if err := o.saveLocked(); err != nil {
+		o.settings.ProjectDefaults = previous
+		writeError(w, 500, errors.New("could not save project defaults"))
+		return
+	}
+	writeJSON(w, 200, input.projectDefaults)
+}
+
+func validateProjectDefaults(defaults projectDefaults, selection setupSelection) error {
+	switch defaults.Recipe {
+	case "", "factory", "single", "native-v1":
+	default:
+		return errors.New("unsupported default run mode")
+	}
+	if selection.Host == "kubernetes" && (defaults.Recipe == "native-v1" || selection.Agent == "claude") {
+		return errors.New("Kubernetes requires Codex and the pipeline or single agent mode")
+	}
+	if !utf8.ValidString(defaults.Instructions) || utf8.RuneCountInString(defaults.Instructions) > 2000 {
+		return errors.New("default instructions must be at most 2000 characters")
+	}
+	return nil
 }

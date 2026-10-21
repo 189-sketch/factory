@@ -71,6 +71,8 @@ type Result struct {
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
 	EventsPath     string               `json:"events_path"`
+
+	CleanupUnconfirmed bool `json:"cleanup_unconfirmed,omitempty"`
 }
 
 type OutcomeError struct {
@@ -348,7 +350,8 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
 	state, exitCode, outcome := supervise(ctx, command.Process, processOwner, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
 	var cleanupFailure *processCleanupError
-	result.ProcessStopped = !errors.As(outcome, &cleanupFailure)
+	result.CleanupUnconfirmed = errors.As(outcome, &cleanupFailure)
+	result.ProcessStopped = !result.CleanupUnconfirmed
 	if nativeOutput != nil {
 		if err := nativeOutput.finish(state != StateSucceeded); err != nil && state == StateSucceeded {
 			state, exitCode, outcome = StateFailed, 1, err

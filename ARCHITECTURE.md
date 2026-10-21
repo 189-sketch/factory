@@ -91,6 +91,14 @@ Local workers start automatically. VM workers use a private pairing script and
 an operator-created SSH tunnel. The app neither provisions SSH nor exposes a
 public listener. Agents are shared across configured projects.
 
+Project run-mode defaults and short instructions live in the existing atomic
+onboarding settings file. The authenticated Projects editor changes only this
+submission metadata, so running workers and job history are unaffected. New
+interactive submissions resolve omitted choices from project defaults; explicit
+choices win, and the admitted prompt stores the instructions used. Submission
+receipts are checked before defaults so retrying a request preserves its job.
+Projects do not override the shared agent or model configuration.
+
 ## Kubernetes execution
 
 `internal/kuberunner` launches a fixed digest-pinned gVisor Job per attempt. Pods
@@ -192,3 +200,22 @@ Native runs currently require host workers and saved Codex repository trust. The
 do not enforce the legacy spec gate or isolated read-only review checkout. The
 server retains in-memory leases and honest interruption handling after restart.
 See [native operation and checks](docs/native-agents.md).
+
+## Factory dispatch admission
+
+Factory polling serializes admission under the server mutex. Successful
+assignments rotate across eligible repository aliases; jobs within an alias use
+creation time and ID ordering. Live-lease replay precedes admission limits.
+The optional `server.max_concurrent_jobs_per_repository` supplements the global
+limit without changing its default. Cancelled/interrupted attempts with
+unconfirmed shutdown retain admission occupancy from durable job history even
+when their cleanup-upload grant has expired. Conflicting repository and named
+worker work waits for stop confirmation.
+
+Status exposes additive capacity bounds and queued waiting reasons; worker
+capabilities are retained from polls for compatibility checks. These are
+observations and configured constraints, not credential-lock telemetry. The
+managed worker and a Kubernetes Codex credential stream each run serially;
+independent eligible workers may fill global capacity. Credential locking,
+publication holds, authentication and sandbox boundaries remain in force.
+See [configuration](docs/configuration.md#factory-admission-and-capacity).

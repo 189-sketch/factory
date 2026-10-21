@@ -44,6 +44,7 @@ type Store struct {
 }
 
 type Job struct {
+	WaitingReasons   []string          `json:"waiting_reasons,omitempty"`
 	GitHubSyncError  string            `json:"github_sync_error,omitempty"`
 	Maintenance      bool              `json:"maintenance,omitempty"`
 	Recipe           string            `json:"recipe,omitempty"`
@@ -92,6 +93,8 @@ type Run struct {
 	CompletedAt    time.Time          `json:"completed_at,omitempty"`
 	DurationMillis *int64             `json:"duration_millis,omitempty"`
 	TokenUsage     *int64             `json:"token_usage,omitempty,string"`
+
+	CleanupUnconfirmed bool `json:"cleanup_unconfirmed,omitempty"`
 }
 
 type Worker struct {

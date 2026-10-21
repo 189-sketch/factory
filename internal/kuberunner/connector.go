@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -103,7 +104,26 @@ func (c Connector) Login(ctx context.Context, in io.Reader, out, stderr io.Write
 	return c.json(ctx, "create", map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": c.Config.AuthSecret}, "type": "Opaque", "data": map[string][]byte{"auth.json": body}})
 }
 
-func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly bool) (runner.Result, string, error) {
+func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly bool) (result runner.Result, candidate string, resultErr error) {
+	created, stopped := false, false
+	// Cleanup below runs first. Only a verified absent Job/Pod can acknowledge
+	// shutdown; preserve that evidence even when cancellation returned no result.
+	defer func() {
+		result.ProcessStopped = !created || stopped
+		result.CleanupUnconfirmed = created && !stopped
+		if created && result.ID == "" {
+			result.ID, result.State, result.ExitCode = options.RunID, runner.StateFailed, 1
+			if errors.Is(ctx.Err(), context.Canceled) {
+				result.State = runner.StateCancelled
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				result.State = runner.StateTimedOut
+			}
+		}
+		if created && !stopped && resultErr == nil {
+			resultErr = fmt.Errorf("Kubernetes Job shutdown is unconfirmed; inspect the assigned Job before retrying")
+		}
+	}()
 	c.progress("starting_sandbox")
 	if err := c.Config.Validate(); err != nil {
 		return runner.Result{}, "", err
@@ -124,9 +144,7 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 	if err := c.json(ctx, "create", map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{"name": lock, "labels": map[string]string{"app.kubernetes.io/managed-by": "machinist"}}, "data": map[string]string{"job": name}}); err != nil {
 		return runner.Result{}, "", fmt.Errorf("Codex account stream is locked or cluster unavailable; confirm the prior Job stopped before recovery: %w", err)
 	}
-	created := false
 	pod := ""
-	stopped := false
 	authSaved := false
 	defer func() {
 		cleanup, done := context.WithTimeout(context.Background(), 45*time.Second)
@@ -264,7 +282,7 @@ func (c Connector) Execute(ctx context.Context, options runner.Options, readOnly
 	if err = os.WriteFile(filepath.Join(directory, "result.json"), resultBody, 0600); err != nil {
 		return runner.Result{}, "", err
 	}
-	candidate := ""
+	candidate = ""
 	if output.Dirty || (readOnly && output.Head != r.Base) {
 		return output.Result, "", fmt.Errorf("sandbox changed source without valid committed delivery")
 	}

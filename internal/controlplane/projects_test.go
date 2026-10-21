@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -164,6 +165,10 @@ func TestAddProjectDoesNotInterruptRunningWork(t *testing.T) {
 	if assigned.Run == nil {
 		t.Fatalf("no lease for %s", id)
 	}
+	factoryHTTP(t, s, "PUT", "/api/v1/projects/defaults", map[string]string{"repository": "owner/repo", "recipe": "single", "instructions": "Future work only"}, 200)
+	if !s.leaseAlive(assigned.Run.ID) || strings.Contains(s.tasks[id].state.Job.Task.Spec, "Future work only") {
+		t.Fatal("defaults edited running job")
+	}
 	factoryHTTP(t, s, "POST", "/api/v1/projects", map[string]string{"repository": "owner/second", "path": "/unused"}, 409)
 	if len(o.snapshot().projectPaths()) != 1 || !s.leaseAlive(assigned.Run.ID) {
 		t.Fatal("add interrupted existing run")
@@ -202,5 +207,120 @@ func TestVMSetupIncludesEveryProject(t *testing.T) {
 	}
 	if strings.Contains(raw, "private-test-token") {
 		t.Fatal("GitHub credential in downloaded script")
+	}
+}
+
+func TestProjectDefaultsPersistenceValidationAndSubmission(t *testing.T) {
+	s, o := readyProjectSetup(t)
+	save := func(recipe, instructions string, status int) {
+		t.Helper()
+		factoryHTTP(t, s, "PUT", "/api/v1/projects/defaults", map[string]string{"repository": "owner/repo", "recipe": recipe, "instructions": instructions}, status)
+	}
+	if len(o.snapshot().ProjectDefaults) != 0 {
+		t.Fatal("legacy project gained defaults")
+	}
+	save("single", "Run focused tests.", 200)
+	restored, err := newOnboarding(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.snapshot().ProjectDefaults["owner/repo"].Instructions != "Run focused tests." {
+		t.Fatal("defaults not persisted")
+	}
+	snapshot := o.snapshot()
+	snapshot.ProjectDefaults["owner/repo"] = projectDefaults{}
+	if o.snapshot().ProjectDefaults["owner/repo"].Recipe != "single" {
+		t.Fatal("snapshot aliases settings")
+	}
+	save("claude", "", 400)
+	save("single", strings.Repeat("x", 2001), 400)
+	o.settings.Selection.Host = "kubernetes"
+	save("native-v1", "", 400)
+	o.settings.Selection.Agent = "claude"
+	save("single", "", 400)
+	o.settings.Selection.Agent = "codex"
+	o.settings.Selection.Host = "local"
+	submit := func(key, recipe string, instructions *string, want int) string {
+		t.Helper()
+		raw := factoryHTTP(t, s, "POST", "/api/v1/jobs", submitRequest{Repository: "owner/repo", Spec: "Fix bug", ClientRequestID: key, Recipe: recipe, ProjectInstructions: instructions}, want)
+		var response map[string]string
+		json.Unmarshal(raw, &response)
+		return response["id"]
+	}
+	id := submit("defaults", "", nil, 201)
+	if s.tasks[id].state.Job.Recipe != "single" || !strings.Contains(s.tasks[id].state.Job.Task.Spec, "Run focused tests.") {
+		t.Fatal("defaults not applied")
+	}
+	original := s.tasks[id].state.Job.Task.Spec
+	save("factory", "New instructions", 200)
+	if retry := submit("defaults", "", nil, 200); retry != id {
+		t.Fatal("retry created another job")
+	}
+	if s.tasks[id].state.Job.Task.Spec != original {
+		t.Fatal("history changed")
+	}
+	empty := ""
+	explicit := submit("explicit", "single", &empty, 201)
+	if s.tasks[explicit].state.Job.Recipe != "single" || strings.Contains(s.tasks[explicit].state.Job.Task.Spec, "Project instructions") {
+		t.Fatal("explicit choices lost")
+	}
+	inherited := submit("new", "", nil, 201)
+	if s.tasks[inherited].state.Job.Recipe != "factory" || !strings.Contains(s.tasks[inherited].state.Job.Task.Spec, "New instructions") {
+		t.Fatal("new defaults not applied")
+	}
+}
+
+func TestProjectDefaultsAuthorizationAndAtomicFailure(t *testing.T) {
+	s, o := readyProjectSetup(t)
+	req := httptest.NewRequest("PUT", "/api/v1/projects/defaults", strings.NewReader(`{"repository":"owner/repo","recipe":"single"}`))
+	out := httptest.NewRecorder()
+	s.Handler().ServeHTTP(out, req)
+	if out.Code != 403 {
+		t.Fatalf("missing CSRF accepted: %d", out.Code)
+	}
+	factoryHTTP(t, s, "PUT", "/api/v1/projects/defaults", map[string]string{"repository": "owner/missing", "recipe": "single"}, 404)
+	// A file in place of the settings directory forces the atomic write to fail.
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, []byte("file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	o.dir = blocked
+	factoryHTTP(t, s, "PUT", "/api/v1/projects/defaults", map[string]string{"repository": "owner/repo", "recipe": "single"}, 500)
+	if len(o.snapshot().ProjectDefaults) != 0 {
+		t.Fatal("failed write changed in-memory defaults")
+	}
+}
+
+func TestLinkedIssueRetainsAdmittedProjectInstructionsAfterRefreshAndRestart(t *testing.T) {
+	s, o := readyProjectSetup(t)
+	client := newMemoryFactoryGitHub()
+	s.client = client
+	issue, err := client.CreateTask(t.Context(), "owner/repo", "Linked change", "Original requirement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := func(instructions string) {
+		factoryHTTP(t, s, "PUT", "/api/v1/projects/defaults", map[string]string{"repository": "owner/repo", "recipe": "single", "instructions": instructions}, 200)
+	}
+	save("Original project constraint")
+	var created map[string]string
+	json.Unmarshal(factoryHTTP(t, s, "POST", "/api/v1/jobs", submitRequest{Repository: "owner/repo", SourceURL: issue.HTMLURL, ClientRequestID: "linked-defaults"}, 201), &created)
+	save("Changed project constraint")
+	issue.Body = "Updated GitHub requirement"
+	client.issues[issue.Number] = issue
+	worker := admissionWorker("linked-worker", "owner/repo")
+	run := admissionPoll(t, s, worker)
+	if run == nil || run.JobID != created["id"] {
+		t.Fatal("linked job was not dispatched")
+	}
+	for _, text := range []string{run.RenderedPrompt, run.Task.Spec, run.Factory.Context, s.tasks[created["id"]].state.Job.Task.Spec} {
+		if !strings.Contains(text, "Original project constraint") || !strings.Contains(text, "Updated GitHub requirement") || strings.Contains(text, "Changed project constraint") {
+			t.Fatal("remote refresh lost or changed admitted instructions")
+		}
+	}
+	o.stopWorker()
+	s = restartFactoryTestServer(t, s, client)
+	if text := factoryJob(t, s, created["id"]).Task.Spec; !strings.Contains(text, "Original project constraint") || strings.Contains(text, "Changed project constraint") {
+		t.Fatal("restart lost immutable instruction snapshot")
 	}
 }

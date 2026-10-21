@@ -202,7 +202,10 @@ func TestCancellationRetainsAuthAndWaitsForPodDeletion(t *testing.T) {
 				}
 				return nil, fmt.Errorf("unexpected command %s", line)
 			}
-			_, _, err := c.Execute(ctx, runner.Options{Repository: repo, RunID: "run_0123456789abcdef01234567", ArtifactKey: "lease_test", DataDirectory: t.TempDir(), Command: config.ResolvedCommand{Timeout: time.Minute}}, true)
+			result, _, err := c.Execute(ctx, runner.Options{Repository: repo, RunID: "run_0123456789abcdef01234567", ArtifactKey: "lease_test", DataDirectory: t.TempDir(), Command: config.ResolvedCommand{Timeout: time.Minute}}, true)
+			if result.CleanupUnconfirmed != !podGone || result.ProcessStopped != podGone || result.ID != "run_0123456789abcdef01234567" || result.State != runner.StateCancelled {
+				t.Fatalf("cancellation lost cleanup evidence: state=%s stopped=%v", result.State, result.ProcessStopped)
+			}
 			if err == nil || !retained || !deleted || unlocked != podGone {
 				t.Fatalf("err=%v retained=%v deleted=%v unlocked=%v", err, retained, deleted, unlocked)
 			}
@@ -214,5 +217,12 @@ func TestInstallAllowsGoProxyDownloads(t *testing.T) {
 	data, _ := json.Marshal((Connector{}).InstallObjects())
 	if !strings.Contains(string(data), "storage.googleapis.com") {
 		t.Fatal("Go module archive host is blocked")
+	}
+}
+
+func TestConnectorBeforeJobFailureHasNoOutstandingProcess(t *testing.T) {
+	result, _, err := (Connector{}).Execute(t.Context(), runner.Options{RunID: "not-started"}, true)
+	if err == nil || result.CleanupUnconfirmed || !result.ProcessStopped || result.ID != "" {
+		t.Fatal("preflight failure must not invent an active attempt")
 	}
 }
