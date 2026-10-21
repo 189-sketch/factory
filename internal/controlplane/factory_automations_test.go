@@ -192,6 +192,9 @@ func TestAutomationCancelledProcessNeedsExplicitStopConfirmation(t *testing.T) {
 	if current.StopConfirmedAt == nil {
 		t.Fatal("stop confirmation not durable")
 	}
+	if next := factoryPoll(t, s); next == nil || next.JobID != result["id"] {
+		t.Fatalf("confirmed automation stop did not free admission: %+v", next)
+	}
 }
 
 func TestAutomationHistoricalRetriesCannotOverlapNewerRuns(t *testing.T) {

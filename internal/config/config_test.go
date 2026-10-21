@@ -508,3 +508,33 @@ func TestKubeconfigPathsFollowConfigDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfigRepositoryJobLimit(t *testing.T) {
+	for _, value := range []string{"", "2", "0", "-1"} {
+		t.Run("limit="+value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			body := "[server]\nworker_token_file = 'token'\n"
+			if value != "" {
+				body += "max_concurrent_jobs_per_repository = " + value + "\n"
+			}
+			writeTestFile(t, path, body)
+			c, err := LoadConfig(path)
+			if value == "0" || value == "-1" {
+				if err == nil {
+					t.Fatal("accepted nonpositive limit")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if value == "2" {
+				want = 2
+			}
+			if c.Server.RepositoryJobLimit() != want {
+				t.Fatalf("limit=%d want %d", c.Server.RepositoryJobLimit(), want)
+			}
+		})
+	}
+}

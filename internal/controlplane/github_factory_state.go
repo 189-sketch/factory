@@ -37,17 +37,18 @@ type GitHubFactoryEvent struct {
 }
 
 type GitHubFactoryState struct {
-	GitHubHandled   map[string]bool
-	CancelledFrom   string
-	FixedRecipe     bool // Preserve the original routing rules when replaying v1 completions.
-	Job             Job
-	LastEventID     int64
-	Role            string
-	SuggestedLabels []string
-	Reports         map[string]string
-	PromptSnapshot  string
-	PromptHash      string
-	Feedback        string
+	StopConfirmedRun string // Admission evidence; does not authorize publication changes.
+	GitHubHandled    map[string]bool
+	CancelledFrom    string
+	FixedRecipe      bool // Preserve the original routing rules when replaying v1 completions.
+	Job              Job
+	LastEventID      int64
+	Role             string
+	SuggestedLabels  []string
+	Reports          map[string]string
+	PromptSnapshot   string
+	PromptHash       string
+	Feedback         string
 }
 
 func GitHubFactoryRunID(issueURL string, lastEventID int64, role string, repairRound int) string {
@@ -126,6 +127,9 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 		}
 		s.Job.InboxCleared = false
 		if event.Kind == "publication_hold" || event.Kind == "release_publication" {
+			if event.Stopped && (s.Job.State == "cancelled" || s.Job.State == "interrupted") {
+				s.StopConfirmedRun = s.Job.Runs[len(s.Job.Runs)-1].ID
+			}
 			if event.Kind == "publication_hold" {
 				if strings.TrimSpace(event.Feedback) == "" {
 					return nil, fmt.Errorf("hold reason required")
