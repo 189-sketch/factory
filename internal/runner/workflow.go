@@ -53,6 +53,9 @@ func readStepResult(path string) (*protocol.StepResult, error) {
 }
 
 func factoryPrompt(factory *protocol.FactoryContext, workspace string) string {
+	if factory.Recipe == "native-v1" {
+		return "\n\nRun this task as the primary agent. Use repository-defined native agents when useful. Children are activities within this run. Finish with one JSON object: {\"outcome\":\"complete|blocked|failed\",\"summary\":\"nonempty explanation\",\"delivery\":{\"pr_url\":\"https://github.com/owner/repo/pull/123\",\"head_sha\":\"full SHA\",\"branch\":\"branch\"}}. Omit delivery for an answer without file changes. Verify changes, push and open a PR when delivering code. Never merge. A child review is advisory; this mode has no enforced spec approval or isolated review checkout. Respect external publication holds.\nTask context:\n" + factory.Context
+	}
 	prompt := factoryStagePrompt(factory, workspace)
 	if factory.Role == "implement" || factory.Role == "spec" {
 		prompt += "\n\n" + pullRequestPrompt

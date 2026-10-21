@@ -44,7 +44,7 @@ const specialistRoles = [
   ["review", "Independently check the change and return definite findings without editing it."],
 ];
 
-export function AgentsPage({ csrfToken, stateBackend }) {
+export function LegacyAgentsPage({ csrfToken, stateBackend }) {
   const factoryBackend = ["github", "local"].includes(stateBackend);
   const definitions = useDefinitions();
   const [selected, setSelected] = useState("triage");
@@ -87,4 +87,52 @@ export function AgentsPage({ csrfToken, stateBackend }) {
       ]} /></section>
     </div>}
   </Page>;
+}
+
+function NativeAgentsPage() {
+  const [repository, setRepository] = useState("");
+  const [selected, setSelected] = useState("primary");
+  const [revision, setRevision] = useState(0);
+  const [result, setResult] = useState({ loading: true, error: "", data: { agents: [], repositories: [] } });
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    setResult(current => ({ ...current, loading: true, error: "" }));
+    const query = repository ? `?repository=${encodeURIComponent(repository)}` : "";
+    fetch(`/api/v1/agents${query}`, { headers: { Accept: "application/json" }, signal: controller.signal }).then(async response => {
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "Unable to read configured agents.");
+      if (!Array.isArray(body.agents) || !Array.isArray(body.repositories)) throw new Error("Invalid agent configuration response.");
+      return body;
+    }).then(data => { if (active) setResult({ loading: false, error: "", data }); }).catch(error => {
+      if (active && error.name !== "AbortError") setResult(current => ({ ...current, loading: false, error: error.message }));
+    });
+    return () => { active = false; controller.abort(); };
+  }, [repository, revision]);
+  const { data, loading, error } = result;
+  const agents = data.agents || [];
+  const agent = agents.find(item => item.id === selected) || agents[0];
+  const harnessName = name => name === "claude" ? "Claude Code" : name === "codex" ? "Codex" : name || "Not selected";
+  const modelName = item => !item.model || item.model === "inherit" ? item.kind === "primary" ? `${harnessName(item.harness)} default` : "Inherited from primary" : item.model;
+  return <Page title="Agents" description="The primary prompt and native agents configured for your repository.">
+    <div className="agent-catalog-toolbar"><div><h2>{data.repository || "Configured agents"}</h2><p>{harnessName(data.harness)} · Read-only configuration</p></div><button type="button" className="agent-catalog-refresh" disabled={loading} onClick={() => setRevision(value => value + 1)}>{loading ? "Loading…" : "Refresh"}</button></div>
+    {data.repositories.length > 1 && <nav aria-label="Agent repositories" className="agent-repositories">{data.repositories.map(name => <button type="button" key={name} aria-pressed={name === (repository || data.repository)} onClick={() => { setSelected("primary"); setRepository(name); }}>{name}</button>)}</nav>}
+    {error ? <Failure value={error} /> : loading ? <Loading description="Reading the primary prompt and native agent files." /> : <>
+      {data.notice && <p role="status" className="agent-catalog-notice">{data.notice}</p>}
+      {!agents.length ? <Empty value="No agents configured" description="Configure the primary agent before starting a run." /> : <div className="agent-layout configured-agent-layout">
+        <nav className="agent-list" aria-label="Configured agents">{agents.map(item => <button type="button" key={item.id} className={`agent-row ${agent?.id === item.id ? "agent-row-selected" : ""}`} aria-pressed={agent?.id === item.id} onClick={() => setSelected(item.id)}><span className="agent-catalog-name">{item.name}</span><span className="agent-catalog-role">{item.kind === "primary" ? "Primary" : "Subagent"}</span><span className="agent-catalog-model">{modelName(item)}</span>{item.error && <span className="text-danger text-xs">Definition needs attention</span>}</button>)}
+          {agents.length === 1 && !data.notice && <p className="agent-catalog-empty">No repository subagents are configured for {harnessName(data.harness)}. Built-in and plugin agents are managed by the harness.</p>}
+        </nav>
+        {agent && <section className="agent-detail min-w-0" aria-label="Selected agent"><header className="agent-catalog-header"><h2>{agent.name}</h2>{agent.description && <p>{agent.description}</p>}</header>
+          <dl className="agent-catalog-facts"><div><dt>Model</dt><dd>{modelName(agent)}</dd></div><div><dt>Harness</dt><dd>{harnessName(agent.harness)}</dd></div><div><dt>Source</dt><dd><code>{agent.source || "Not configured"}</code></dd></div></dl>
+          {agent.error && <Failure value={agent.error} />}
+          <section className="agent-catalog-prompt"><h3>{agent.kind === "primary" ? "Primary prompt template" : "Agent prompt"}</h3>{agent.prompt ? <article className="run-prose"><Markdown skipHtml>{agent.prompt}</Markdown></article> : <p className="text-sm text-muted-foreground">No prompt could be read from this definition.</p>}</section>
+        </section>}
+      </div>}
+    </>}
+  </Page>;
+}
+
+export function AgentsPage(props) {
+  return ["github", "local"].includes(props.stateBackend) ? <NativeAgentsPage /> : <LegacyAgentsPage {...props} />;
 }

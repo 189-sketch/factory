@@ -23,6 +23,7 @@ var initialFiles = []string{
 	"prompts/spec.md",
 	"prompts/implement.md",
 	"prompts/review.md",
+	"prompts/primary.md",
 }
 
 func newInitCommand(options *commandOptions) *cobra.Command {

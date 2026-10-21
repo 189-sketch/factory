@@ -33,7 +33,7 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	wantFiles := []string{
 		"config.toml",
 		"prompts/audit.md",
-		"prompts/implement.md",
+		"prompts/implement.md", "prompts/primary.md",
 		"prompts/review.md",
 		"prompts/spec.md",
 		"prompts/task-to-pr.md",
@@ -91,10 +91,10 @@ func TestInitInstallsCompleteEditableDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(definitions.Commands) != 6 {
+	if len(definitions.Commands) != 7 {
 		t.Fatalf("installed definitions = commands %#v", definitions.Commands)
 	}
-	for _, name := range []string{"task-to-pr", "audit", "triage", "spec", "implement", "review"} {
+	for _, name := range []string{"task-to-pr", "audit", "triage", "spec", "implement", "review", "primary"} {
 		if _, err := config.LoadCommand(definition, name); err != nil {
 			t.Fatalf("load installed agent %s: %v", name, err)
 		}

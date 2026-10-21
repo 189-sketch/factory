@@ -84,12 +84,15 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if recipe == "" {
 				recipe = "factory"
 			}
-			if recipe != "factory" && recipe != "direct" && recipe != "answer" && recipe != "single" {
+			if recipe != "factory" && recipe != "direct" && recipe != "answer" && recipe != "single" && recipe != "native-v1" {
 				return nil, fmt.Errorf("invalid job recipe")
 			}
 			first := "triage"
 			if recipe == "direct" || recipe == "single" {
 				first = "implement"
+			}
+			if recipe == "native-v1" {
+				first = "primary"
 			}
 			if s.LastEventID != 0 || event.Role != first {
 				return nil, fmt.Errorf("invalid factory creation")
@@ -103,6 +106,9 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			}
 			if recipe == "single" {
 				s.Job.Workflow.Steps = []string{"implement"}
+			}
+			if recipe == "native-v1" {
+				s.Job.Workflow.Steps = []string{"primary"}
 			}
 			if recipe == "answer" {
 				s.Job.Workflow.Steps = []string{"triage"}
@@ -184,6 +190,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if result.Outcome == "complete" && s.Role != "review" && strings.TrimSpace(result.Factory.Report) == "" {
 				return nil, fmt.Errorf("completed stage requires a report")
 			}
+			run.ProcessStopped = event.Stopped
 			run.Report = result.Factory.Report
 			run.GitHubURL = fmt.Sprintf("%s#issuecomment-%d", issue.HTMLURL, comment.ID)
 			run.CompletedAt = comment.CreatedAt
@@ -230,7 +237,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if s.Job.State != "blocked" && s.Job.State != "failed" && s.Job.State != "interrupted" && s.Job.State != "cancelled" {
 				return nil, ErrWorkflowAction
 			}
-			if (s.Job.State == "interrupted" || s.Job.State == "cancelled") && !event.Stopped {
+			if (s.Job.State == "interrupted" || s.Job.State == "cancelled") && !event.Stopped && !run.ProcessStopped {
 				return nil, fmt.Errorf("confirm previous process stopped before retry")
 			}
 			s.Feedback = event.Feedback
@@ -256,6 +263,15 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			} else {
 				s.repair(issue.HTMLURL)
 			}
+		case "stopped":
+			if s.Job.State != "cancelled" || run.State != "cancelled" {
+				return nil, ErrWorkflowAction
+			}
+			run.ProcessStopped = true
+			run.CompletedAt = comment.CreatedAt
+			run.ExitCode, run.Error = event.ExitCode, event.Error
+			duration := max(int64(0), comment.CreatedAt.Sub(run.StartedAt).Milliseconds())
+			run.DurationMillis = &duration
 		case "cancel":
 			if s.Job.State == "succeeded" || s.Job.State == "cancelled" {
 				return nil, ErrWorkflowAction
@@ -327,6 +343,10 @@ func (s *GitHubFactoryState) block(reason string) {
 	s.Job.Runs[len(s.Job.Runs)-1].Summary = reason
 }
 func (s *GitHubFactoryState) repair(url string) {
+	if s.Job.Recipe == "native-v1" {
+		s.queue(url, "primary", "queued")
+		return
+	}
 	if s.Job.Workflow.Factory.RepairRound >= 3 {
 		s.block("Three repair rounds exhausted")
 		return
@@ -375,8 +395,8 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		progress.HeadSHA = f.HeadSHA
 		progress.Branch = f.Branch
 		s.queue(url, "implement", "awaiting_approval")
-	case "implement":
-		if s.Job.Recipe == "single" && progress.PRURL == "" && f.PRURL == "" && f.HeadSHA == "" && f.Branch == "" {
+	case "primary", "implement":
+		if (s.Job.Recipe == "single" || s.Job.Recipe == "native-v1") && progress.PRURL == "" && f.PRURL == "" && f.HeadSHA == "" && f.Branch == "" {
 			s.Job.State = "succeeded"
 			return nil
 		}
@@ -397,7 +417,7 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		progress.Branch = f.Branch
 		progress.Verdict = ""
 		progress.Findings = nil
-		if s.Job.Recipe == "single" {
+		if s.Job.Recipe == "single" || s.Job.Recipe == "native-v1" {
 			s.Job.State = "awaiting_merge"
 		} else {
 			s.queue(url, "review", "queued")
@@ -420,4 +440,8 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		}
 	}
 	return nil
+}
+
+func lastRunStopped(job Job) bool {
+	return len(job.Runs) > 0 && job.Runs[len(job.Runs)-1].ProcessStopped
 }

@@ -34,7 +34,7 @@ test("a shared prompt draft keeps its original version for conflict detection", 
       else delete globalThis[name];
     }
   });
-  const { AgentsPage } = await server.ssrLoadModule("/src/catalog.jsx");
+  const { LegacyAgentsPage: AgentsPage } = await server.ssrLoadModule("/src/catalog.jsx");
   await act(async () => root.render(React.createElement(AgentsPage, { csrfToken: "test", repositories: ["owner/a", "owner/b"], stateBackend: "local" })));
   const click = async text => {
     const element = [...document.querySelectorAll("button")].find(element => element.textContent === text);
@@ -80,4 +80,51 @@ test("a shared prompt draft keeps its original version for conflict detection", 
   await click("Edit prompt");
   assert.match(document.body.textContent,/legacy backend uses configuration files/);
   assert.equal(document.querySelector("textarea"),null);
+});
+
+test("native catalog shows real prompts and model inheritance and clears stale repository content", async context => {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/#/agents" });
+  const globals = new Map();
+  for (const name of ["window", "document", "navigator", "Event", "MouseEvent", "fetch", "IS_REACT_ACT_ENVIRONMENT"]) {
+    globals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: dom.window[name] });
+  }
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  let resolveNext;
+  const data = { repository: "owner/first", repositories: ["owner/first", "owner/second"], harness: "claude", agents: [
+    { id: "primary", name: "Primary agent", kind: "primary", harness: "claude", model: "", prompt: "Coordinate **the task**.", source: "prompts/primary.md" },
+    { id: "reviewer", name: "Reviewer", kind: "subagent", harness: "claude", model: "opus", prompt: "Check regression coverage.", source: ".claude/agents/reviewer.md" },
+    { id: "planner", name: "Planner", kind: "subagent", harness: "claude", model: "inherit", prompt: "Plan the requested work.", source: ".claude/agents/planner.md" },
+  ] };
+  globalThis.fetch = async url => {
+    if (url.includes("owner%2Fsecond")) return new Promise(resolve => { resolveNext = resolve; });
+    return { ok: true, json: async () => data };
+  };
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  const { AgentsPage } = await server.ssrLoadModule("/src/catalog.jsx");
+  const { createRoot } = await import("react-dom/client");
+  const root = createRoot(document.getElementById("root"));
+  context.after(async () => {
+    await act(async () => root.unmount()); await server.close(); dom.window.close();
+    for (const [name, descriptor] of globals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; }
+  });
+  const click = async name => {
+    const button = [...document.querySelectorAll("button")].find(node => node.textContent.includes(name));
+    assert.ok(button, `button ${name} exists`);
+    await act(async () => button.click());
+  };
+  await act(async () => root.render(React.createElement(AgentsPage, { stateBackend: "local" })));
+  assert.match(document.querySelector('[aria-label="Selected agent"]').textContent, /Claude Code default/);
+  assert.equal(document.querySelector('[aria-label="Selected agent"] strong').textContent, "the task");
+  await click("Reviewer");
+  assert.match(document.querySelector('[aria-label="Selected agent"]').textContent, /opus/);
+  assert.match(document.querySelector('[aria-label="Selected agent"]').textContent, /Check regression coverage/);
+  await click("Planner");
+  assert.match(document.querySelector('[aria-label="Selected agent"]').textContent, /Inherited from primary/);
+  await click("owner/second");
+  assert.equal(document.querySelector('[aria-label="Selected agent"]'), null, "old repository prompt hidden during switch");
+  await act(async () => resolveNext({ ok: false, json: async () => ({ error: "Repository unavailable" }) }));
+  assert.match(document.querySelector('[role="alert"]').textContent, /Repository unavailable/);
+  assert.equal(document.querySelector('[aria-label="Selected agent"]'), null, "failed request cannot show an old prompt as current");
+  assert.equal(document.querySelector("details, summary, select"), null);
 });

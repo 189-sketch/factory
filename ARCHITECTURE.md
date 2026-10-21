@@ -171,3 +171,24 @@ Automated checks cover state transitions, privacy, idempotency, authorization,
 merge gates, cleanup and provider failure paths. Live GKE evidence is recorded
 beside the relevant deployment guide; it does not prove every provider or failure
 mode. Follow [Development](docs/development.md) for repeatable checks.
+
+## Native agent runs
+
+The versioned `native-v1` recipe owns one `primary` run. Claude uses streaming CLI
+JSON; Codex owns one stdio app-server with account/model preflight. The harness
+discovers repository child definitions in the task worktree. Children are observed
+activities with native identities, not separately scheduled runs or leases.
+Only primary messages and usage determine the outcome. Child failures can be
+recovered by the primary.
+
+Worker disk spools carry sequence IDs. Bounded lease-authenticated batches replay
+idempotently into a separate SQLite activity stream, which the UI polls. Completion
+flushes pending events. Existing lifecycle history, publication holds and PR
+branch/head evidence checks remain intact. Native feedback queues another primary
+attempt without legacy role routing or the three-repair limit. Existing maintenance
+automations retain their enforced review policy.
+
+Native runs currently require host workers and saved Codex repository trust. They
+do not enforce the legacy spec gate or isolated read-only review checkout. The
+server retains in-memory leases and honest interruption handling after restart.
+See [native operation and checks](docs/native-agents.md).

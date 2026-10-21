@@ -53,11 +53,11 @@ func (r FactoryResult) Validate() error {
 	if r.Version != 1 {
 		return errors.New("unsupported factory result version")
 	}
-	if r.PRDescription != "" && ((r.Role != "spec" && r.Role != "implement") || len(r.PRDescription) > 8192) {
+	if r.PRDescription != "" && ((r.Role != "spec" && r.Role != "implement" && r.Role != "primary") || len(r.PRDescription) > 8192) {
 		return errors.New("public PR descriptions are limited to 8 KiB and Spec or Implement")
 	}
 	switch r.Role {
-	case "triage", "spec", "implement", "review":
+	case "triage", "spec", "implement", "review", "primary":
 	default:
 		return errors.New("invalid factory role")
 	}

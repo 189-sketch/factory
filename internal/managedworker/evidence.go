@@ -93,7 +93,7 @@ func verifyRemoteHead(command evidenceCommand, remote, branch, sha string) error
 }
 
 func validateImplementationEvidence(command evidenceCommand, result *protocol.FactoryResult) error {
-	if result == nil || (result.Role != "implement" && result.Role != "spec") {
+	if result == nil || (result.Role != "implement" && result.Role != "spec" && result.Role != "primary") {
 		return fmt.Errorf("delivery result missing factory evidence")
 	}
 	if err := result.Validate(); err != nil {
@@ -187,7 +187,7 @@ func validateImplementationEvidence(command evidenceCommand, result *protocol.Fa
 	if result.Role == "spec" && !pr.Draft {
 		return fmt.Errorf("specification PR must be a draft for approval")
 	}
-	if result.Role == "implement" && pr.Draft {
+	if (result.Role == "implement" || result.Role == "primary") && pr.Draft {
 		return fmt.Errorf("implementation PR must be ready for review")
 	}
 	return nil

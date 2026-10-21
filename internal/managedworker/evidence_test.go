@@ -64,7 +64,7 @@ func TestImplementationEvidenceRejectsUnverifiedClaims(t *testing.T) {
 			}
 			result := &protocol.FactoryResult{Version: 1, Role: "implement", PRURL: "https://github.com/owner/project/pull/12", HeadSHA: sha, Branch: "codex/task"}
 			result.Report = "Delivery evidence verified."
-			for _, role := range []string{"implement", "spec"} {
+			for _, role := range []string{"implement", "primary", "spec"} {
 				result.Role = role
 				activeRole = role
 				if role == "spec" {

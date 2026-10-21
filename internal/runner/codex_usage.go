@@ -509,11 +509,12 @@ func (collector *structuredUsageCollector) completeLine() {
 
 func (collector *structuredUsageCollector) parseLine(line []byte) {
 	var event struct {
-		Type    string          `json:"type"`
-		IsError bool            `json:"is_error"`
-		Usage   json.RawMessage `json:"usage"`
-		Result  string          `json:"result"`
-		Item    struct {
+		ParentToolUseID string          `json:"parent_tool_use_id"`
+		Type            string          `json:"type"`
+		IsError         bool            `json:"is_error"`
+		Usage           json.RawMessage `json:"usage"`
+		Result          string          `json:"result"`
+		Item            struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"item"`
@@ -522,6 +523,9 @@ func (collector *structuredUsageCollector) parseLine(line []byte) {
 		if isUsageResultCandidate(line, collector.resultType) {
 			collector.usage = nil
 		}
+		return
+	}
+	if event.ParentToolUseID != "" {
 		return
 	}
 	if collector.diagnostics != nil && (event.Type == "error" || event.Type == "turn.failed" || (event.Type == "result" && event.IsError)) {

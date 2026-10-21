@@ -13,12 +13,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/owainlewis/machinist/internal/config"
 	"github.com/owainlewis/machinist/internal/triggers"
 )
 
 // Automations reuse single-agent jobs. Only their definitions and schedule cursor
 // are additional state; execution, recovery and delivery use the normal runner.
 type factoryAutomation struct {
+	Recipe                string     `json:"recipe,omitempty"`
 	Kind                  string     `json:"kind,omitempty"`
 	Busy                  bool       `json:"busy,omitempty"`
 	NeedsStopConfirmation bool       `json:"needs_stop_confirmation,omitempty"`
@@ -145,6 +147,13 @@ func (s *GitHubFactoryServer) saveAutomation(w http.ResponseWriter, r *http.Requ
 	}
 	id := r.PathValue("id")
 	if id == "" {
+		if a.Kind == "" {
+			if definition, loadErr := config.LoadDefinitions(s.definitionPath); loadErr == nil {
+				if _, resolveErr := definition.ResolveCommand("primary"); resolveErr == nil && (s.setup == nil || s.setup.snapshot().Selection.Host != "kubernetes") {
+					a.Recipe = "native-v1"
+				}
+			}
+		}
 		var err error
 		a.ID, err = randomID("automation", 12)
 		if err != nil {
@@ -166,6 +175,7 @@ func (s *GitHubFactoryServer) saveAutomation(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		a.ID = id
+		a.Recipe = previous.Recipe
 		a.Version = previous.Version + 1
 		a.LastJob = previous.LastJob
 		a.LastRun = previous.LastRun
@@ -394,6 +404,19 @@ func (s *GitHubFactoryServer) enqueueAutomation(ctx context.Context, a *factoryA
 	localID := hex.EncodeToString(sum[:12])
 	issue := GitHubIssue{Title: a.Name, Body: a.Prompt, HTMLURL: "local:automation_" + localID, State: "open", CreatedAt: now, UpdatedAt: now}
 	recipe := "single"
+	if a.Recipe == "native-v1" && a.Kind == "" {
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			return "", errors.New("native-agent automations require a host worker; select a host worker before running this automation")
+		}
+		definition, err := config.LoadDefinitions(s.definitionPath)
+		if err != nil {
+			return "", err
+		}
+		if _, err = definition.ResolveCommand("primary"); err != nil {
+			return "", fmt.Errorf("configure a valid primary command before running this automation: %w", err)
+		}
+		recipe = a.Recipe
+	}
 	if a.Kind == "repository-maintenance" {
 		// Managed instructions are selected at admission, including for definitions
 		// saved before a prompt correction. Each job still keeps its own snapshot.

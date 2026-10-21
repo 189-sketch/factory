@@ -551,3 +551,37 @@ func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 		t.Fatal("workflow kept executing after definitive lease rejection")
 	}
 }
+
+func TestCancelledExecuteRetainsShutdownConfirmation(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repo")
+	if b, e := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); e != nil {
+		t.Fatalf("%v: %s", e, b)
+	}
+	worker := &Worker{config: config.Worker{DataDirectory: directory, Executors: map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", `cat >/dev/null; touch "$MACHINIST_REPOSITORY/started"; exec /bin/sleep 60`}}}, Repositories: map[string]config.Repository{"repo": {Path: repository}}}, instanceID: "worker", stdout: io.Discard, stderr: io.Discard}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan protocol.Completion, 1)
+	go func() {
+		done <- worker.execute(ctx, protocol.RunSpec{ID: "run_0123456789abcdef01234567", Command: "probe", Executor: "test", Repository: "repo", LeaseToken: "lease", TimeoutMillis: 60000})
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(repository, "started")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("command not started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case completion := <-done:
+		if !completion.ProcessStopped || completion.State != "cancelled" {
+			t.Fatalf("lost cleanup confirmation: %+v", completion)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancel did not finish")
+	}
+}

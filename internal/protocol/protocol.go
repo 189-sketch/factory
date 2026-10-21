@@ -3,6 +3,8 @@ package protocol
 import "encoding/json"
 
 type PollRequest struct {
+	NativeAgents      bool                `json:"native_agents,omitempty"`
+	Adapters          map[string]string   `json:"adapters,omitempty"`
 	Runtime           string              `json:"runtime,omitempty"`
 	SingleAgent       bool                `json:"single_agent,omitempty"`
 	HealthChecks      bool                `json:"health_checks,omitempty"`
@@ -52,6 +54,7 @@ type Heartbeat struct {
 }
 
 type Completion struct {
+	ProcessStopped   bool            `json:"process_stopped,omitempty"`
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`
 	InstanceID       string          `json:"instance_id"`

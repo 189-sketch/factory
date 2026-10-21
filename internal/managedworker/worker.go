@@ -111,6 +111,10 @@ func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 	if execute == nil {
 		execute = w.execute
 	}
+	if spec.Factory != nil && spec.Factory.Recipe == "native-v1" {
+		stop := w.streamRunEvents(ctx, spec)
+		defer stop()
+	}
 	return withHeartbeats(ctx, w, spec, "", func() protocol.Completion { return execute(ctx, spec) }, cancel)
 }
 
@@ -118,7 +122,25 @@ func (w *Worker) deliverWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 	if err := w.heartbeat(ctx, spec); err != nil {
 		fmt.Fprintf(w.stderr, "machinist: heartbeat run %s before completion: %v\n", spec.ID, err)
 	}
-	return withHeartbeats(ctx, w, spec, " during completion", func() error { return w.deliver(ctx, spec.ID, completion) })
+	return withHeartbeats(ctx, w, spec, " during completion", func() error {
+		if spec.Factory != nil && spec.Factory.Recipe == "native-v1" {
+			for {
+				err := w.flushRunEvents(ctx, spec)
+				if err == nil {
+					break
+				}
+				var response *ResponseError
+				if errors.As(err, &response) && !response.Retryable() {
+					return err
+				}
+				if !wait(ctx, time.Second) {
+					return ctx.Err()
+				}
+			}
+		}
+
+		return w.deliver(ctx, spec.ID, completion)
+	})
 }
 
 // withHeartbeats runs work in the background and keeps the run lease alive
@@ -156,7 +178,12 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	if w.config.Kubernetes != nil {
 		runtime = "kubernetes"
 	}
+	adapters := map[string]string{}
+	for name, e := range w.config.Executors {
+		adapters[name] = e.Adapter
+	}
 	request := protocol.PollRequest{
+		NativeAgents: w.config.Kubernetes == nil, Adapters: adapters,
 		Runtime:           runtime,
 		SingleAgent:       true,
 		Factory:           true,
@@ -180,7 +207,7 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 }
 
 func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
-	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1}
+	completion := protocol.Completion{InstanceID: w.instanceID, LeaseToken: spec.LeaseToken, State: "failed", ExitCode: 1, ProcessStopped: true}
 	repository, err := w.config.ResolveRepository(spec.Repository)
 	if err != nil {
 		completion.Error = err.Error()
@@ -280,7 +307,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		prepareInputs = nil
 	}
 	answerHead := ""
-	if spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+	if spec.Factory != nil && (spec.Factory.Recipe == "answer" || (spec.Factory.Recipe == "single" || spec.Factory.Recipe == "native-v1") || spec.Factory.Role == "triage") {
 		answerHead, err = answerWorkspaceState(repositoryCommand(ctx, repository))
 		if err != nil {
 			completion.Error = err.Error()
@@ -339,9 +366,18 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			result.ExitCode = 1
 		}
 	}
-	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || spec.Factory.Recipe == "single" || spec.Factory.Role == "triage") {
+	completion.ProcessStopped = result.ProcessStopped
+	if ctx.Err() != nil && result.ID != "" {
+		completion.State = string(result.State)
+		completion.ExitCode = result.ExitCode
+		if runErr != nil {
+			completion.Error = runErr.Error()
+		}
+		return completion
+	}
+	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || (spec.Factory.Recipe == "single" || spec.Factory.Recipe == "native-v1") || spec.Factory.Role == "triage") {
 		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
-		if (stateErr != nil || after != answerHead) && (spec.Factory.Recipe != "single" || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
+		if (stateErr != nil || after != answerHead) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
 			completion.State = "succeeded"
 			completion.ExitCode = 0
 			blocked := protocol.StepResult{Outcome: "blocked", Summary: "The task changed files without valid PR delivery; preserve the work and deliver the requested changes through the assigned PR", Factory: &protocol.FactoryResult{Version: 1, Role: spec.Factory.Role, Report: "Workspace/delivery validation failed"}}
@@ -349,7 +385,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 			return completion
 		}
 	}
-	if w.config.Kubernetes == nil && runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec") && result.StepResult != nil && result.StepResult.Outcome == "complete" && (spec.Factory.Recipe != "single" || (result.StepResult.Factory != nil && result.StepResult.Factory.PRURL != "")) {
+	if w.config.Kubernetes == nil && runErr == nil && spec.Factory != nil && (spec.Factory.Role == "implement" || spec.Factory.Role == "spec" || spec.Factory.Role == "primary") && result.StepResult != nil && result.StepResult.Outcome == "complete" && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || (result.StepResult.Factory != nil && result.StepResult.Factory.PRURL != "")) {
 		if err := validateImplementationEvidence(repositoryCommand(ctx, repository), result.StepResult.Factory); err != nil {
 			runErr = err
 			result.State = runner.StateFailed
@@ -357,6 +393,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		}
 	}
 	if result.ID != "" {
+		completion.ProcessStopped = result.ProcessStopped
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))

@@ -36,6 +36,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   let cancelled = false;
   let savedPrompt;
   globalThis.fetch = async (url, options) => {
+    if (url.startsWith("/api/v1/agents")) return { ok: true, json: async () => ({ repository: "example/repo", repositories: ["example/repo"], harness: "claude", agents: [{ id: "primary", name: "Primary agent", kind: "primary", harness: "claude", model: "sonnet", prompt: "Coordinate this task.", source: "prompts/primary.md" }] }) };
     if (url.startsWith("/api/v1/definitions")) return { ok: true, json: async () => ({ commands: ["triage", "spec", "implement", "review"].map(name => ({ name, executor: "codex", prompt: `${name} original prompt`, hash: "original-hash", timeout: "20m" })) }) };
     if (url === "/api/v1/factory/agents/triage" && options?.method === "PUT") { savedPrompt = JSON.parse(options.body); return { ok: true, json: async () => ({ hash: "new-hash" }) }; }
 
@@ -157,22 +158,10 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   assert.ok(document.querySelector('[role="tab"][aria-selected="true"]'), "run has clear Activity and Details tabs");
   assert.equal(document.querySelector("details"),null,"native disclosure toggles are absent");
   window.location.hash = "#/agents";
-  await eventually(() => assert.ok(document.querySelector('[aria-label="Factory agents"]')));
-  await eventually(() => assert.equal(document.querySelector("textarea").value, "triage original prompt"));
-  assert.ok(document.querySelector(".markdown-prompt"), "prompt has a Markdown reading view");
-  button("Edit prompt").click();
-  assert.equal(button("Save prompt").disabled, true);
-  const textarea = document.querySelector("textarea");
-  Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, "value").set.call(textarea, "Updated triage prompt");
-  textarea.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
-  await eventually(() => assert.equal(button("Save prompt").disabled, false));
-  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Spec")).click();
-  await eventually(()=>assert.equal(document.querySelector("textarea").value,"spec original prompt"));
-  [...document.querySelectorAll(".agent-row")].find(el=>el.textContent.startsWith("Triage")).click();
-  await eventually(()=>assert.equal(document.querySelector("textarea").value,"Updated triage prompt"));
-  button("Save prompt").click();
-  await eventually(() => assert.deepEqual(savedPrompt, { prompt: "Updated triage prompt", expected_hash: "original-hash" }));
-  await eventually(() => assert.match(document.body.textContent, /Saved. Future stage attempts use this Markdown version/));
+  await eventually(() => assert.match(document.body.textContent, /Coordinate this task/));
+  assert.match(document.body.textContent, /sonnet/);
+  assert.match(document.body.textContent, /prompts\/primary.md/);
+  assert.equal(document.querySelector("textarea"),null);
 
   window.location.hash = "#/runs";
   await eventually(() => assert.ok([...document.querySelectorAll("button")].find(el => el.textContent === "New run")));
@@ -180,6 +169,7 @@ test("compact runs table filters jobs and preserves task actions", async (contex
   // A retry can then exercise the same submission regardless of machine speed.
   const submissions = [];
   globalThis.fetch = async (url, options) => {
+    if (url.startsWith("/api/v1/agents")) return { ok: true, json: async () => ({ repository: "example/repo", repositories: ["example/repo"], harness: "claude", agents: [{ id: "primary", name: "Primary agent", kind: "primary", harness: "claude", model: "sonnet", prompt: "Coordinate this task.", source: "prompts/primary.md" }] }) };
     if (url === "/api/v1/jobs") {
       submissions.push(JSON.parse(options.body));
       if (submissions.length === 1) throw new Error("Response lost after submission");

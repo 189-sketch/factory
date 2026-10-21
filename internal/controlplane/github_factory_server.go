@@ -40,6 +40,7 @@ type GitHubFactoryServer struct {
 	tasks                map[string]*githubTask
 	workers              map[string]Worker
 	leases               map[string]*githubLease
+	cleanupLeases        map[string]*githubLease
 	loaded               time.Time
 	maxConcurrent        int
 	githubFollowupCursor string
@@ -55,10 +56,11 @@ type githubTask struct {
 	mergeSubmitting     bool
 }
 type githubLease struct {
-	phase    string
-	spec     protocol.RunSpec
-	instance string
-	last     time.Time
+	phase        string
+	spec         protocol.RunSpec
+	instance     string
+	last         time.Time
+	cleanupUntil time.Time
 }
 
 func NewGitHubFactoryServer(path, token string, maxConcurrent int) (*GitHubFactoryServer, error) {
@@ -175,6 +177,7 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/projects", s.auth.authorizeSubmission(s.addProject))
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
+	mux.HandleFunc("GET /api/v1/agents", s.agentCatalog)
 	mux.HandleFunc("PUT /api/v1/factory/agents/{name}", s.auth.authorizeSubmission(s.savePrompt))
 	mux.HandleFunc("GET /api/v1/automations", s.listAutomations)
 	mux.HandleFunc("POST /api/v1/automations", s.auth.authorizeSubmission(s.saveAutomation))
@@ -185,6 +188,8 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.auth.authorizeSubmission(s.action))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.auth.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.auth.authorizeWorker(s.heartbeat))
+	mux.HandleFunc("POST /api/v1/runs/{id}/events", s.auth.authorizeWorker(s.ingestEvents))
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.runEvents)
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.auth.authorizeWorker(s.complete))
 	mux.HandleFunc("GET /api/v1/jobs/{id}/artifacts", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, []any{}) })
 	mux.Handle("/", http.FileServer(http.FS(dist)))
@@ -360,6 +365,12 @@ func (s *GitHubFactoryServer) status(w http.ResponseWriter, r *http.Request) {
 		}
 		job.Runs = append([]Run(nil), job.Runs...)
 		for i := range job.Runs {
+			if job.Runs[i].State == "cancelled" && !job.Runs[i].StartedAt.IsZero() && job.Runs[i].CompletedAt.IsZero() {
+				job.Runs[i].Phase = "stop_unconfirmed"
+				if s.cleanupLease(job.Runs[i].ID) != nil {
+					job.Runs[i].Phase = "stopping"
+				}
+			}
 			if lease, ok := leases[job.Runs[i].ID]; ok && job.Runs[i].State == "running" {
 				job.Runs[i].Phase = lease.phase
 				last := lease.last
@@ -517,9 +528,24 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 	if recipe == "" {
 		recipe = "factory"
 	}
-	if recipe != "factory" && recipe != "single" {
+	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
 		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
 		return
+	}
+	if recipe == "native-v1" {
+		definition, loadErr := config.LoadDefinitions(s.definitionPath)
+		if loadErr != nil {
+			writeError(w, 400, loadErr)
+			return
+		}
+		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
+			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
+			return
+		}
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
+			return
+		}
 	}
 	if len(input.ClientRequestID) > 128 || strings.TrimSpace(input.ClientRequestID) != input.ClientRequestID {
 		writeError(w, 400, errors.New("invalid client request ID"))
@@ -699,6 +725,7 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]string{"status": "accepted"})
 		return
 	}
+	input.Stopped = input.Stopped || lastRunStopped(task.state.Job)
 	if action == "publication_hold" || action == "release_publication" {
 		if (task.state.Job.State == "cancelled" || task.state.Job.State == "interrupted") && !input.Stopped {
 			writeError(w, 409, errors.New("confirm the previous process stopped before changing publication access"))
@@ -787,7 +814,11 @@ func (s *GitHubFactoryServer) action(w http.ResponseWriter, r *http.Request) {
 	if task.state.Job.State != "running" {
 		for id, lease := range s.liveLeases() {
 			if lease.spec.JobID == task.state.Job.ID {
-				s.deleteLease(id)
+				if action == "cancel" {
+					s.cancelLease(id)
+				} else {
+					s.deleteLease(id)
+				}
 			}
 		}
 	}
@@ -860,6 +891,9 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 	for _, id := range ids {
 		task := s.tasks[id]
 		state := task.state
+		if state.Job.Recipe == "native-v1" && (!p.NativeAgents || p.Runtime == "kubernetes") {
+			continue
+		}
 		if (state.Job.Recipe == "single" && !p.SingleAgent) || (state.Job.Recipe != "single" && !p.Reviews) {
 			continue
 		}
@@ -907,6 +941,10 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				writeError(w, 502, err)
 				return
+			}
+			if state.Job.Recipe == "native-v1" && p.Adapters[command.Executor] != "claude-stream" && p.Adapters[command.Executor] != "codex-app-server" {
+				capable = false
+				break
 			}
 			if !executors[command.Executor] || !supportsModel(p.Models, command.Executor, command.Model) || ((stage == "review" || stage == "triage" || state.Job.Recipe == "answer") && !readonly[command.Executor]) {
 				capable = false
@@ -1090,6 +1128,11 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lease := s.liveLease(id)
+	cleanup := false
+	if lease == nil {
+		lease = s.cleanupLease(id)
+		cleanup = lease != nil
+	}
 	if lease == nil || lease.instance != p.InstanceID || lease.spec.LeaseToken != p.LeaseToken {
 		writeError(w, 409, ErrLeaseConflict)
 		return
@@ -1102,6 +1145,25 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	task := s.tasks[lease.spec.JobID]
 	if task == nil {
 		writeError(w, 404, errors.New("task not found"))
+		return
+	}
+	if cleanup {
+		// Cleanup acknowledges shutdown only. Never accept a result or publish work
+		// from a cancelled lease, and never modify a newer attempt.
+		if task.state.Job.State != "cancelled" || task.state.Job.Runs[len(task.state.Job.Runs)-1].ID != id || !p.ProcessStopped {
+			writeError(w, 409, ErrLeaseConflict)
+			return
+		}
+		task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
+		defer func() { task.receipt = nil }()
+		if err := s.event(r.Context(), task, GitHubFactoryEvent{Kind: "stopped", RunID: id, Role: task.state.Role, ExitCode: &p.ExitCode, Error: p.Error}); err != nil {
+			writeError(w, 409, err)
+			return
+		}
+		s.liveMu.Lock()
+		delete(s.cleanupLeases, id)
+		s.liveMu.Unlock()
+		w.WriteHeader(204)
 		return
 	}
 	if task.maintenanceApplying {
@@ -1192,7 +1254,7 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 	}
 	task.receipt = &factoryReceipt{run: id, instance: p.InstanceID, token: p.LeaseToken}
 	defer func() { task.receipt = nil }()
-	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
+	if err = s.event(r.Context(), task, GitHubFactoryEvent{Kind: "completed", Stopped: p.ProcessStopped, RunID: id, Role: lease.spec.Factory.Role, Result: step, ExitCode: &p.ExitCode, Error: p.Error, TokenUsage: result.TokenUsage, DurationMillis: result.DurationMillis}); err != nil {
 		writeError(w, 409, err)
 		return
 	}
@@ -1201,6 +1263,22 @@ func (s *GitHubFactoryServer) complete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, role string) (config.ResolvedCommand, error) {
+	if role == "primary" {
+		definition, err := config.LoadDefinitions(s.definitionPath)
+		if err != nil {
+			return config.ResolvedCommand{}, err
+		}
+		command, err := definition.ResolveCommand("primary")
+		if err == nil && s.setup != nil {
+			selection := s.setup.snapshot().Selection
+			if selection.Agent != "" && command.Executor != selection.Agent+"-native" {
+				command.Executor = selection.Agent + "-native"
+				command.Model = ""
+			}
+		}
+		return command, err
+	}
+
 	command, err := s.command(ctx, role)
 	if err == nil && (task.state.Job.Recipe == "answer" || role == "triage") {
 		review, reviewErr := s.command(ctx, "review")
@@ -1216,4 +1294,40 @@ func (s *GitHubFactoryServer) jobCommand(ctx context.Context, task *githubTask, 
 		command.Hash = hex.EncodeToString(sum[:])
 	}
 	return command, err
+}
+
+// Cancellation revokes execution immediately but retains a bounded, token-bound
+// channel for final logs and a stopped acknowledgment from the same attempt.
+const cleanupUploadGrace = 2 * time.Minute
+
+func (s *GitHubFactoryServer) cancelLease(id string) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if s.cleanupLeases == nil {
+		s.cleanupLeases = map[string]*githubLease{}
+	}
+	now := time.Now()
+	for key, lease := range s.cleanupLeases {
+		if now.After(lease.cleanupUntil) {
+			delete(s.cleanupLeases, key)
+		}
+	}
+	if lease := s.leases[id]; lease != nil {
+		lease.cleanupUntil = now.Add(cleanupUploadGrace)
+		s.cleanupLeases[id] = lease
+		delete(s.leases, id)
+	}
+}
+func (s *GitHubFactoryServer) cleanupLease(id string) *githubLease {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if lease := s.cleanupLeases[id]; lease != nil {
+		if time.Now().After(lease.cleanupUntil) {
+			delete(s.cleanupLeases, id)
+			return nil
+		}
+		copy := *lease
+		return &copy
+	}
+	return nil
 }

@@ -68,6 +68,7 @@ type Job struct {
 }
 
 type Run struct {
+	ProcessStopped bool               `json:"process_stopped,omitempty"`
 	Prompt         string             `json:"prompt,omitempty"`
 	CommandHash    string             `json:"command_hash,omitempty"`
 	Phase          string             `json:"phase,omitempty"`

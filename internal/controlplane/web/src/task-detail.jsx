@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
+import { useRunEvents, ExecutionGraph, AgentReports, ActivityTimeline, PrimaryLog, EventDiagnostics, RunMarkdown } from "./native-activity.jsx";
 import { stageLabel } from "./stage-progress.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { jobDisplayTitle } from "./runs-board.js";
@@ -39,6 +40,7 @@ export function TaskDetail({
         {error && <p role="alert">{error}</p>}
       </div>
     );
+  if (job.recipe === "native-v1") return <NativeTaskDetail job={job} error={error} onWorkflowAction={onWorkflowAction} />;
   if (factoryTask) return <FactoryTaskDetail job={job} error={error} onWorkflowAction={onWorkflowAction} />;
   const terminal = ["succeeded", "failed", "cancelled"].includes(job.state);
   const latest = job.runs.at(-1);
@@ -306,6 +308,61 @@ export function TaskDetail({
   );
 }
 
+function resultExplanation(run) {
+  const message = run?.summary || run?.error || "";
+  return /^invalid character .*looking for beginning of value/.test(message)
+    ? "The primary agent returned a response that could not be read as the required result format. This attempt was marked failed."
+    : message;
+}
+
+function NativeAttempt({ run, number }) {
+  const data = useRunEvents(run);
+  return <article className="run-attempt">
+    <header className="run-section-heading"><h2>Attempt {number}</h2><State value={run.state} /></header>
+    <RunMarkdown>{resultExplanation(run) || "No result was reported."}</RunMarkdown>
+    {data.error && <p role="status" className="run-connection-error">{data.error} Showing the last received activity.</p>}
+    <ActivityTimeline loaded={data.loaded} runState={run.state}>{data.children}</ActivityTimeline>
+  </article>;
+}
+
+function NativeTaskDetail({ job, error, onWorkflowAction }) {
+  const [view,setView]=useState("overview");
+ const [selectedAgent,setSelectedAgent]=useState(null);
+ useEffect(()=>{setView("overview");setSelectedAgent(null);},[job.id]);
+  const latest = job.runs.at(-1);
+  const data = useRunEvents(latest);
+  const finished = !["running", "queued"].includes(job.state);
+  const summary = resultExplanation(latest);
+  return <article className="factory-task native-run-detail">
+    <header className="factory-task-header">
+      <a href="#/runs" className="factory-back"><ArrowLeft className="size-4" aria-hidden="true" />All runs</a>
+      <div className="factory-task-title"><h1>{jobDisplayTitle(job)}</h1><State value={job.state} /></div>
+      <div className="factory-task-meta"><span>{job.repository}</span><span>{latest?.executor?.startsWith("claude") ? "Claude Code" : latest?.executor?.startsWith("codex") ? "Codex" : latest?.executor || "Awaiting runner"}</span>{latest && <span>Attempt {job.runs.length}</span>}{latest?.duration_millis != null && <span>{formatDurationMillis(latest.duration_millis)}</span>}</div>
+    </header>
+    {error && <p role="alert" className="run-connection-error">{error}</p>}
+    {job.github_sync_error && <p role="status" className="run-connection-error">{job.github_sync_error}</p>}
+    <Tabs key={job.id} label="Run sections" value={view} onValueChange={setView} items={[
+      { id: "overview", label: "Overview", content: <>
+        <section className="run-outcome" aria-label="Run outcome"><h2>{job.state === "succeeded" ? "Result" : job.state === "failed" ? "What went wrong" : job.state === "blocked" ? "Needs your input" : "Current status"}</h2>
+          {latest?.phase === "stopping" && <p role="status">Stopping agent processes and collecting final activity…</p>}
+          {latest?.phase === "stop_unconfirmed" && <p role="status">Cancellation was requested, but process shutdown could not be confirmed.</p>}
+          {summary && <RunMarkdown>{summary}</RunMarkdown>}
+          {job.state === "running" ? <RunActivity run={latest} /> : !summary && <p className="run-empty">{job.state === "queued" ? "Waiting for a runner to pick up this task." : "No result was reported."}</p>}
+          {job.workflow?.factory?.pr_url && <a className="factory-spec-link" href={job.workflow.factory.pr_url} target="_blank" rel="noreferrer">Open pull request<ArrowRight size={16} aria-hidden="true" /></a>}
+          <TaskActions key={`${job.id}:${latest?.id}:${job.state}:${job.hold_version || 0}`} job={job} result={latest} onAction={onWorkflowAction} />
+        </section>
+        {data.error && <p role="status" className="run-connection-error">{data.error} Showing the last received activity.</p>}
+        <ExecutionGraph activities={data.children} runState={latest?.state} loaded={data.loaded} onSelect={id=>{setSelectedAgent(id);setView("reports");}} />
+        {finished && job.runs.length > 1 && <p className="run-history-note">This task took {job.runs.length} attempts. Earlier results are preserved in the Attempts tab.</p>}
+      </> },
+      { id: "reports", label: "Agent reports", content: <AgentReports activities={data.children} selectedID={selectedAgent} onSelect={setSelectedAgent} /> },
+      { id: "log", label: "Primary log", content: <PrimaryLog logs={data.logs} /> },
+      ...(job.runs.length > 1 ? [{ id: "attempts", label: `Attempts (${job.runs.length})`, content: <section aria-label="Previous attempts"><h2 className="run-panel-title">Attempt history</h2><p className="run-section-description">Each retry keeps the earlier result and agent activity.</p>{[...job.runs].reverse().map((run, index) => <NativeAttempt key={run.id} run={run} number={job.runs.length - index} />)}</section> }] : []),
+      { id: "details", label: "Details", content: <section className="run-details"><h2 className="run-panel-title">Execution details</h2>{latest && <ExecutionDetails run={latest} />}<h2 className="run-panel-title">Original request</h2><RunMarkdown>{job.task?.spec || job.prompt}</RunMarkdown>{job.task?.source_url && <a className="factory-spec-link" href={job.task.source_url} target="_blank" rel="noreferrer">Open source issue</a>}<EventDiagnostics events={data.events} /></section> },
+    ]} />
+  </article>;
+}
+
 function FactoryTaskDetail({ job, error, onWorkflowAction }) {
   const { result, history, stages } = taskPresentation(job);
   const latest = job.runs.at(-1);
@@ -319,11 +376,11 @@ function FactoryTaskDetail({ job, error, onWorkflowAction }) {
       </header>
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       {job.github_sync_error && <p role="status" className="text-sm text-warning">{job.github_sync_error}</p>}
-      <ol className="factory-progress" aria-label="Task progress">
+      {job.recipe !== "native-v1" && <ol className="factory-progress" aria-label="Task progress">
         {stages.map(stage => <li key={stage.name} aria-current={stage.current ? "step" : undefined} className={cn(stage.current && "is-current", stage.complete && "is-complete")}>
           {stage.complete && <Check className="size-3.5" aria-label="Complete" />}{job.recipe === "single" ? "Agent" : job.recipe === "answer" ? "Answer" : stageLabel(stage.name)}{stage.skipped && <span>Skipped</span>}
         </li>)}
-      </ol>
+      </ol>}
       <Tabs key={job.id} label="Run sections" items={[
         {id:"activity",label:"Activity",content:<>      <section className="factory-result" aria-label="Current result">
         <h2>{resultTitle(job, result)}</h2>
@@ -434,7 +491,7 @@ function TaskActions({ job, result, onAction }) {
   const [releaseConfirmed, setReleaseConfirmed] = useState(false);
   const latest = job.runs.at(-1);
   const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/)?.[0];
-  const needsStopped = ["interrupted", "cancelled"].includes(job.state);
+  const needsStopped = ["interrupted", "cancelled"].includes(job.state) && !latest?.process_stopped;
   const retryable = ["blocked", "failed", "interrupted", "cancelled"].includes(job.state);
   const humanDecision = job.state === "blocked" && job.workflow?.factory?.verdict === "human_decision_needed";
   const canRequest = job.recipe !== "answer" && (job.state === "awaiting_merge" || humanDecision || (job.state === "awaiting_approval" && latest?.reviewed_run_id) || (["failed", "blocked"].includes(job.state) && latest?.command === "review" && prURL));

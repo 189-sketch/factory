@@ -33,3 +33,12 @@ models = { luna = "gpt-5.6-luna", terra = "gpt-5.6-terra", sol = "gpt-5.6-sol" }
 read_only = true
 command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--model={{machinist.model}}", "--permission-mode", "plan", "--tools", "Read,Glob,Grep"]
 models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
+
+# Host-native adapters use the existing CLI subscription login.
+[executors.codex-native]
+adapter = "codex-app-server"
+command = ["codex", "app-server", "--stdio", "-c", "features.multi_agent=true", "-c", "sandbox_mode=\"danger-full-access\""]
+
+[executors.claude-native]
+adapter = "claude-stream"
+command = ["claude", "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--dangerously-skip-permissions"]

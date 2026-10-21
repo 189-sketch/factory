@@ -38,6 +38,7 @@ func openFactoryLocalStore(path string) (*factoryLocalStore, error) {
 		return nil, err
 	}
 	_, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
+ CREATE TABLE IF NOT EXISTS run_activity_events (run TEXT NOT NULL, sequence INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(run,sequence));
  CREATE TABLE IF NOT EXISTS factory_tasks (url TEXT PRIMARY KEY, issue TEXT NOT NULL, repository TEXT NOT NULL, alias TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS factory_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS factory_events_task ON factory_events(task,id);
@@ -111,6 +112,9 @@ func createFactoryRequest(ctx context.Context, tx *sql.Tx, task localFactoryTask
 		role := "triage"
 		if recipe == "direct" || recipe == "single" {
 			role = "implement"
+		}
+		if recipe == "native-v1" {
+			role = "primary"
 		}
 		event, _ := json.Marshal(GitHubFactoryEvent{Version: 1, Kind: "created", Role: role, Recipe: recipe})
 		if _, err = tx.ExecContext(ctx, `INSERT INTO factory_events(task,body,created) VALUES(?,?,?)`, task.issue.HTMLURL, GitHubFactoryMarker+string(event), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
