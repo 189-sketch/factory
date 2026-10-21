@@ -52,11 +52,14 @@ test("project defaults stay inline, save with CSRF and start a scoped job", asyn
  global.fetch=async(url,options)=>{requests.push({url,...options});return {ok:true,json:async()=>({})};};
  const root=createRoot(document.getElementById("root"));
  context.after(async()=>{await act(()=>root.unmount());dom.window.close();Object.assign(global,previous);});
- await act(()=>root.render(React.createElement(ProjectsPage,{status:{...status,jobs:[{id:"job-1",repository:"owner/first",github_issue_title:"Fix tests",state:"running"}],onboarding:{...status.onboarding,selection:{host:"kubernetes"},project_defaults:{"owner/first":{recipe:"single",instructions:"Run tests"}}}},onStart:repo=>started=repo,onRefresh:()=>refreshes++})));
+ await act(()=>root.render(React.createElement(ProjectsPage,{status:{...status,jobs:[{id:"job-1",repository:"owner/first",task:{title:"Fix tests"},state:"running"}],onboarding:{...status.onboarding,selection:{host:"kubernetes"},project_defaults:{"owner/first":{recipe:"single",instructions:"Run tests"}}}},onStart:repo=>started=repo,onRefresh:()=>refreshes++})));
+ assert.equal(document.querySelector("textarea"),null);
+ await act(()=>[...document.querySelectorAll("button")].find(b=>b.textContent==="Edit defaults").click());
+ assert.equal(document.querySelectorAll(".project-default-panel").length,1);
  assert.equal(document.querySelector("select").value,"single");
  assert.equal(document.querySelector('option[value="native-v1"]').disabled,true);
  assert.equal(document.querySelector("textarea").value,"Run tests");
- assert.match(document.body.textContent,/Fix tests · running/);
+ assert.match(document.body.textContent,/Fix tests/);assert.match(document.body.textContent,/Running/);
  await act(()=>[...document.querySelectorAll("button")].find(b=>b.textContent==="Start job").click());
  assert.equal(started,"owner/first");
  await act(()=>document.querySelector("form").dispatchEvent(new dom.window.Event("submit",{bubbles:true,cancelable:true})));

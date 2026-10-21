@@ -687,13 +687,7 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if len(existing) == 0 {
-		instructions := defaults.Instructions
-		if instructions != "" {
-			issue.Body += "\n\n## Project instructions\n" + instructions
-		}
-	}
-	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}, input.ClientRequestID, fingerprint, recipe); err != nil {
+	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository, projectInstructions: defaults.Instructions}, input.ClientRequestID, fingerprint, recipe); err != nil {
 		writeError(w, 500, err)
 		return
 	}
@@ -1012,7 +1006,7 @@ func (s *GitHubFactoryServer) poll(w http.ResponseWriter, r *http.Request) {
 		}
 		f := task.state.Job.Workflow.Factory
 		var brief strings.Builder
-		fmt.Fprintf(&brief, "Task requirements:\n%s\n", task.issue.Body)
+		fmt.Fprintf(&brief, "Task requirements:\n%s\n", state.Job.Task.Spec)
 		for _, stage := range []string{"triage", "spec", "implement", "review"} {
 			if report := task.state.Reports[stage]; report != "" {
 				fmt.Fprintf(&brief, "\n%s handoff:\n%s\n", stage, report)

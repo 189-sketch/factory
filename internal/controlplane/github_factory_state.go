@@ -15,25 +15,26 @@ import (
 const GitHubFactoryMarker = "<!-- machinist:v1 -->\n"
 
 type GitHubFactoryEvent struct {
-	FollowupIDs    []string             `json:"followup_ids,omitempty"`
-	ExitCode       *int                 `json:"exit_code,omitempty"`
-	Error          string               `json:"error,omitempty"`
-	TokenUsage     *int64               `json:"token_usage,omitempty"`
-	DurationMillis *int64               `json:"duration_millis,omitempty"`
-	Recipe         string               `json:"recipe,omitempty"`
-	Version        int                  `json:"version"`
-	Previous       int64                `json:"previous"`
-	Kind           string               `json:"kind"`
-	RunID          string               `json:"run_id,omitempty"`
-	Role           string               `json:"role,omitempty"`
-	Prompt         string               `json:"prompt,omitempty"`
-	PromptHash     string               `json:"prompt_hash,omitempty"`
-	Executor       string               `json:"executor,omitempty"`
-	Model          string               `json:"model,omitempty"`
-	WorkerName     string               `json:"worker_name,omitempty"`
-	Result         *protocol.StepResult `json:"result,omitempty"`
-	Feedback       string               `json:"feedback,omitempty"`
-	Stopped        bool                 `json:"stopped,omitempty"`
+	ProjectInstructions string               `json:"project_instructions,omitempty"`
+	FollowupIDs         []string             `json:"followup_ids,omitempty"`
+	ExitCode            *int                 `json:"exit_code,omitempty"`
+	Error               string               `json:"error,omitempty"`
+	TokenUsage          *int64               `json:"token_usage,omitempty"`
+	DurationMillis      *int64               `json:"duration_millis,omitempty"`
+	Recipe              string               `json:"recipe,omitempty"`
+	Version             int                  `json:"version"`
+	Previous            int64                `json:"previous"`
+	Kind                string               `json:"kind"`
+	RunID               string               `json:"run_id,omitempty"`
+	Role                string               `json:"role,omitempty"`
+	Prompt              string               `json:"prompt,omitempty"`
+	PromptHash          string               `json:"prompt_hash,omitempty"`
+	Executor            string               `json:"executor,omitempty"`
+	Model               string               `json:"model,omitempty"`
+	WorkerName          string               `json:"worker_name,omitempty"`
+	Result              *protocol.StepResult `json:"result,omitempty"`
+	Feedback            string               `json:"feedback,omitempty"`
+	Stopped             bool                 `json:"stopped,omitempty"`
 }
 
 type GitHubFactoryState struct {
@@ -81,6 +82,10 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			return nil, fmt.Errorf("journal comment %d has unsupported version or broken chain", comment.ID)
 		}
 		if event.Kind == "created" {
+			if event.ProjectInstructions != "" {
+				s.Job.Task.Spec += "\n\n## Project instructions\n" + event.ProjectInstructions
+				s.Job.Prompt = s.Job.Task.Spec
+			}
 			recipe := event.Recipe
 			if recipe == "" {
 				recipe = "factory"
