@@ -2,36 +2,50 @@ import { useMemo, useState } from "react";
 import { ArrowRight, Clock3, Plus, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeading } from "@/components/ui/page-heading";
-import { dashboardState } from "./dashboard-state.js";
+import { dashboardState, workQueueState, queueSummary } from "./dashboard-state.js";
 import { jobDisplayTitle } from "./runs-board.js";
-import { StageProgress } from "./stage-progress.jsx";
-import { State, relativeTime } from "./task-display.jsx";
+import { State } from "./task-display.jsx";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 
 const jobURL = job => `#/runs/${encodeURIComponent(job.id)}`;
-export function Dashboard({ jobs = [], workers = [], automations, loaded, error, onNewRun, now }) {
-  const [days, setDays] = useState("7");
-  const view = useMemo(() => dashboardState({ jobs, workers, automations, days, loaded, error, now }), [jobs, workers, automations, days, loaded, error, now]);
+export function Dashboard({ jobs = [], repositories = [], connected, loaded, error, onNewRun }) {
+  const [project, setProject] = useState("");
+  const view = workQueueState({ jobs, repositories, project, loaded, error });
   return <div className="runs-page dashboard-page">
-    <PageHeading title="Dashboard" description="A clear view of your agents and their work.">
+    <PageHeading title="Dashboard" description="Your daily work queue.">
       <Button onClick={onNewRun}><Plus className="size-4" />New run</Button>
     </PageHeading>
-    {view.kind === "error" ? <div role="alert" className="dashboard-error"><h2>Dashboard unavailable</h2><p>{view.message}</p><p>Reconnecting automatically. Work and metrics will return when the connection is restored.</p></div> : view.kind === "loading" ? <p role="status" className="dashboard-empty">Loading your workspace…</p> : <>
-      <section className="dashboard-overview" aria-label="Current workload, all time">
-        <Overview label="Active jobs" value={view.active.length} detail={`${view.running} running · ${view.queued} queued`} href="#/runs?filter=active" tone="primary" />
-        <Overview label="PRs ready" value={view.ready.length} detail="Waiting for your review and merge" href="#/runs?filter=pr_ready" tone="info" />
-        <Overview label="Needs attention" value={view.attention.length} detail="Approvals, blockers and failures" href="#/runs?filter=attention" tone="warning" />
-      </section>
+    <div className="queue-toolbar"><label>Project <select value={project} onChange={event => setProject(event.target.value)}>
+      <option value="">All projects</option>
+      {view.projects.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+    </select></label><a href="#/runs">Run history</a><a href="#/activity">Activity</a></div>
+    {connected === false && <p className="dashboard-empty">GitHub is disconnected. Recorded work is still available. <a href="#/setup">Connection settings</a></p>}
+    {view.kind === "error" ? <div role="alert" className="dashboard-error"><h2>Dashboard unavailable</h2><p>{view.message}</p><p>Reconnecting automatically.</p></div> : view.kind === "loading" ? <p role="status">Loading your workspace…</p> : <>
+      {view.empty && <p className="dashboard-empty">{project ? "No work for this project. Choose another project or start a new run." : "No work yet. Start a new run to fill your queue."}</p>}
+      <Queue title="Needs you" jobs={view.attention} empty="No decisions or blockers need your attention." />
+      <Queue title="Working now" jobs={view.active} empty="No work is running or queued." />
+      <Queue title="Ready to review" jobs={view.ready} empty="No work is waiting for review." />
+      <Queue title="Recent outcomes" jobs={view.recent} empty="No recent outcomes for this project." />
+    </>}
+  </div>;
+}
 
-      {jobs.length === 0 && <section className="dashboard-welcome"><h2>Start with one useful job</h2><p>Give an agent a task, connect an issue, or save a recurring automation. Its progress and results will appear here.</p><div><Button variant="outline" onClick={onNewRun}>Create your first run<ArrowRight className="size-3.5" /></Button><a href="#/automations">Set up an automation</a></div></section>}
+function Queue({ title, jobs, empty }) {
+  return <section className="work-queue" aria-label={title}><h2>{title}</h2>
+    {jobs.length ? <ul>{jobs.map(job => <li key={job.id} className="work-queue-row">
+      <div className="work-queue-task"><small>{job.repository || "No project recorded"}</small><a href={jobURL(job)}>{jobDisplayTitle(job)}</a><p>{queueSummary(job)}</p></div>
+      <State value={job.state} compact />
+      <a className="queue-action" href={jobURL(job)}>{job.publication_hold ? "Review hold" : job.state === "awaiting_merge" ? "Review run" : job.state === "awaiting_approval" ? "Review approval" : dashboardAction(job)}</a>
+    </li>)}</ul> : <p className="dashboard-empty">{empty}</p>}
+  </section>;
+}
+const dashboardAction = job => ["blocked", "failed", "timed_out", "interrupted"].includes(job.state) ? "View blocker" : ["running", "queued"].includes(job.state) ? "View progress" : "View result";
 
-      {(view.active.length > 0 || view.ready.length > 0 || view.attention.length > 0) && <section className="dashboard-priorities" aria-labelledby="priority-heading"><header className="dashboard-section-heading"><div><h2 id="priority-heading">Keep work moving</h2><p>Current work across all dates.</p></div><a href="#/runs">View runs<ArrowRight className="size-3.5" /></a></header><div className="dashboard-priority-columns">
-        {view.active.length > 0 && <Priority title="In progress" jobs={view.active} href="#/runs?filter=active" />}
-        {view.ready.length > 0 && <Priority title="Ready to merge" jobs={view.ready} href="#/runs?filter=pr_ready" />}
-        {view.attention.length > 0 && <Priority title="Needs attention" jobs={view.attention} href="#/runs?filter=attention" />}
-      </div></section>}
-
-
+export function ActivityPage({ jobs = [], workers = [], automations, loaded, error, now }) {
+  const [days, setDays] = useState("7");
+  const view = useMemo(() => dashboardState({ jobs, workers, automations, days, loaded, error, now }), [jobs, workers, automations, days, loaded, error, now]);
+  return <div className="runs-page dashboard-page"><PageHeading title="Activity" description="Recorded job activity and resource usage." />
+    {view.kind === "error" ? <div role="alert">Activity unavailable: {view.message}</div> : view.kind === "loading" ? <p role="status">Loading activity…</p> : <>
       <div className="dashboard-columns">
         <section className="dashboard-activity" aria-labelledby="activity-heading">
           <header className="dashboard-section-heading"><div><h2 id="activity-heading">Job activity</h2><p>Jobs created in the selected window.</p></div><label className="dashboard-window"><span className="sr-only">Time window</span><select aria-label="Time window" value={days} onChange={event => setDays(event.target.value)}><option value="7">Last 7 days</option><option value="30">Last 30 days</option></select></label></header>
@@ -47,19 +61,10 @@ export function Dashboard({ jobs = [], workers = [], automations, loaded, error,
         </section>
       </div>
 
-      <section className="dashboard-recent" aria-labelledby="recent-heading"><header className="dashboard-section-heading"><div><h2 id="recent-heading">Recent jobs</h2><p>Latest updates to jobs created in this window.</p></div><a href="#/runs">All runs<ArrowRight className="size-3.5" /></a></header>
-        {view.recent.length ? <div className="dashboard-job-list">{view.recent.map(job => <div key={job.id} className="dashboard-job-row"><a href={jobURL(job)} className="dashboard-job-title"><strong>{jobDisplayTitle(job)}</strong><span>{job.repository || "No repository"}</span></a><div className="dashboard-job-stage"><StageProgress job={job} /></div><State value={job.state} compact /><time dateTime={job.updated_at || job.created_at}>{relativeTime(job.updated_at || job.created_at)}</time></div>)}</div> : <p className="dashboard-empty">No jobs created in the last {days} days. Choose a wider window or start a new run.</p>}
-      </section>
     </>}
   </div>;
 }
 
-function Overview({ label, value, detail, href, tone }) {
-  return <a className={`dashboard-stat dashboard-stat-${tone}`} href={href}><div><span>{label}</span><ArrowRight className="size-3.5" /></div><strong>{value}</strong><small>{detail}</small></a>;
-}
-function Priority({ title, jobs, href }) {
-  return <div className="dashboard-priority"><h3>{title}<span>{jobs.length}</span></h3><>{jobs.slice(0, 3).map(job => <a key={job.id} href={jobURL(job)}><strong>{jobDisplayTitle(job)}</strong><small>{job.repository}</small><State value={job.state} compact /></a>)}{jobs.length > 3 && <a className="dashboard-see-all" href={href}>View all {jobs.length}<ArrowRight className="size-3.5" /></a>}</></div>;
-}
 export function ActivityChart({ dates }) {
   const peak = Math.max(0, ...dates.map(day => day.count));
   const max = Math.max(1, peak);

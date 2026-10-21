@@ -1,4 +1,4 @@
-const pages = new Set(["repositories", "runners", "setup", "agents", "automations", "settings", "runs", "dashboard", "analytics", "workers", "triggers"]);
+const pages = new Set(["repositories", "runners", "setup", "agents", "automations", "settings", "runs", "dashboard", "analytics", "activity", "workers", "triggers"]);
 
 export function routeFromHash(hash) {
   const value = hash.replace(/^#\//, "");
@@ -9,7 +9,8 @@ export function routeFromHash(hash) {
       return { view: "runs", jobID: "" };
     }
   }
-  if (!value || value === "analytics" || value === "dashboard") return { view: "dashboard", jobID: "" };
+  if (!value || value === "dashboard") return { view: "dashboard", jobID: "" };
+  if (value === "analytics") return { view: "activity", jobID: "" };
   if (value === "inbox") return { view: "runs", jobID: "", filter: "attention" };
   if (value.startsWith("runs?")) {
     const filter = new URLSearchParams(value.slice(5)).get("filter");

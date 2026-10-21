@@ -140,9 +140,9 @@ test("runDetails always surfaces the executor, even when a worker has claimed th
   assert.equal(runDetails(unassigned), "claude · opus");
 });
 
-test("dashboard keeps reported usage and timing secondary to current work", async () => {
+test("Activity retains reported usage and timing", async () => {
   const source = await readFile(new URL("./analytics.jsx", import.meta.url), "utf8");
-  for (const label of ["Dashboard", "Active jobs", "PRs ready", "Needs attention", "Job activity", "Timed agent execution", "Reported tokens", "Not reported", "Recent jobs"]) {
+  for (const label of ["Activity", "Job activity", "Timed agent execution", "Reported tokens", "Not reported"]) {
     assert.match(source, new RegExp(label));
   }
 });
