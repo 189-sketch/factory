@@ -91,6 +91,14 @@ Local workers start automatically. VM workers use a private pairing script and
 an operator-created SSH tunnel. The app neither provisions SSH nor exposes a
 public listener. Agents are shared across configured projects.
 
+Project run-mode defaults and short instructions live in the existing atomic
+onboarding settings file. The authenticated Projects editor changes only this
+submission metadata, so running workers and job history are unaffected. New
+interactive submissions resolve omitted choices from project defaults; explicit
+choices win, and the admitted prompt stores the instructions used. Submission
+receipts are checked before defaults so retrying a request preserves its job.
+Projects do not override the shared agent or model configuration.
+
 ## Kubernetes execution
 
 `internal/kuberunner` launches a fixed digest-pinned gVisor Job per attempt. Pods

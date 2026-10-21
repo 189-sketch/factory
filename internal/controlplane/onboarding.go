@@ -38,13 +38,19 @@ type setupCheck struct {
 	State   string `json:"state"`
 	Message string `json:"message"`
 }
+type projectDefaults struct {
+	Recipe       string `json:"recipe"`
+	Instructions string `json:"instructions"`
+}
+
 type setupSettings struct {
-	Repositories map[string]string `json:"repositories,omitempty"`
-	ClientID     string            `json:"client_id"`
-	InstallURL   string            `json:"install_url"`
-	Selection    setupSelection    `json:"selection"`
-	Check        setupCheck        `json:"check"`
-	Finished     bool              `json:"finished"`
+	ProjectDefaults map[string]projectDefaults `json:"project_defaults,omitempty"`
+	Repositories    map[string]string          `json:"repositories,omitempty"`
+	ClientID        string                     `json:"client_id"`
+	InstallURL      string                     `json:"install_url"`
+	Selection       setupSelection             `json:"selection"`
+	Check           setupCheck                 `json:"check"`
+	Finished        bool                       `json:"finished"`
 }
 type LocalWorker interface {
 	Run(context.Context) error
@@ -144,6 +150,7 @@ func (o *onboarding) snapshot() setupSettings {
 	defer o.mu.Unlock()
 	state := o.settings
 	state.Repositories = state.projectPaths()
+	state.ProjectDefaults = maps.Clone(state.ProjectDefaults)
 	return state
 }
 func (o *onboarding) status(ctx context.Context) (map[string]any, error) {
@@ -187,7 +194,7 @@ func (o *onboarding) status(ctx context.Context) (map[string]any, error) {
 	if definition, err := config.LoadConfig(o.server.definitionPath); err == nil {
 		kubernetes = definition.Server.Kubernetes != nil
 	}
-	return map[string]any{"kubernetes": kubernetes, "required": !state.Finished || !ready, "github": github, "repositories": repos, "selection": state.Selection, "agents": agents, "worker": worker, "ready": ready, "check": state.Check}, nil
+	return map[string]any{"project_defaults": state.ProjectDefaults, "kubernetes": kubernetes, "required": !state.Finished || !ready, "github": github, "repositories": repos, "selection": state.Selection, "agents": agents, "worker": worker, "ready": ready, "check": state.Check}, nil
 }
 func urlForLocal(base string) (string, error) {
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(base, "http://"))

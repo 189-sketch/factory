@@ -58,16 +58,17 @@ type statusResponse struct {
 }
 
 type submitRequest struct {
-	Recipe          string `json:"recipe"`
-	ClientRequestID string `json:"client_request_id"`
-	Title           string `json:"title"`
-	SourceURL       string `json:"source_url"`
-	Spec            string `json:"spec"`
-	Workflow        string `json:"workflow"`
-	Prompt          string `json:"prompt"`
-	Repository      string `json:"repository"`
-	Command         string `json:"command"`
-	Model           string `json:"model"`
+	ProjectInstructions *string `json:"project_instructions,omitempty"`
+	Recipe              string  `json:"recipe"`
+	ClientRequestID     string  `json:"client_request_id"`
+	Title               string  `json:"title"`
+	SourceURL           string  `json:"source_url"`
+	Spec                string  `json:"spec"`
+	Workflow            string  `json:"workflow"`
+	Prompt              string  `json:"prompt"`
+	Repository          string  `json:"repository"`
+	Command             string  `json:"command"`
+	Model               string  `json:"model"`
 }
 
 type commandDefinitionResponse struct {

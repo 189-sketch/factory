@@ -174,6 +174,7 @@ func (s *GitHubFactoryServer) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/onboarding/repositories", s.onboardingRepositories)
 	mux.HandleFunc("GET /api/v1/onboarding/worker-config", s.onboardingWorkerConfig)
 	mux.HandleFunc("POST /api/v1/onboarding/{action...}", s.auth.authorizeSubmission(s.onboardingAction))
+	mux.HandleFunc("PUT /api/v1/projects/defaults", s.auth.authorizeSubmission(s.updateProjectDefaults))
 	mux.HandleFunc("POST /api/v1/projects", s.auth.authorizeSubmission(s.addProject))
 	mux.HandleFunc("GET /api/v1/catalog", s.catalog)
 	mux.HandleFunc("GET /api/v1/definitions", s.definitions)
@@ -524,29 +525,6 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errors.New("choose a recipe; executors and models use the configured agent profile"))
 		return
 	}
-	recipe := input.Recipe
-	if recipe == "" {
-		recipe = "factory"
-	}
-	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
-		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
-		return
-	}
-	if recipe == "native-v1" {
-		definition, loadErr := config.LoadDefinitions(s.definitionPath)
-		if loadErr != nil {
-			writeError(w, 400, loadErr)
-			return
-		}
-		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
-			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
-			return
-		}
-		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
-			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
-			return
-		}
-	}
 	if len(input.ClientRequestID) > 128 || strings.TrimSpace(input.ClientRequestID) != input.ClientRequestID {
 		writeError(w, 400, errors.New("invalid client request ID"))
 		return
@@ -576,6 +554,46 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			writeError(w, 500, err)
+			return
+		}
+	}
+	defaults := projectDefaults{}
+	selection := setupSelection{}
+	if s.setup != nil {
+		state := s.setup.snapshot()
+		defaults = state.ProjectDefaults[repo]
+		selection = state.Selection
+	}
+	if input.Recipe != "" {
+		defaults.Recipe = input.Recipe
+	}
+	if input.ProjectInstructions != nil {
+		defaults.Instructions = strings.TrimSpace(*input.ProjectInstructions)
+	}
+	if err := validateProjectDefaults(defaults, selection); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	recipe := defaults.Recipe
+	if recipe == "" {
+		recipe = "factory"
+	}
+	if recipe != "factory" && recipe != "single" && recipe != "native-v1" {
+		writeError(w, 400, errors.New("choose the standard factory pipeline or single agent"))
+		return
+	}
+	if recipe == "native-v1" {
+		definition, loadErr := config.LoadDefinitions(s.definitionPath)
+		if loadErr != nil {
+			writeError(w, 400, loadErr)
+			return
+		}
+		if _, resolveErr := definition.ResolveCommand("primary"); resolveErr != nil {
+			writeError(w, 400, errors.New("configure commands.primary with an executor and prompt_file before submitting native-agent runs"))
+			return
+		}
+		if s.setup != nil && s.setup.snapshot().Selection.Host == "kubernetes" {
+			writeError(w, 400, errors.New("native-agent runs require a host worker; select Single agent for the existing Kubernetes contract"))
 			return
 		}
 	}
@@ -639,6 +657,18 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(existing) > 0 {
+		// Keep the admitted prompt, including its instructions, when linking again.
+		stored, err := s.local.tasks(r.Context())
+		if err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		for _, task := range stored {
+			if task.issue.HTMLURL == issue.HTMLURL {
+				issue = task.issue
+				break
+			}
+		}
 		current, reduceErr := s.reduceLocal(issue, existing, input.Repository)
 		if reduceErr != nil {
 			writeError(w, 409, reduceErr)
@@ -649,7 +679,13 @@ func (s *GitHubFactoryServer) submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}, input.ClientRequestID, fingerprint, input.Recipe); err != nil {
+	if len(existing) == 0 {
+		instructions := defaults.Instructions
+		if instructions != "" {
+			issue.Body += "\n\n## Project instructions\n" + instructions
+		}
+	}
+	if err = s.local.createRequest(r.Context(), localFactoryTask{issue: issue, repository: repo, alias: input.Repository}, input.ClientRequestID, fingerprint, recipe); err != nil {
 		writeError(w, 500, err)
 		return
 	}
