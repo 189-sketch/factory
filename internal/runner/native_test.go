@@ -2,11 +2,14 @@ package runner
 
 import (
 	"encoding/json"
+	"github.com/owainlewis/machinist/internal/config"
+	"github.com/owainlewis/machinist/internal/protocol"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type nativeInput struct {
@@ -207,5 +210,66 @@ func TestNativeCodexReadsRoleWithoutChangingLifecycle(t *testing.T) {
 	feedNative(t, n, `{"id":102,"error":{"code":-1,"message":"metadata unavailable"}}`+"\n")
 	if n.active["other"].Role != "" {
 		t.Fatal("invented missing role")
+	}
+}
+
+func TestClaudeFactoryUsesStructuredDeliveryRatherThanProse(t *testing.T) {
+	const delivery = `{"outcome":"complete","summary":"Delivered","delivery":{"pr_url":"https://github.com/owner/repo/pull/1","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","branch":"codex/task"}}`
+	output := `{"type":"result","is_error":false,"result":"Human explanation before a fenced JSON object", "structured_output":` + delivery + `}` + "\n"
+	command := claudeAgent(t, `cat >/dev/null; found=0; for arg in "$@"; do if [ "$arg" = --json-schema ]; then found=1; fi; done; test "$found" = 1 || exit 8; printf '%s' '`+output+`'`, 5*time.Second)
+	command.Adapter = "claude-stream"
+	result, err := Execute(t.Context(), Options{Workflow: true, Factory: &protocol.FactoryContext{Recipe: "native-v1", Role: "primary", Branch: "codex/task"}, Command: command, Repository: newGitRepository(t), DataDirectory: t.TempDir(), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StepResult == nil || result.StepResult.Factory.PRURL != "https://github.com/owner/repo/pull/1" || result.StepResult.Factory.Branch != "codex/task" {
+		t.Fatalf("delivery lost: %+v", result.StepResult)
+	}
+}
+
+func TestClaudeStructuredDeliveryCannotFallBackToProseOrChild(t *testing.T) {
+	for _, raw := range []string{"", `,"structured_output":null`, `,"structured_output":{"outcome":"complete","summary":"","unexpected":true}`} {
+		n, _, _ := testNative(t, "claude-stream")
+		n.structuredResult = true
+		line := `{"type":"result","is_error":false,"result":"{\"outcome\":\"complete\",\"summary\":\"prose fallback\"}"` + raw + `}`
+		err := n.line([]byte(line))
+		if err == nil {
+			_, err = parseNativeResult(n.lastMessage())
+		}
+		if err == nil {
+			t.Fatal("missing or invalid structured result accepted")
+		}
+	}
+	n, _, _ := testNative(t, "claude-stream")
+	n.structuredResult = true
+	feedNative(t, n, `{"type":"result","parent_tool_use_id":"child","is_error":false,"structured_output":{"outcome":"complete","summary":"child"}}`+"\n")
+	if n.completed || n.lastMessage() != "" {
+		t.Fatal("child delivered primary result")
+	}
+	if _, err := parseNativeResult(`Explanation: {"outcome":"complete","summary":"Done"}`); err == nil || !strings.Contains(err.Error(), "expected one JSON object") {
+		t.Fatalf("unclear result error: %v", err)
+	}
+}
+
+func TestNativeSchemaOnlyAppliesToFactoryClaude(t *testing.T) {
+	command := config.ResolvedCommand{Executor: "claude", Adapter: "claude-stream", Command: []string{"claude", "-p"}}
+	for _, factory := range []bool{false, true} {
+		argv, err := nativeCommand(command, factory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, arg := range argv {
+			if arg == "--json-schema" {
+				found = true
+			}
+		}
+		if found != factory {
+			t.Fatalf("factory=%v argv=%v", factory, argv)
+		}
+	}
+	command.Command = append(command.Command, "--json-schema", `{}`)
+	if _, err := nativeCommand(command, true); err == nil {
+		t.Fatal("conflicting schema accepted")
 	}
 }

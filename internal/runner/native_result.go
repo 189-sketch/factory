@@ -3,11 +3,15 @@ package runner
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
 	"github.com/owainlewis/machinist/internal/protocol"
 )
+
+// Claude's structured-output channel is separate from its human-readable result.
+const nativeResultSchema = `{"type":"object","additionalProperties":false,"required":["outcome","summary"],"properties":{"outcome":{"type":"string","enum":["complete","blocked","failed"]},"summary":{"type":"string","minLength":1},"delivery":{"type":"object","additionalProperties":false,"required":["pr_url","head_sha","branch"],"properties":{"pr_url":{"type":"string"},"head_sha":{"type":"string"},"branch":{"type":"string"}}}}}`
 
 // Only the boundary translates to the historical storage envelope. The primary
 // sees no stage routing fields, repair loops or synthetic review verdicts.
@@ -28,7 +32,7 @@ func parseNativeResult(message string) (*protocol.StepResult, error) {
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid primary delivery result: expected one JSON object: %w", err)
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, errors.New("primary result must contain one JSON object")

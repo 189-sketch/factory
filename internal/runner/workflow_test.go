@@ -114,3 +114,12 @@ func TestNativePRGuidancePreservesNativeResultContract(t *testing.T) {
 		}
 	}
 }
+
+func TestNativePromptCarriesAssignedDeliveryContext(t *testing.T) {
+	prompt := factoryPrompt(&protocol.FactoryContext{Recipe: "native-v1", Branch: "codex/assigned", PRURL: "https://github.com/owner/repo/pull/3", HeadSHA: strings.Repeat("a", 40)}, "/workspace")
+	for _, want := range []string{`"branch":"codex/assigned"`, `"pr_url":"https://github.com/owner/repo/pull/3"`, `"head_sha":"` + strings.Repeat("a", 40) + `"`, "Do not create or switch branches", "ONLY one raw JSON object"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+}

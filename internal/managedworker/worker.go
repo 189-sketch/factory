@@ -249,6 +249,11 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		ctx = context.WithValue(ctx, commandEnvironmentKey{}, env)
 	}
 	if spec.Factory != nil {
+		factory := *spec.Factory
+		spec.Factory = &factory
+		if factory.Branch == "" && factory.Role != "review" {
+			factory.Branch = "codex/" + spec.JobID
+		}
 		if spec.Task != nil && spec.Task.SourceURL != "" {
 			if err := validateSourceRepository(repositoryCommand(ctx, repository), spec.Task.SourceURL); err != nil {
 				completion.Error = err.Error()
@@ -377,7 +382,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	}
 	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || (spec.Factory.Recipe == "single" || spec.Factory.Recipe == "native-v1") || spec.Factory.Role == "triage") {
 		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
-		if (stateErr != nil || after != answerHead) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
+		if runErr == nil && (stateErr != nil || after != answerHead) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
 			completion.State = "succeeded"
 			completion.ExitCode = 0
 			blocked := protocol.StepResult{Outcome: "blocked", Summary: "The task changed files without valid PR delivery; preserve the work and deliver the requested changes through the assigned PR", Factory: &protocol.FactoryResult{Version: 1, Role: spec.Factory.Role, Report: "Workspace/delivery validation failed"}}
