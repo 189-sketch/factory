@@ -1,9 +1,11 @@
-FROM golang:1.26.6-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.6-bookworm AS build
+ARG TARGETARCH
+ARG VERSION=development
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /machinist ./cmd/machinist
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-X main.version=${VERSION}" -o /machinist ./cmd/machinist
 
 FROM node:22.22.2-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl python3 build-essential && rm -rf /var/lib/apt/lists/*

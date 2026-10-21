@@ -98,6 +98,8 @@ the running dispatcher does not. Reconnect the tunnel after replacing the Pod.
 For a public browser endpoint, add HTTPS and identity protection first. Do not
 expose the existing unauthenticated loopback API directly.
 
+For CI-gated main-branch deployments, see [continuous deployment](continuous-deployment.md).
+
 ## Recovery and updates
 
 For an existing deployment, use this update sequence:
