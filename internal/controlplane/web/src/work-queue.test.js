@@ -74,3 +74,8 @@ test("queue rendering keeps reports out of rows and exposes loading and errors",
   const failed=renderToStaticMarkup(React.createElement(Dashboard,{jobs,loaded:true,error:"offline"}));
   assert.match(failed,/Dashboard unavailable/);assert.doesNotMatch(failed,/Fixed the regression/);
 });
+
+test("known runner failures have readable summaries without implying current system health", () => {
+ assert.match(queueSummary(job("bad-result","failed",{runs:[{error:"sandbox agent: json: cannot unmarshal object into Go struct field FactoryResult.factory.report of type string"}]})),/result Machinist could not read/);
+ assert.match(queueSummary(job("expired","failed",{runs:[{error:"Google Cloud login has expired or is unavailable; run gcloud auth login"}]})),/unavailable for this attempt/);
+});

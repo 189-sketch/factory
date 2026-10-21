@@ -82,7 +82,10 @@ function shortEvidence(value) {
 export function queueSummary(job) {
   if (job.publication_hold) return "Publication held private. Review the hold before publishing.";
   const { result: run } = taskPresentation(job);
-  const evidence = shortEvidence(run?.error) || shortEvidence(run?.summary);
+  const recordedError = typeof run?.error === "string" ? run.error : "";
+  if (/json: cannot unmarshal/i.test(recordedError)) return "The agent returned a result Machinist could not read. Open the run for details.";
+  if (/Google Cloud login has expired or is unavailable/i.test(recordedError)) return "Cloud sign-in was unavailable for this attempt. Check the runner connection.";
+  const evidence = shortEvidence(recordedError) || shortEvidence(run?.summary);
   if (evidence) return evidence;
   return ({ queued: "Queued; waiting to start.", running: "Work is running; no summary recorded yet.", awaiting_approval: "Approval required.", awaiting_merge: "Waiting for review.", blocked: "Blocked; no explanation recorded.", interrupted: "Work interrupted.", failed: "Work failed; no explanation recorded.", timed_out: "Work timed out.", cancelled: "Work cancelled.", succeeded: "Work completed; no summary recorded." })[job.state] || "No summary recorded.";
 }
