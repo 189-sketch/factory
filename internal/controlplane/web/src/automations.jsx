@@ -3,12 +3,13 @@ import { Clock3, Play, Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeading } from "@/components/ui/page-heading";
 import { State } from "./task-display.jsx";
+import { automationNextRun, automationOutcome, outcomeText } from "./automation-outcome.js";
 
 const presets = [["", "Manual only"], ["0 * * * *", "Every hour"], ["0 9 * * *", "Daily at 09:00"], ["0 9 * * 1-5", "Weekdays at 09:00"], ["0 9 * * 1", "Mondays at 09:00"]];
 const dateLabel = value => value ? new Date(value).toLocaleString(undefined, { timeZoneName: "short" }) : "";
 export function automationSchedule(a) {
   if (!a.cron) return "Manual only";
-  return `${presets.find(([value]) => value === a.cron)?.[1] || a.cron} · ${a.timezone}${a.paused ? " · Paused" : ""}`;
+  return `${a.paused ? "Paused" : "Scheduled"} · ${presets.find(([value]) => value === a.cron)?.[1] || a.cron} · ${a.timezone}`;
 }
 
 export function AutomationsPage({ automations = [], jobs = [], repositories = [], csrfToken, loaded, error, onRefresh }) {
@@ -69,6 +70,9 @@ export function AutomationsPage({ automations = [], jobs = [], repositories = []
 }
 
 function AutomationRow({ automation: a, job, pending, editing, confirmStopped, onAction, onEdit }) {
+  const outcome = automationOutcome(a, job);
+  const nextRun = automationNextRun(a);
+  const scheduleError = outcomeText(a.last_error);
   const busy = a.busy || (job && !["succeeded", "failed", "cancelled"].includes(job.state));
   const waiting = {
     queued: "Run queued.",
@@ -82,15 +86,17 @@ function AutomationRow({ automation: a, job, pending, editing, confirmStopped, o
       <h2>{a.name}</h2>
       <p>{a.repository}{a.kind === "repository-maintenance" ? " · Repository maintenance" : ""}</p>
       <p className="automation-schedule"><Clock3 className="size-3.5 shrink-0" aria-hidden="true" />{automationSchedule(a)}</p>
-      {a.next_due && <p>Next: <time dateTime={a.next_due}>{dateLabel(a.next_due)}</time></p>}
-      {a.last_error && <p className="text-warning">{a.last_error}</p>}
+      {nextRun && <p>Next: <time dateTime={nextRun}>{dateLabel(nextRun)}</time></p>}
+      {scheduleError && !outcome.held && <p className="text-warning">Scheduling error: {scheduleError}</p>}
     </div>
     <div className="automation-result">
       {a.last_job ? <>
-        <div className="automation-result-heading"><a href={`#/runs/${a.last_job}`}>Last run<span className="sr-only"> {a.name}</span></a>{job && <State value={job.state} compact />}</div>
+        <div className="automation-result-heading"><a href={`#/runs/${encodeURIComponent(a.last_job)}`}>Last run<span className="sr-only"> {a.name}</span></a>{job && <State value={job.state} compact />}</div>
         {a.last_run && <time dateTime={a.last_run}>{dateLabel(a.last_run)}</time>}
-        {busy && <span>{waiting}</span>}
-      </> : <span>No runs yet</span>}
+        <p>{outcome.text}</p>
+        {outcome.link && <a href={outcome.link.href} target={outcome.link.external ? "_blank" : undefined} rel={outcome.link.external ? "noreferrer" : undefined}>{outcome.link.label}</a>}
+        {busy && !outcome.held && outcome.text !== waiting && <span>{waiting}</span>}
+      </> : <span>Never run</span>}
     </div>
     <div className="automation-actions">
       {(confirmStopped || a.needs_stop_confirmation) && <Button variant="outline" size="sm" disabled={Boolean(pending) || editing} onClick={() => onAction(a, "run", true)}>Confirm stopped and run</Button>}
