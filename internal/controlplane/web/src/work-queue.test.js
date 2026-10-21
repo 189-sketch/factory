@@ -81,10 +81,11 @@ test("known runner failures have readable summaries without implying current sys
 });
 
 test("queue reasons and recorded phases explain actual dispatch constraints", () => {
- for (const [reason, text] of [["cleanup_unconfirmed",/shutdown/],["global_capacity",/factory slot/],["repository_capacity",/project/],["awaiting_runner",/compatible runner/],["runner_busy",/current job/],["credential_serialization_possible",/one job at a time/]]) {
+ for (const [reason, text] of [["cleanup_unconfirmed",/confirmed stopped/],["global_capacity",/factory slot/],["repository_capacity",/project/],["awaiting_runner",/compatible runner/],["runner_busy",/current job/],["credential_serialization_possible",/one job at a time/]]) {
   assert.match(queueSummary(job("wait","queued",{waiting_reasons:[reason]})),text);
  }
  assert.match(queueSummary(job("work","running",{runs:[{state:"running",phase:"publishing"}]})),/Publishing/);
+ assert.equal(queueSummary(job("host","running",{runs:[{state:"running",phase:"running_agent"}]})),"Agent working.");
  assert.match(queueSummary(job("wait","queued",{waiting_reasons:["new_server_reason"]})),/waiting to start/);
 });
 

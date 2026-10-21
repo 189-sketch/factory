@@ -84,7 +84,7 @@ export function queueSummary(job) {
   if (job.state === "queued" && job.waiting_reasons?.length) {
     const reasons = new Set(job.waiting_reasons);
     for (const [reason, message] of [
-      ["cleanup_unconfirmed", "Waiting for the previous sandbox shutdown to be confirmed."],
+      ["cleanup_unconfirmed", "Waiting for previous agent processes to be confirmed stopped."],
       ["global_capacity", "Waiting for an available factory slot."],
       ["repository_capacity", "Waiting for this project's active job to finish."],
       ["awaiting_runner", "Waiting for a compatible runner."],
@@ -100,7 +100,7 @@ export function queueSummary(job) {
   const evidence = shortEvidence(recordedError) || shortEvidence(run?.summary);
   if (evidence) return evidence;
   if (job.state === "running") {
-    const phase = { starting_sandbox: "Preparing the isolated workspace.", running_agent: "Agent working in its sandbox.", publishing: "Publishing the task result.", completing: "Recording the task result." }[run?.phase];
+    const phase = { starting_sandbox: "Preparing the isolated workspace.", running_agent: "Agent working.", publishing: "Publishing the task result.", completing: "Recording the task result." }[run?.phase];
     if (phase) return phase;
   }
   return ({ queued: "Queued; waiting to start.", running: "Work is running; no summary recorded yet.", awaiting_approval: "Approval required.", awaiting_merge: "Waiting for review.", blocked: "Blocked; no explanation recorded.", interrupted: "Work interrupted.", failed: "Work failed; no explanation recorded.", timed_out: "Work timed out.", cancelled: "Work cancelled.", succeeded: "Work completed; no summary recorded." })[job.state] || "No summary recorded.";
