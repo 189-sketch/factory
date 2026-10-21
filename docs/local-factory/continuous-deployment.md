@@ -23,9 +23,11 @@ This creates the deployment service account and Workload Identity Federation
 provider in a dedicated pool, scoped to this repository's numeric identity, main branch and specific
 deployment workflow. It grants image publishing on the Machinist registry,
 cluster metadata access and namespace-scoped Kubernetes deployment permissions.
-The workflow cannot change IAM, network policies or the Codex Secret. Deployment
-access includes executing trusted code in the application namespace and mounting
-its private runtime, so protect main and the workflow as production authority.
+The deployment identity has no direct permission to administer IAM or network
+policies, or to read or change the Codex Secret. Deployment authority does include
+executing code in the application namespace and mounting its private runtime. It
+can therefore act through the application’s own credentials and service account.
+Protect main and the workflow as production authority.
 No service-account key or subscription token is added to GitHub. Bootstrap reruns
 restore the provider condition and refuse other providers in the dedicated pool.
 The trust uses the standard `workflow_ref` claim described in
