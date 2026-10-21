@@ -8,7 +8,7 @@ import { State } from "./task-display.jsx";
 import { formatDurationMillis, formatTokenUsage } from "./run-metrics.js";
 
 const jobURL = job => `#/runs/${encodeURIComponent(job.id)}`;
-export function Dashboard({ jobs = [], repositories = [], connected, loaded, error, onNewRun }) {
+export function Dashboard({ jobs = [], repositories = [], capacity, kubernetes, connected, loaded, error, onNewRun }) {
   const [project, setProject] = useState("");
   const view = workQueueState({ jobs, repositories, project, loaded, error });
   return <div className="runs-page dashboard-page">
@@ -19,6 +19,7 @@ export function Dashboard({ jobs = [], repositories = [], connected, loaded, err
       <option value="">All projects</option>
       {view.projects.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
     </select></label><a href="#/runs">Run history</a><a href="#/activity">Activity</a></div>
+    {Number.isSafeInteger(capacity?.effective_capacity_upper_bound) && <p className="queue-capacity">Connected runner capacity: up to {capacity.effective_capacity_upper_bound} active job{capacity.effective_capacity_upper_bound === 1 ? "" : "s"}. {kubernetes && capacity.kubernetes_credential_stream_parallelism === 1 && "Each Kubernetes Codex credential stream runs one job at a time."}</p>}
     {connected === false && <p className="dashboard-empty">GitHub is disconnected. Recorded work is still available. <a href="#/setup">Connection settings</a></p>}
     {view.kind === "error" ? <div role="alert" className="dashboard-error"><h2>Dashboard unavailable</h2><p>{view.message}</p><p>Reconnecting automatically.</p></div> : view.kind === "loading" ? <p role="status">Loading your workspace…</p> : <>
       {view.empty && <p className="dashboard-empty">{project ? "No work for this project. Choose another project or start a new run." : "No work yet. Start a new run to fill your queue."}</p>}

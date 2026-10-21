@@ -79,3 +79,22 @@ test("known runner failures have readable summaries without implying current sys
  assert.match(queueSummary(job("bad-result","failed",{runs:[{error:"sandbox agent: json: cannot unmarshal object into Go struct field FactoryResult.factory.report of type string"}]})),/result Machinist could not read/);
  assert.match(queueSummary(job("expired","failed",{runs:[{error:"Google Cloud login has expired or is unavailable; run gcloud auth login"}]})),/unavailable for this attempt/);
 });
+
+test("queue reasons and recorded phases explain actual dispatch constraints", () => {
+ for (const [reason, text] of [["cleanup_unconfirmed",/shutdown/],["global_capacity",/factory slot/],["repository_capacity",/project/],["awaiting_runner",/compatible runner/],["runner_busy",/current job/],["credential_serialization_possible",/one job at a time/]]) {
+  assert.match(queueSummary(job("wait","queued",{waiting_reasons:[reason]})),text);
+ }
+ assert.match(queueSummary(job("work","running",{runs:[{state:"running",phase:"publishing"}]})),/Publishing/);
+ assert.match(queueSummary(job("wait","queued",{waiting_reasons:["new_server_reason"]})),/waiting to start/);
+});
+
+test("capacity is shown only when reported, with credential serialization scoped to Kubernetes", async context => {
+ const server=await createServer({server:{middlewareMode:true,hmr:false},appType:"custom"});context.after(()=>server.close());
+ const {Dashboard}=await server.ssrLoadModule("/src/analytics.jsx");
+ const render=props=>renderToStaticMarkup(React.createElement(Dashboard,{loaded:true,...props}));
+ assert.doesNotMatch(render({}),/Connected runner capacity/);
+ const capacity={effective_capacity_upper_bound:1,kubernetes_credential_stream_parallelism:1};
+ assert.match(render({capacity,kubernetes:true}),/up to 1 active job/);
+ assert.match(render({capacity,kubernetes:true}),/credential stream/);
+ assert.doesNotMatch(render({capacity,kubernetes:false}),/credential stream/);
+});
