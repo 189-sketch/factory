@@ -268,12 +268,14 @@ func reconcileFactoryWorkspace(command evidenceCommand, remote string, factory *
 // result was lost. Adopt only an unambiguous, verified open PR at this clean HEAD.
 // No local refs or files are reset, deleted or switched during recovery.
 func recoverNativeDelivery(command evidenceCommand, remote, assigned, current string, factory *protocol.FactoryContext) error {
-	refs, err := command("git", "ls-remote", "--heads", remote, "refs/heads/"+assigned)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(string(refs)) != "" {
-		return fmt.Errorf("assigned branch already exists on GitHub; refusing ambiguous recovery")
+	if current != assigned {
+		refs, err := command("git", "ls-remote", "--heads", remote, "refs/heads/"+assigned)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(refs)) != "" {
+			return fmt.Errorf("assigned branch already exists on GitHub; refusing ambiguous recovery")
+		}
 	}
 	_, repo, err := factoryRemote(command)
 	if err != nil {
@@ -303,4 +305,25 @@ func recoverNativeDelivery(command evidenceCommand, remote, assigned, current st
 	}
 	factory.Branch, factory.HeadSHA, factory.PRURL = result.Branch, result.HeadSHA, result.PRURL
 	return nil
+}
+
+// Failed runs may retry only when their changed workspace has verified PR delivery.
+// Use a copy so completion checks do not change the dispatched task context.
+func nativeFailureHasPublishedDelivery(command evidenceCommand, factory *protocol.FactoryContext) bool {
+	if factory == nil || factory.Recipe != "native-v1" {
+		return false
+	}
+	if _, err := answerWorkspaceState(command); err != nil {
+		return false
+	}
+	remote, _, err := factoryRemote(command)
+	if err != nil {
+		return false
+	}
+	current, err := command("git", "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return false
+	}
+	copy := *factory
+	return recoverNativeDelivery(command, remote, factory.Branch, strings.TrimSpace(string(current)), &copy) == nil
 }

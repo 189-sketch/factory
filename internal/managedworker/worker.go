@@ -382,7 +382,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	}
 	if w.config.Kubernetes == nil && spec.Factory != nil && (spec.Factory.Recipe == "answer" || (spec.Factory.Recipe == "single" || spec.Factory.Recipe == "native-v1") || spec.Factory.Role == "triage") {
 		after, stateErr := answerWorkspaceState(repositoryCommand(ctx, repository))
-		if runErr == nil && (stateErr != nil || after != answerHead) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
+		if (stateErr != nil || after != answerHead) && (runErr == nil || !nativeFailureHasPublishedDelivery(repositoryCommand(ctx, repository), spec.Factory)) && ((spec.Factory.Recipe != "single" && spec.Factory.Recipe != "native-v1") || result.StepResult == nil || result.StepResult.Factory == nil || result.StepResult.Factory.PRURL == "") {
 			completion.State = "succeeded"
 			completion.ExitCode = 0
 			blocked := protocol.StepResult{Outcome: "blocked", Summary: "The task changed files without valid PR delivery; preserve the work and deliver the requested changes through the assigned PR", Factory: &protocol.FactoryResult{Version: 1, Role: spec.Factory.Role, Report: "Workspace/delivery validation failed"}}

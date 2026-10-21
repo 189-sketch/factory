@@ -156,7 +156,7 @@ func TestNativeRetryRecoversOnlyVerifiedPublishedBranch(t *testing.T) {
 	list := `[{"html_url":"https://github.com/owner/project/pull/12","head":{"ref":"docs/agent-branch","sha":"` + sha + `"}}]`
 	pr := `{"state":"open","head":{"ref":"docs/agent-branch","sha":"` + sha + `","repo":{"full_name":"owner/project"}},"base":{"repo":{"full_name":"owner/project"}}}`
 	base := map[string]string{
-		"git status --porcelain": "", "git symbolic-ref --short HEAD": "docs/agent-branch",
+		"git status --porcelain": "", "git status --porcelain --untracked-files=all": "", "git symbolic-ref --short HEAD": "docs/agent-branch",
 		"git ls-remote --heads origin refs/heads/codex/task": "",
 		"git remote": "origin", "git config --get remote.origin.url": "https://github.com/owner/project.git",
 		"gh api repos/owner/project/pulls?state=open&head=owner%3Adocs%2Fagent-branch&per_page=100": list,
@@ -166,6 +166,24 @@ func TestNativeRetryRecoversOnlyVerifiedPublishedBranch(t *testing.T) {
 		"git fetch origin refs/heads/docs/agent-branch":             "",
 		"git rev-parse FETCH_HEAD":                                  sha,
 	}
+	t.Run("failed result after publishing assigned branch", func(t *testing.T) {
+		factory := &protocol.FactoryContext{Recipe: "native-v1", Role: "primary", Branch: "docs/agent-branch"}
+		command := func(program string, args ...string) ([]byte, error) {
+			key := program + " " + strings.Join(args, " ")
+			value, ok := base[key]
+			if !ok {
+				return nil, fmt.Errorf("unexpected command: %s", key)
+			}
+			return []byte(value), nil
+		}
+		if !nativeFailureHasPublishedDelivery(command, factory) {
+			t.Fatal("verified assigned-branch delivery must remain retryable")
+		}
+		if factory.PRURL != "" {
+			t.Fatal("completion check mutated dispatched context")
+		}
+	})
+
 	for _, test := range []struct {
 		name, key, value string
 		fail             bool
@@ -185,13 +203,19 @@ func TestNativeRetryRecoversOnlyVerifiedPublishedBranch(t *testing.T) {
 			command := func(program string, args ...string) ([]byte, error) {
 				key := program + " " + strings.Join(args, " ")
 				value, ok := base[key]
-				if key == test.key {
+				if key == test.key || (test.key == "git status --porcelain" && key == "git status --porcelain --untracked-files=all") {
 					value = test.value
 				}
 				if !ok {
 					return nil, fmt.Errorf("unexpected command, must not discard scratch: %s", key)
 				}
 				return []byte(value), nil
+			}
+			if recoverable := nativeFailureHasPublishedDelivery(command, factory); recoverable == test.fail {
+				t.Fatalf("failed-run recovery=%v, expected %v", recoverable, !test.fail)
+			}
+			if factory.PRURL != "" {
+				t.Fatal("completion check changed dispatched context")
 			}
 			err := reconcileFactoryWorkspace(command, "origin", factory, "task")
 			if (err != nil) != test.fail {
