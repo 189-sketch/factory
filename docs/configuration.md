@@ -49,6 +49,16 @@ worker. Expiring a heartbeat or cleanup-upload grant is not proof of shutdown.
 The existing stopped acknowledgement or explicit stopped confirmation on retry,
 publication access changes, or automation rerun releases the covered uncertainty.
 
+A runner that cannot enumerate or stop its descendants reports explicit
+`cleanup_unconfirmed` evidence, even when the attempt has finished as failed.
+That evidence survives restart and reserves the global, repository and worker
+slots. Verify the old process and tools have stopped, then retry the current run
+with `previous_process_stopped: true`; retry without confirmation is rejected.
+Safely stopped failures and old history without this new evidence retain their
+existing retry behavior. No credential locks are cleared by confirmation.
+Connection checks use the same global and repository capacity and worker
+ownership rules as jobs; a worker's existing lease is replayed first.
+
 `GET /api/v1/status` adds `capacity` with the configured limits (zero means no
 configured cap), occupied slots by repository, connected factory-worker count,
 and `effective_capacity_upper_bound`. The upper bound is the lesser of the

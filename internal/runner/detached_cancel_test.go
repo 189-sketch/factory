@@ -105,7 +105,7 @@ func TestCancellationDoesNotConfirmFailedProcessEnumeration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	result, err := Execute(ctx, Options{Repository: ".", DataDirectory: t.TempDir(), Command: config.ResolvedCommand{Name: "scanner-failure", Command: []string{"/bin/sh", "-c", "/bin/sleep 60"}, Timeout: time.Minute}, Stdout: io.Discard, Stderr: io.Discard})
-	if err == nil || result.State != StateFailed || result.ProcessStopped {
+	if err == nil || result.State != StateFailed || result.ProcessStopped || !result.CleanupUnconfirmed {
 		t.Fatalf("false shutdown confirmation: %+v %v", result, err)
 	}
 }

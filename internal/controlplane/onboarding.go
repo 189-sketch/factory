@@ -751,6 +751,9 @@ func (o *onboarding) checkRemote(ctx context.Context, selection setupSelection) 
 	}
 }
 func (o *onboarding) claimHealth(p protocol.PollRequest) *protocol.RunSpec {
+	// The factory poll holds server.mu; health work consumes the same sandbox
+	// capacity as jobs. Compute usage before taking onboarding.mu.
+	usage := o.server.admissionUsage(context.Background())
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	h := o.health
@@ -762,6 +765,14 @@ func (o *onboarding) claimHealth(p protocol.PollRequest) *protocol.RunSpec {
 	}
 	if h.instance != "" && h.instance != p.InstanceID {
 		return nil
+	}
+	if usage.workers[p.Name] || (o.server.maxConcurrent > 0 && usage.total >= o.server.maxConcurrent) || usage.uncertainRepositories[h.spec.Repository] || (o.server.maxPerRepository > 0 && usage.repositories[h.spec.Repository] >= o.server.maxPerRepository) {
+		return nil
+	}
+	for id, worker := range o.server.liveWorkers() {
+		if id != p.InstanceID && worker.Name == p.Name && time.Since(worker.LastSeenAt) < workerAvailabilityWindow {
+			return nil
+		}
 	}
 	h.instance = p.InstanceID
 	o.server.liveMu.Lock()

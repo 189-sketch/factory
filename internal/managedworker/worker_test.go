@@ -585,3 +585,34 @@ func TestCancelledExecuteRetainsShutdownConfirmation(t *testing.T) {
 		t.Fatal("cancel did not finish")
 	}
 }
+
+func TestExecuteCarriesCleanupFailureEvidence(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repo")
+	if b, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	// Removing ps makes the actual runner's descendant enumeration fail.
+	t.Setenv("PATH", bin)
+	worker := &Worker{config: config.Worker{DataDirectory: directory, Executors: map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", "exec /bin/sleep 60"}}}, Repositories: map[string]config.Repository{"repo": {Path: repository}}}, instanceID: "worker", stdout: io.Discard, stderr: io.Discard}
+	completion := worker.execute(t.Context(), protocol.RunSpec{ID: "run_0123456789abcdef01234567", Command: "probe", Executor: "test", Repository: "repo", LeaseToken: "lease", TimeoutMillis: 300})
+	if completion.State != "failed" || completion.ProcessStopped || !completion.CleanupUnconfirmed {
+		t.Fatalf("lost cleanup failure: %+v", completion)
+	}
+	raw, err := json.Marshal(completion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded protocol.Completion
+	if err := json.Unmarshal(raw, &decoded); err != nil || !decoded.CleanupUnconfirmed {
+		t.Fatalf("lost wire evidence: %s %v", raw, err)
+	}
+}

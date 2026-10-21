@@ -34,6 +34,8 @@ type GitHubFactoryEvent struct {
 	Result         *protocol.StepResult `json:"result,omitempty"`
 	Feedback       string               `json:"feedback,omitempty"`
 	Stopped        bool                 `json:"stopped,omitempty"`
+
+	CleanupUnconfirmed bool `json:"cleanup_unconfirmed,omitempty"`
 }
 
 type GitHubFactoryState struct {
@@ -153,6 +155,15 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 		}
 		s.LastEventID = comment.ID
 		s.Job.UpdatedAt = comment.CreatedAt
+		// New cleanup evidence is explicit; omitted flags in old history retain
+		// their original meaning. Confirmation is scoped to this exact attempt.
+		if run.CleanupUnconfirmed && (event.Kind == "retry" || event.Kind == "request_changes" || event.Kind == "approve") {
+			if !event.Stopped {
+				return nil, fmt.Errorf("confirm previous process stopped before retry")
+			}
+			run.ProcessStopped = true
+			run.CleanupUnconfirmed = false
+		}
 		switch event.Kind {
 		case "dispatch_blocked":
 			if s.Job.State != "queued" {
@@ -195,6 +206,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 				return nil, fmt.Errorf("completed stage requires a report")
 			}
 			run.ProcessStopped = event.Stopped
+			run.CleanupUnconfirmed = event.CleanupUnconfirmed && !event.Stopped
 			run.Report = result.Factory.Report
 			run.GitHubURL = fmt.Sprintf("%s#issuecomment-%d", issue.HTMLURL, comment.ID)
 			run.CompletedAt = comment.CreatedAt
