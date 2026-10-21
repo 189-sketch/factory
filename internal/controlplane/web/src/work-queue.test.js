@@ -46,9 +46,9 @@ test("dashboard project control filters rendered queues and supports disconnecte
   const previous={window:global.window,document:global.document,IS_REACT_ACT_ENVIRONMENT:global.IS_REACT_ACT_ENVIRONMENT};
   Object.assign(global,{window:dom.window,document:dom.window.document,IS_REACT_ACT_ENVIRONMENT:true});
   const root=createRoot(document.getElementById("root"));context.after(async()=>{await act(()=>root.unmount());dom.window.close();Object.assign(global,previous);});
-  let starts=0;
+  let starts=0,lastProject;
   const jobs=[job("hold","awaiting_merge",{publication_hold:"private"}),job("other","running",{repository:"owner/two"})];
-  await act(()=>root.render(React.createElement(Dashboard,{jobs,repositories:["owner/one","empty"],connected:false,loaded:true,onNewRun:()=>starts++})));
+  await act(()=>root.render(React.createElement(Dashboard,{jobs,repositories:["owner/one","empty"],connected:false,loaded:true,onNewRun:project=>{starts++;lastProject=project;}})));
   assert.match(document.body.textContent,/GitHub is disconnected/);
   for(const title of ["Needs you","Working now","Ready to review","Recent outcomes"]) assert.ok(document.querySelector(`section[aria-label="${title}"]`));
   assert.equal(document.querySelectorAll('a[href="#/runs/hold"]').length,2);
@@ -60,7 +60,7 @@ test("dashboard project control filters rendered queues and supports disconnecte
   assert.ok(document.querySelector('a[href="#/runs/other"]'));
   await act(()=>{select.value="empty";select.dispatchEvent(new dom.window.Event("change",{bubbles:true}));});
   assert.match(document.body.textContent,/No work for this project/);
-  await act(()=>document.querySelector('button').click());assert.equal(starts,1);
+  await act(()=>document.querySelector('button').click());assert.equal(starts,1);assert.equal(lastProject,"empty");
 });
 
 test("queue rendering keeps reports out of rows and exposes loading and errors", async context => {

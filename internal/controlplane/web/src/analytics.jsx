@@ -13,7 +13,7 @@ export function Dashboard({ jobs = [], repositories = [], capacity, kubernetes, 
   const view = workQueueState({ jobs, repositories, project, loaded, error });
   return <div className="runs-page dashboard-page">
     <PageHeading title="Dashboard" description="Your daily work queue.">
-      <Button onClick={onNewRun}><Plus className="size-4" />New run</Button>
+      <Button onClick={() => onNewRun?.(repositories.includes(project) ? project : undefined)}><Plus className="size-4" />New run</Button>
     </PageHeading>
     <div className="queue-toolbar"><label>Project <select value={project} onChange={event => setProject(event.target.value)}>
       <option value="">All projects</option>
