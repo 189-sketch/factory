@@ -555,3 +555,11 @@ a { text-underline-offset: 3px; }
 }
 
 .queue-capacity { margin: -8px 0 20px; color: var(--muted-foreground); font-size: 12px; line-height: 1.6; }
+
+.project-list article.project-card { flex-wrap: wrap; }
+.project-work, .project-defaults { flex-basis: 100%; }
+.project-work { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.project-defaults { display: grid; gap: .75rem; padding-top: .75rem; border-top: 1px solid var(--border); }
+.project-defaults label { display: grid; gap: .35rem; }
+.project-defaults textarea { min-height: 5rem; }
+.project-defaults button { justify-self: start; }

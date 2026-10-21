@@ -3,7 +3,7 @@ import { ArrowUpRight, GitBranch, Plus, RefreshCw, X } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { PageHeading } from "./components/ui/page-heading";
 
-export function ProjectsPage({ status, onRefresh }) {
+export function ProjectsPage({ status, onRefresh, onStart }) {
   const [open, setOpen] = useState(false);
   const [available, setAvailable] = useState([]);
   const [repository, setRepository] = useState("");
@@ -82,7 +82,34 @@ export function ProjectsPage({ status, onRefresh }) {
     <div className="project-list">{repositories.length ? repositories.map(alias => {
       const name = status.repository_mappings?.[alias];
       const connected = status.workers?.some(worker => worker.connected && worker.repositories?.includes(alias));
-      return <article key={alias}><GitBranch className="size-4" /><div>{name ? <a href={`https://github.com/${name}`} target="_blank" rel="noreferrer">{name}<ArrowUpRight className="size-3" /></a> : <strong>{alias}</strong>}<small>{({ local: "Local", remote: "VM", kubernetes: "Kubernetes" }[host] || "Configured runner")}</small></div><span className={connected ? "project-connected" : "text-muted-foreground"}>{connected ? "Runner connected" : "Waiting for runner"}</span></article>;
+      const latest = (status.jobs || []).filter(job => job.repository === alias).sort((a,b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
+      return <article key={alias} className="project-card"><GitBranch className="size-4" /><div>{name ? <a href={`https://github.com/${name}`} target="_blank" rel="noreferrer">{name}<ArrowUpRight className="size-3" /></a> : <strong>{alias}</strong>}<small>{({ local: "Local", remote: "VM", kubernetes: "Kubernetes" }[host] || "Configured runner")}</small></div><span className={connected ? "project-connected" : "text-muted-foreground"}>{connected ? "Runner connected" : "Waiting for runner"}</span><div className="project-work">{latest ? <a href={`#/runs/${encodeURIComponent(latest.id)}`}>Latest: {latest.github_issue_title || latest.title || latest.id} · {latest.state}</a> : <span>No jobs yet</span>}<Button size="sm" onClick={() => onStart?.(alias)}>Start job</Button></div>{host && <ProjectDefaults key={alias} repository={alias} defaults={status.onboarding.project_defaults?.[alias]} host={host} csrfToken={status.csrf_token} onRefresh={onRefresh} />}</article>;
     }) : <p className="dashboard-empty">No projects connected. Complete setup to add your first repository.</p>}</div>
   </section>;
+}
+
+function ProjectDefaults({ repository, defaults, host, csrfToken, onRefresh }) {
+ const [recipe, setRecipe] = useState(defaults?.recipe || "");
+ const [instructions, setInstructions] = useState(defaults?.instructions || "");
+ const [saving, setSaving] = useState(false);
+ const [message, setMessage] = useState("");
+ async function save(event) {
+  event.preventDefault(); setSaving(true); setMessage("");
+  try {
+   const response = await fetch("/api/v1/projects/defaults", {method:"PUT",headers:{"Content-Type":"application/json","X-Machinist-CSRF":csrfToken},body:JSON.stringify({repository,recipe,instructions})});
+   const result = await response.json().catch(() => ({}));
+   if (!response.ok) throw new Error(result.error || "Could not save defaults");
+   setMessage("Defaults saved. Existing jobs are unchanged."); await onRefresh?.();
+  } catch (error) { setMessage(error.message); }
+  finally { setSaving(false); }
+ }
+ return <form className="project-defaults" aria-label={`Defaults for ${repository}`} onSubmit={save}>
+  <label><span>Default run mode</span><select className="field-control" value={recipe} disabled={saving} onChange={event => setRecipe(event.target.value)}>
+   <option value="">Use existing submission defaults</option><option value="native-v1" disabled={host === "kubernetes"}>Native agents</option><option value="factory">Legacy pipeline</option><option value="single">Single agent</option>
+  </select></label>
+  <label><span>Default instructions</span><textarea className="field-control" maxLength={2000} value={instructions} readOnly={saving} onChange={event => setInstructions(event.target.value)} /></label>
+  <p className="project-hint">Applies to new jobs. Each job can override these defaults. Agent and model use the shared configuration.</p>
+  <Button type="submit" size="sm" disabled={saving}>{saving ? "Saving…" : "Save defaults"}</Button>
+  {message && <p role="status">{message}</p>}
+ </form>;
 }
