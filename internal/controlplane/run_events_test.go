@@ -131,3 +131,82 @@ func TestNativeFeedbackRetainsPrimaryBeyondLegacyRepairLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestCancellationFinalEventsAreBoundedAndFenced(t *testing.T) {
+	client := newMemoryFactoryGitHub()
+	s := githubFactoryTestServer(t, client)
+	raw := factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"repository": "repo", "spec": "Test cancellation"}, 201)
+	var job map[string]string
+	_ = json.Unmarshal(raw, &job)
+	run := factoryPoll(t, s)
+	if run == nil {
+		t.Fatal("no assignment")
+	}
+	batch := protocol.RunEventBatch{InstanceID: "worker-instance", LeaseToken: run.LeaseToken, Events: []json.RawMessage{json.RawMessage(`{"sequence":1,"type":"run.started"}`)}}
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/events", batch, 200)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/cancel", map[string]string{"run_id": run.ID}, 200)
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/heartbeat", protocol.Heartbeat{InstanceID: "worker-instance", LeaseToken: run.LeaseToken}, 409)
+	batch.Events = []json.RawMessage{json.RawMessage(`{"sequence":2,"type":"agent.activity","message":"interrupted"}`), json.RawMessage(`{"sequence":3,"type":"run.completed","message":"state=cancelled"}`)}
+	bad := batch
+	bad.LeaseToken = "stale"
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/events", bad, 409)
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/events", batch, 200)
+	completion := protocol.Completion{InstanceID: "worker-instance", LeaseToken: run.LeaseToken, State: "succeeded", ExitCode: 0}
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 409)
+	completion.ProcessStopped = true
+	completion.State = "cancelled"
+	completion.ExitCode = 130
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/events", batch, 409)
+	current := factoryJob(t, s, job["id"])
+	if current.State != "cancelled" || current.Runs[0].CompletedAt.IsZero() {
+		t.Fatalf("cancel not acknowledged: %+v", current)
+	}
+	s = restartFactoryTestServer(t, s, client)
+	if current = factoryJob(t, s, job["id"]); current.State != "cancelled" || current.Runs[0].CompletedAt.IsZero() {
+		t.Fatal("lost stop acknowledgment on replay")
+	}
+	if !current.Runs[0].ProcessStopped {
+		t.Fatal("lost confirmed shutdown flag")
+	}
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/retry", map[string]string{"run_id": run.ID}, 200)
+	next := factoryPoll(t, s)
+	if next == nil {
+		t.Fatal("confirmed run could not retry")
+	}
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/cancel", map[string]string{"run_id": next.ID}, 200)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/retry", map[string]string{"run_id": next.ID}, 409)
+}
+func TestCancelledUploadGrantExpires(t *testing.T) {
+	local, e := openFactoryLocalStore(filepath.Join(t.TempDir(), "events.db"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer local.db.Close()
+	s := &GitHubFactoryServer{local: local, leases: map[string]*githubLease{"run": {instance: "worker", spec: protocol.RunSpec{LeaseToken: "token"}, last: time.Now()}}}
+	s.cancelLease("run")
+	s.cleanupLeases["run"].cleanupUntil = time.Now().Add(-time.Second)
+	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"instance_id":"worker","lease_token":"token","events":[]}`))
+	req.SetPathValue("id", "run")
+	out := httptest.NewRecorder()
+	s.ingestEvents(out, req)
+	if out.Code != 409 {
+		t.Fatal(out.Code)
+	}
+}
+
+func TestCancelAfterExecutionAcknowledgesStopWithoutApplyingResult(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	raw := factoryHTTP(t, s, "POST", "/api/v1/jobs", map[string]string{"repository": "repo", "spec": "Completion race"}, 201)
+	var job map[string]string
+	_ = json.Unmarshal(raw, &job)
+	run := factoryPoll(t, s)
+	factoryHTTP(t, s, "POST", "/api/v1/jobs/"+job["id"]+"/cancel", map[string]string{"run_id": run.ID}, 200)
+	completion := protocol.Completion{InstanceID: "worker-instance", LeaseToken: run.LeaseToken, State: "succeeded", ProcessStopped: true, ExitCode: 0, Result: json.RawMessage(`{"must_not":"be applied"}`)}
+	factoryHTTP(t, s, "POST", "/api/v1/runs/"+run.ID+"/complete", completion, 204)
+	current := factoryJob(t, s, job["id"])
+	if current.State != "cancelled" || current.Runs[0].CompletedAt.IsZero() || current.Runs[0].Report != "" {
+		t.Fatalf("cancelled outcome revived: %+v", current)
+	}
+}

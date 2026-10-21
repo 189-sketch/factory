@@ -56,6 +56,7 @@ type Options struct {
 }
 
 type Result struct {
+	ProcessStopped bool                 `json:"process_stopped"`
 	StepResult     *protocol.StepResult `json:"step_result,omitempty"`
 	ID             string               `json:"id"`
 	Command        string               `json:"command"`
@@ -93,6 +94,8 @@ type RuntimeError struct {
 
 func (err *RuntimeError) Error() string { return err.Cause.Error() }
 func (err *RuntimeError) Unwrap() error { return err.Cause }
+
+type processCleanupError struct{ error }
 
 type processWait struct {
 	state *os.ProcessState
@@ -142,15 +145,16 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	startedAt := time.Now().UTC()
 	result = Result{
-		ID:          runID,
-		Command:     options.Command.Name,
-		CommandHash: options.Command.Hash,
-		Definition:  options.Command.Definition,
-		Repository:  repository,
-		State:       StateFailed,
-		ExitCode:    1,
-		StartedAt:   startedAt,
-		EventsPath:  eventsPath,
+		ProcessStopped: true,
+		ID:             runID,
+		Command:        options.Command.Name,
+		CommandHash:    options.Command.Hash,
+		Definition:     options.Command.Definition,
+		Repository:     repository,
+		State:          StateFailed,
+		ExitCode:       1,
+		StartedAt:      startedAt,
+		EventsPath:     eventsPath,
 	}
 	if err := log.append("run.started", "", fmt.Sprintf("command=%s repository=%s", options.Command.Name, repository)); err != nil {
 		return result, &RuntimeError{Cause: err}
@@ -261,6 +265,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 			return completeFailure(&result, log, runDirectory, err)
 		}
 	}
+	processOwner, err := randomID("owner", 16)
+	if err != nil {
+		return completeFailure(&result, log, runDirectory, err)
+	}
+	command.Env = append(command.Env, "MACHINIST_PROCESS_OWNER="+processOwner)
 	configureProcess(command)
 
 	stdinReader, stdinWriter, err := os.Pipe()
@@ -289,10 +298,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		closeFiles(stdinReader, stdinWriter, stdoutReader, stdoutWriter, stderrReader, stderrWriter)
 		return completeFailure(&result, log, runDirectory, fmt.Errorf("start command %q: %w", executorCommand[0], err))
 	}
+	result.ProcessStopped = false
 	closeFiles(stdinReader, stdoutWriter, stderrWriter)
 	if err := log.append("process.started", "", fmt.Sprintf("pid=%d", command.Process.Pid)); err != nil {
 		_ = stdinWriter.Close()
-		_ = terminateProcessTree(command.Process)
+		_ = terminateProcessTree(command.Process, processOwner)
 		_, _ = command.Process.Wait()
 		closeFiles(stdoutReader, stderrReader)
 		return completeFailure(&result, log, runDirectory, err)
@@ -336,7 +346,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 
 	closeInput := func() { _ = stdinWriter.Close() }
 	closeStreams := func() { closeFiles(stdoutReader, stderrReader) }
-	state, exitCode, outcome := supervise(ctx, command.Process, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
+	state, exitCode, outcome := supervise(ctx, command.Process, processOwner, options.Command.Timeout, processResult, inputResult, streamErrors, streamsDone, closeInput, closeStreams, options.Stdout, options.Stderr, nativeOutput)
+	var cleanupFailure *processCleanupError
+	result.ProcessStopped = !errors.As(outcome, &cleanupFailure)
 	if nativeOutput != nil {
 		if err := nativeOutput.finish(state != StateSucceeded); err != nil && state == StateSucceeded {
 			state, exitCode, outcome = StateFailed, 1, err
@@ -419,7 +431,7 @@ func validArtifactKey(value string) bool {
 	return true
 }
 
-func supervise(ctx context.Context, process *os.Process, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {
+func supervise(ctx context.Context, process *os.Process, processOwner string, timeout time.Duration, processResult <-chan processWait, inputResult <-chan error, streamErrors <-chan error, streamsDone <-chan struct{}, closeInput, closeStreams func(), outputWriters ...io.Writer) (State, int, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	timeoutAt := time.Now().Add(timeout)
@@ -435,32 +447,34 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 				stop.BeforeProcessStop()
 			}
 		}
-		_ = terminateProcessTree(process)
+		cleanupErr := terminateProcessTree(process, processOwner)
 		closeInput()
 		closeStreams()
-		return <-processResult
+		waited := <-processResult
+		if cleanupErr != nil {
+			waited.err = errors.Join(waited.err, &processCleanupError{cleanupErr})
+		}
+		return waited
 	}
 
 	for {
 		select {
 		case waited := <-processResult:
-			killErr := terminateProcessTree(process)
+			killErr := terminateProcessTree(process, processOwner)
 			closeInput()
 			drainDeadline := earlierDeadline(timeoutAt, time.Now().Add(outputDrainGrace))
 			setOutputDeadline(drainDeadline, outputWriters...)
 			state, exitCode, outcome := processOutcome(waited)
-			if outcome == nil && killErr != nil {
-				state, exitCode, outcome = StateFailed, 1, fmt.Errorf("stop remaining command processes: %w", killErr)
+			if killErr != nil {
+				state, exitCode, outcome = StateFailed, 1, errors.Join(outcome, &processCleanupError{fmt.Errorf("stop remaining command processes: %w", killErr)})
 			}
 			inputErr = awaitInput(inputResult, inputDone, inputErr)
 			waitForStreams(streamsDone, closeStreams, time.Until(drainDeadline))
 			if outcome == nil && inputErr != nil {
 				state, exitCode, outcome = StateFailed, 1, inputErr
 			}
-			if outcome == nil {
-				if streamErr := receiveError(streamErrors); streamErr != nil {
-					state, exitCode, outcome = StateFailed, 1, streamErr
-				}
+			if streamErr := receiveError(streamErrors); streamErr != nil {
+				state, exitCode, outcome = StateFailed, 1, errors.Join(outcome, streamErr)
 			}
 			return state, exitCode, outcome
 		case err := <-inputResult:
@@ -475,16 +489,22 @@ func supervise(ctx context.Context, process *os.Process, timeout time.Duration, 
 			waited := abort()
 			inputErr = awaitInput(inputResult, inputDone, inputErr)
 			<-streamsDone
-			return operationFailure(waited, errors.Join(err, inputErr))
+			return StateFailed, 1, errors.Join(waited.err, err, inputErr)
 		case <-ctx.Done():
-			abort()
+			waited := abort()
 			_ = awaitInput(inputResult, inputDone, inputErr)
 			<-streamsDone
+			if waited.err != nil {
+				return StateFailed, 1, fmt.Errorf("cancel cleanup failed: %w", waited.err)
+			}
 			return StateCancelled, 130, errors.New("run cancelled")
 		case <-timer.C:
-			abort()
+			waited := abort()
 			_ = awaitInput(inputResult, inputDone, inputErr)
 			<-streamsDone
+			if waited.err != nil {
+				return StateFailed, 1, fmt.Errorf("timeout cleanup failed: %w", waited.err)
+			}
 			return StateTimedOut, 124, fmt.Errorf("command exceeded timeout %s", timeout)
 		}
 	}

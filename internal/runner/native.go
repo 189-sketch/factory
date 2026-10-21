@@ -17,28 +17,33 @@ import (
 // Activity is an observation owned by a primary run, never a schedulable job.
 type Activity struct {
 	NativeID        string `json:"native_id"`
+	Role            string `json:"role,omitempty"`
 	Name            string `json:"name,omitempty"`
 	Status          string `json:"status"`
+	Detail          string `json:"detail,omitempty"`
 	Summary         string `json:"summary,omitempty"`
 	ParentToolUseID string `json:"parent_tool_use_id,omitempty"`
 }
 
 type nativeStream struct {
-	mu        sync.Mutex
-	adapter   string
-	log       *eventLog
-	stdin     io.WriteCloser
-	buffer    []byte
-	dropping  bool
-	root      string
-	turn      string
-	model     string
-	cwd       string
-	prompt    string
-	final     string
-	completed bool
-	usage     *int64
-	active    map[string]Activity
+	mu              sync.Mutex
+	adapter         string
+	log             *eventLog
+	stdin           io.WriteCloser
+	buffer          []byte
+	dropping        bool
+	root            string
+	turn            string
+	model           string
+	cwd             string
+	prompt          string
+	final           string
+	completed       bool
+	usage           *int64
+	active          map[string]Activity
+	toolRoles       map[string]string
+	roleRequests    map[int]string
+	nextRoleRequest int
 }
 
 func nativeCommand(command config.ResolvedCommand) ([]string, error) {
@@ -129,10 +134,17 @@ func (n *nativeStream) observe(a Activity) error {
 	a.NativeID = truncateNative(a.NativeID, 512)
 	a.Name = truncateNative(a.Name, 2048)
 	a.Summary = truncateNative(a.Summary, 8<<10)
+	a.Detail = truncateNative(a.Detail, 2048)
 	a.ParentToolUseID = truncateNative(a.ParentToolUseID, 512)
 	a.Status = truncateNative(a.Status, 64)
 	previous := n.active[a.NativeID]
-	if a.Name == "" {
+	if a.Role == "" {
+		a.Role = previous.Role
+	}
+	a.Role = truncateNative(a.Role, 256)
+	if previous.Name != "" {
+		a.Name = previous.Name
+	} else if a.Name == "" {
 		a.Name = previous.Name
 	}
 	if a.ParentToolUseID == "" {
@@ -159,6 +171,14 @@ func (n *nativeStream) line(line []byte) error {
 			if id == "" {
 				id = str("agent_id")
 			}
+			if sub == "task_started" && str("task_type") != "local_agent" {
+				return nil
+			}
+			if sub != "task_started" {
+				if _, known := n.active[id]; !known {
+					return nil
+				}
+			}
 			status := "running"
 			if sub == "task_notification" {
 				status = str("status")
@@ -166,19 +186,45 @@ func (n *nativeStream) line(line []byte) error {
 					status = "unknown"
 				}
 			}
-			return n.observe(Activity{NativeID: id, Name: str("description"), Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
+			name, detail := str("description"), ""
+			if sub != "task_started" {
+				detail = name
+				name = ""
+			}
+			return n.observe(Activity{NativeID: id, Role: n.toolRoles[str("tool_use_id")], Name: name, Detail: detail, Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
 		}
 		if typ == "assistant" {
 			var message struct {
 				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type  string `json:"type"`
+					Text  string `json:"text"`
+					Name  string `json:"name"`
+					ID    string `json:"id"`
+					Input struct {
+						SubagentType string `json:"subagent_type"`
+					} `json:"input"`
 				} `json:"content"`
 			}
 			_ = json.Unmarshal(e["message"], &message)
 			for _, part := range message.Content {
+				if part.Type == "tool_use" && (part.Name == "Agent" || part.Name == "Task") && part.Input.SubagentType != "" {
+					if n.toolRoles == nil {
+						n.toolRoles = map[string]string{}
+					}
+					n.toolRoles[part.ID] = part.Input.SubagentType
+				}
 				if part.Type == "text" {
-					if err := n.message(part.Text, str("parent_tool_use_id"), str("parent_tool_use_id") == ""); err != nil {
+					parent := str("parent_tool_use_id")
+					id := str("agent_id")
+					if id == "" && parent != "" {
+						for key, a := range n.active {
+							if a.ParentToolUseID == parent {
+								id = key
+								break
+							}
+						}
+					}
+					if err := n.message(part.Text, id, parent == "" && str("agent_id") == ""); err != nil {
 						return err
 					}
 				}
@@ -225,6 +271,24 @@ func (n *nativeStream) line(line []byte) error {
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(line, &response); err != nil {
+		return nil
+	}
+	if id, ok := n.roleRequests[response.ID]; ok {
+		delete(n.roleRequests, response.ID)
+		if len(response.Error) > 0 && string(response.Error) != "null" {
+			return n.log.append("native.diagnostic", "", "Child role metadata unavailable")
+		}
+		var metadata struct {
+			Thread struct {
+				AgentRole string `json:"agentRole"`
+			} `json:"thread"`
+		}
+		if json.Unmarshal(response.Result, &metadata) == nil && metadata.Thread.AgentRole != "" {
+			if a, known := n.active[id]; known {
+				a.Role = metadata.Thread.AgentRole
+				return n.observe(a)
+			}
+		}
 		return nil
 	}
 	if len(response.Error) > 0 && string(response.Error) != "null" {
@@ -312,7 +376,7 @@ func (n *nativeStream) line(line []byte) error {
 		}
 	}
 	p := response.Params
-	if p.Item.Type == "subAgentActivity" {
+	if p.Item.Type == "subAgentActivity" && p.Item.AgentThreadID != n.root {
 		status := "unknown"
 		switch p.Item.Kind {
 		case "started":
@@ -324,9 +388,27 @@ func (n *nativeStream) line(line []byte) error {
 		case "interrupted":
 			status = "interrupted"
 		}
+		if status == "unknown" {
+			return nil
+		}
 		// item/completed is the end of a notification, not the child lifecycle.
 		if response.Method == "item/started" {
-			return n.observe(Activity{NativeID: p.Item.AgentThreadID, Name: p.Item.AgentPath, Status: status})
+			_, known := n.active[p.Item.AgentThreadID]
+			if err := n.observe(Activity{NativeID: p.Item.AgentThreadID, Name: p.Item.AgentPath, Status: status}); err != nil {
+				return err
+			}
+			if !known && status == "running" {
+				if n.roleRequests == nil {
+					n.roleRequests = map[int]string{}
+				}
+				if n.nextRoleRequest < 100 {
+					n.nextRoleRequest = 100
+				}
+				n.nextRoleRequest++
+				n.roleRequests[n.nextRoleRequest] = p.Item.AgentThreadID
+				return n.send(n.nextRoleRequest, "thread/read", map[string]any{"threadId": p.Item.AgentThreadID, "includeTurns": false})
+			}
+			return nil
 		}
 	}
 	if response.Method == "item/completed" && p.Item.Type == "agentMessage" {

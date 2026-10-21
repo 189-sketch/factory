@@ -190,6 +190,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if result.Outcome == "complete" && s.Role != "review" && strings.TrimSpace(result.Factory.Report) == "" {
 				return nil, fmt.Errorf("completed stage requires a report")
 			}
+			run.ProcessStopped = event.Stopped
 			run.Report = result.Factory.Report
 			run.GitHubURL = fmt.Sprintf("%s#issuecomment-%d", issue.HTMLURL, comment.ID)
 			run.CompletedAt = comment.CreatedAt
@@ -236,7 +237,7 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			if s.Job.State != "blocked" && s.Job.State != "failed" && s.Job.State != "interrupted" && s.Job.State != "cancelled" {
 				return nil, ErrWorkflowAction
 			}
-			if (s.Job.State == "interrupted" || s.Job.State == "cancelled") && !event.Stopped {
+			if (s.Job.State == "interrupted" || s.Job.State == "cancelled") && !event.Stopped && !run.ProcessStopped {
 				return nil, fmt.Errorf("confirm previous process stopped before retry")
 			}
 			s.Feedback = event.Feedback
@@ -262,6 +263,15 @@ func ReduceGitHubFactory(issue GitHubIssue, comments []GitHubComment, actor, rep
 			} else {
 				s.repair(issue.HTMLURL)
 			}
+		case "stopped":
+			if s.Job.State != "cancelled" || run.State != "cancelled" {
+				return nil, ErrWorkflowAction
+			}
+			run.ProcessStopped = true
+			run.CompletedAt = comment.CreatedAt
+			run.ExitCode, run.Error = event.ExitCode, event.Error
+			duration := max(int64(0), comment.CreatedAt.Sub(run.StartedAt).Milliseconds())
+			run.DurationMillis = &duration
 		case "cancel":
 			if s.Job.State == "succeeded" || s.Job.State == "cancelled" {
 				return nil, ErrWorkflowAction
@@ -430,4 +440,8 @@ func (s *GitHubFactoryState) complete(url string, result *protocol.StepResult, v
 		}
 	}
 	return nil
+}
+
+func lastRunStopped(job Job) bool {
+	return len(job.Runs) > 0 && job.Runs[len(job.Runs)-1].ProcessStopped
 }

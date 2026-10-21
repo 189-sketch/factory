@@ -109,9 +109,15 @@ func TestAgentCatalogMatchesSelectedHarnessAndRepository(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Agents) != 1 || result.Harness != "claude" || result.Agents[0].Model != "chosen-model" || result.Agents[0].Prompt != "Coordinate {{machinist.prompt}}" {
+	if len(result.Agents) != 1 || result.Harness != "claude" || result.Agents[0].Model != "" || result.Agents[0].Prompt != "Coordinate {{machinist.prompt}}" {
 		t.Fatalf("catalog: %s", raw)
 	}
+	o.settings.Selection.Agent = "codex"
+	command, commandErr := s.jobCommand(t.Context(), &githubTask{}, "primary")
+	if commandErr != nil || command.Model != "chosen-model" {
+		t.Fatalf("same provider lost model: %+v %v", command, commandErr)
+	}
+	o.settings.Selection.Agent = "claude"
 	factoryHTTP(t, s, "GET", "/api/v1/agents?repository=unregistered", nil, 400)
 	o.settings.Selection.Host = "remote"
 	raw = factoryHTTP(t, s, "GET", "/api/v1/agents", nil, 200)

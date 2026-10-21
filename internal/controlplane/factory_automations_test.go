@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -287,6 +288,48 @@ func TestAutomationRejectsMultilineCron(t *testing.T) {
 			}
 			if len(list) != 1 || list[0].Cron != "0 9 * * *" || list[0].Version != a.Version || !list[0].NextDue.Equal(*a.NextDue) {
 				t.Fatalf("rejected schedule changed saved automations: %+v", list)
+			}
+		})
+	}
+}
+
+func TestAutomationDefaultRequiresResolvablePrimary(t *testing.T) {
+	s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+	f, e := os.OpenFile(s.definitionPath, os.O_APPEND|os.O_WRONLY, 0600)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, _ = f.WriteString("\n[commands.primary]\nmodel='provider-model'\n")
+	_ = f.Close()
+	a := createAutomation(t, s, "")
+	if a.Recipe == "native-v1" {
+		t.Fatal("invalid primary selected native recipe")
+	}
+}
+func TestNativeAutomationRevalidatesAdmission(t *testing.T) {
+	for _, host := range []string{"kubernetes", "invalid-primary"} {
+		t.Run(host, func(t *testing.T) {
+			s := githubFactoryTestServer(t, newMemoryFactoryGitHub())
+			f, e := os.OpenFile(s.definitionPath, os.O_APPEND|os.O_WRONLY, 0600)
+			if e != nil {
+				t.Fatal(e)
+			}
+			_, _ = f.WriteString("\n[commands.primary]\nexecutor='codex'\ntimeout='1m'\n")
+			_ = f.Close()
+			a := createAutomation(t, s, "")
+			if a.Recipe != "native-v1" {
+				t.Fatal("missing native recipe")
+			}
+			if host == "kubernetes" {
+				s.setup = &onboarding{server: s, settings: setupSettings{Finished: true, Selection: setupSelection{Host: "kubernetes", Agent: "codex"}}}
+			} else {
+				body, _ := os.ReadFile(s.definitionPath)
+				body = []byte(strings.Replace(string(body), "[commands.primary]\nexecutor='codex'", "[commands.primary]\nexecutor=''", 1))
+				_ = os.WriteFile(s.definitionPath, body, 0600)
+			}
+			automationRun(t, s, a, "must-not-queue", 409)
+			if len(s.tasks) != 0 {
+				t.Fatal("unsupported automation created a stuck job")
 			}
 		})
 	}

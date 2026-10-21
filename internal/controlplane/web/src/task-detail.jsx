@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useId } from "react";
+import React, { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Artifacts, useTaskArtifacts } from "./artifacts.jsx";
-import { useRunEvents, ExecutionGraph, ActivityTimeline, PrimaryLog, EventDiagnostics, RunMarkdown } from "./native-activity.jsx";
+import { useRunEvents, ExecutionGraph, AgentReports, ActivityTimeline, PrimaryLog, EventDiagnostics, RunMarkdown } from "./native-activity.jsx";
 import { stageLabel } from "./stage-progress.jsx";
 import { taskPresentation } from "./task-presentation.js";
 import { jobDisplayTitle } from "./runs-board.js";
@@ -326,7 +326,9 @@ function NativeAttempt({ run, number }) {
 }
 
 function NativeTaskDetail({ job, error, onWorkflowAction }) {
-  const activityScope = useId();
+  const [view,setView]=useState("overview");
+ const [selectedAgent,setSelectedAgent]=useState(null);
+ useEffect(()=>{setView("overview");setSelectedAgent(null);},[job.id]);
   const latest = job.runs.at(-1);
   const data = useRunEvents(latest);
   const finished = !["running", "queued"].includes(job.state);
@@ -339,19 +341,21 @@ function NativeTaskDetail({ job, error, onWorkflowAction }) {
     </header>
     {error && <p role="alert" className="run-connection-error">{error}</p>}
     {job.github_sync_error && <p role="status" className="run-connection-error">{job.github_sync_error}</p>}
-    <Tabs key={job.id} label="Run sections" items={[
+    <Tabs key={job.id} label="Run sections" value={view} onValueChange={setView} items={[
       { id: "overview", label: "Overview", content: <>
         <section className="run-outcome" aria-label="Run outcome"><h2>{job.state === "succeeded" ? "Result" : job.state === "failed" ? "What went wrong" : job.state === "blocked" ? "Needs your input" : "Current status"}</h2>
+          {latest?.phase === "stopping" && <p role="status">Stopping agent processes and collecting final activity…</p>}
+          {latest?.phase === "stop_unconfirmed" && <p role="status">Cancellation was requested, but process shutdown could not be confirmed.</p>}
           {summary && <RunMarkdown>{summary}</RunMarkdown>}
           {job.state === "running" ? <RunActivity run={latest} /> : !summary && <p className="run-empty">{job.state === "queued" ? "Waiting for a runner to pick up this task." : "No result was reported."}</p>}
           {job.workflow?.factory?.pr_url && <a className="factory-spec-link" href={job.workflow.factory.pr_url} target="_blank" rel="noreferrer">Open pull request<ArrowRight size={16} aria-hidden="true" /></a>}
           <TaskActions key={`${job.id}:${latest?.id}:${job.state}:${job.hold_version || 0}`} job={job} result={latest} onAction={onWorkflowAction} />
         </section>
         {data.error && <p role="status" className="run-connection-error">{data.error} Showing the last received activity.</p>}
-        <ExecutionGraph activities={data.children} runState={latest?.state} idPrefix={activityScope} />
-        <ActivityTimeline loaded={data.loaded} runState={latest?.state} idPrefix={activityScope}>{data.children}</ActivityTimeline>
+        <ExecutionGraph activities={data.children} runState={latest?.state} loaded={data.loaded} onSelect={id=>{setSelectedAgent(id);setView("reports");}} />
         {finished && job.runs.length > 1 && <p className="run-history-note">This task took {job.runs.length} attempts. Earlier results are preserved in the Attempts tab.</p>}
       </> },
+      { id: "reports", label: "Agent reports", content: <AgentReports activities={data.children} selectedID={selectedAgent} onSelect={setSelectedAgent} /> },
       { id: "log", label: "Primary log", content: <PrimaryLog logs={data.logs} /> },
       ...(job.runs.length > 1 ? [{ id: "attempts", label: `Attempts (${job.runs.length})`, content: <section aria-label="Previous attempts"><h2 className="run-panel-title">Attempt history</h2><p className="run-section-description">Each retry keeps the earlier result and agent activity.</p>{[...job.runs].reverse().map((run, index) => <NativeAttempt key={run.id} run={run} number={job.runs.length - index} />)}</section> }] : []),
       { id: "details", label: "Details", content: <section className="run-details"><h2 className="run-panel-title">Execution details</h2>{latest && <ExecutionDetails run={latest} />}<h2 className="run-panel-title">Original request</h2><RunMarkdown>{job.task?.spec || job.prompt}</RunMarkdown>{job.task?.source_url && <a className="factory-spec-link" href={job.task.source_url} target="_blank" rel="noreferrer">Open source issue</a>}<EventDiagnostics events={data.events} /></section> },
@@ -487,7 +491,7 @@ function TaskActions({ job, result, onAction }) {
   const [releaseConfirmed, setReleaseConfirmed] = useState(false);
   const latest = job.runs.at(-1);
   const prURL = job.workflow?.factory?.pr_url || (result || latest)?.summary?.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/)?.[0];
-  const needsStopped = ["interrupted", "cancelled"].includes(job.state);
+  const needsStopped = ["interrupted", "cancelled"].includes(job.state) && !latest?.process_stopped;
   const retryable = ["blocked", "failed", "interrupted", "cancelled"].includes(job.state);
   const humanDecision = job.state === "blocked" && job.workflow?.factory?.verdict === "human_decision_needed";
   const canRequest = job.recipe !== "answer" && (job.state === "awaiting_merge" || humanDecision || (job.state === "awaiting_approval" && latest?.reviewed_run_id) || (["failed", "blocked"].includes(job.state) && latest?.command === "review" && prURL));
