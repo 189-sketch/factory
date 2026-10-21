@@ -37,7 +37,7 @@ export function automationOutcome(a, job) {
     const evidence = outcomeText(latest?.error) || summary || report;
     return { text: evidence ? `Failed: ${evidence}` : "Run failed. Open the run to inspect its logs before retrying.", link: runLink };
   }
-  const connectionCheck = /^pong[.!]?$/i.test(summary || report);
+  const connectionCheck = /^pong(?:[.!]?$|\s*[—–:]\s*|\s+-\s+)/i.test(summary || report);
   if (connectionCheck) return { text: "Connection check returned PONG; no recurring work delivered.", link: runLink };
   const text = summary || report || ({ succeeded: "Run completed; no outcome summary recorded.", cancelled: "Run cancelled.", blocked: "Run blocked. Open the run for details.", awaiting_approval: "Specification awaiting approval.", awaiting_merge: "PR awaiting merge." }[job.state] || "No outcome summary recorded.");
   const noChanges = /\bno (?:code )?changes\b|\bnothing to (?:change|update)\b/i.test(text);

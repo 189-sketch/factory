@@ -51,3 +51,9 @@ test("next run only uses valid server data for an enabled schedule", () => {
   assert.equal(automationNextRun(a), a.next_due);
   for (const patch of [{ cron: "" }, { paused: true }, { next_due: undefined }, { next_due: "invalid" }]) assert.equal(automationNextRun({ ...a, ...patch }), null);
 });
+
+test("recorded PONG directory probe is identified as a connection check", () => {
+ const result = automationOutcome({last_job:"probe"}, {id:"probe",state:"succeeded",runs:[{state:"succeeded",summary:"PONG — Actual directory: /source/repository. All requested checks passed."}]});
+ assert.match(result.text,/Connection check/);
+ assert.match(result.text,/no recurring work delivered/);
+});
