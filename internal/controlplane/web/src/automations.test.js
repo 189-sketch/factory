@@ -11,7 +11,7 @@ test("automations expose manual and scheduled jobs, progress and editor without 
   context.after(() => server.close());
   const { AutomationsPage, AutomationEditor, automationSchedule } = await server.ssrLoadModule("/src/automations.jsx");
   const a = { id:"a", name:"Bug review",repository:"repo",prompt:"Review bugs",cron:"0 9 * * 1-5",timezone:"Europe/London",version:1,paused:true,last_job:"job1" };
-  assert.equal(automationSchedule(a),"Weekdays at 09:00 · Europe/London · Paused");
+  assert.equal(automationSchedule(a),"Paused · Weekdays at 09:00 · Europe/London");
   assert.equal(automationSchedule({...a,cron:""}),"Manual only");
   const html = renderToStaticMarkup(React.createElement(AutomationsPage,{automations:[a],jobs:[{id:"job1",state:"awaiting_merge"}],repositories:["repo"],loaded:true}));
   assert.match(html,/Resume/); assert.match(html,/href="#\/runs\/job1"/); assert.match(html,/Run now/);
@@ -100,4 +100,23 @@ test("maintenance run details render the action report as readable Markdown", as
   assert.match(html, /aria-label="Maintenance report"/);
   assert.match(html, /href="https:\/\/github.com\/owner\/repo\/issues\/1"/);
   assert.match(html, /<strong>Merged after all policy checks passed\.<\/strong>/);
+});
+
+test("automation rows show latest evidence, holds and truthful schedule data inline", async context => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false }, appType: "custom" });
+  context.after(() => server.close());
+  const { AutomationsPage } = await server.ssrLoadModule("/src/automations.jsx");
+  const base = { id: "a", name: "Dependency review", repository: "owner/repo", cron: "0 9 * * *", timezone: "UTC", last_job: "latest", next_due: "2026-10-22T09:00:00Z" };
+  const job = { id: "latest", state: "failed", runs: [{ summary: "Old success" }, { error: '{"error":"Runner unavailable. Reconnect it and retry."}' }] };
+  const render = (a, j) => renderToStaticMarkup(React.createElement(AutomationsPage, { automations: [a], jobs: j ? [j] : [], repositories: ["owner/repo"], loaded: true }));
+  const html = render(base, job);
+  assert.match(html, /Failed: Runner unavailable. Reconnect it and retry./);
+  assert.match(html, /Scheduled · Daily/);
+  assert.match(html, /Next: <time dateTime="2026-10-22T09:00:00Z"/);
+  assert.doesNotMatch(html, /Old success|&quot;error&quot;|<details/);
+  for (const patch of [{ cron: "" }, { paused: true }, { next_due: "invalid" }, { next_due: undefined }]) assert.doesNotMatch(render({ ...base, ...patch }, job), /Next:/);
+  assert.match(render({ ...base, last_job: undefined, cron: "" }), /Manual only[\s\S]*Never run/);
+  const held = render({ ...base, last_error: "private scheduler evidence" }, { ...job, publication_hold: "private reason", workflow: { factory: { pr_url: "https://github.com/owner/repo/pull/2" } } });
+  assert.match(held, /Publication held private/);
+  assert.doesNotMatch(held, /Reconnect|private scheduler evidence|private reason|github.com/);
 });
