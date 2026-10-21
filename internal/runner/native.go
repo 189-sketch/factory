@@ -17,6 +17,7 @@ import (
 // Activity is an observation owned by a primary run, never a schedulable job.
 type Activity struct {
 	NativeID        string `json:"native_id"`
+	Role            string `json:"role,omitempty"`
 	Name            string `json:"name,omitempty"`
 	Status          string `json:"status"`
 	Detail          string `json:"detail,omitempty"`
@@ -25,21 +26,24 @@ type Activity struct {
 }
 
 type nativeStream struct {
-	mu        sync.Mutex
-	adapter   string
-	log       *eventLog
-	stdin     io.WriteCloser
-	buffer    []byte
-	dropping  bool
-	root      string
-	turn      string
-	model     string
-	cwd       string
-	prompt    string
-	final     string
-	completed bool
-	usage     *int64
-	active    map[string]Activity
+	mu              sync.Mutex
+	adapter         string
+	log             *eventLog
+	stdin           io.WriteCloser
+	buffer          []byte
+	dropping        bool
+	root            string
+	turn            string
+	model           string
+	cwd             string
+	prompt          string
+	final           string
+	completed       bool
+	usage           *int64
+	active          map[string]Activity
+	toolRoles       map[string]string
+	roleRequests    map[int]string
+	nextRoleRequest int
 }
 
 func nativeCommand(command config.ResolvedCommand) ([]string, error) {
@@ -134,6 +138,10 @@ func (n *nativeStream) observe(a Activity) error {
 	a.ParentToolUseID = truncateNative(a.ParentToolUseID, 512)
 	a.Status = truncateNative(a.Status, 64)
 	previous := n.active[a.NativeID]
+	if a.Role == "" {
+		a.Role = previous.Role
+	}
+	a.Role = truncateNative(a.Role, 256)
 	if previous.Name != "" {
 		a.Name = previous.Name
 	} else if a.Name == "" {
@@ -183,17 +191,28 @@ func (n *nativeStream) line(line []byte) error {
 				detail = name
 				name = ""
 			}
-			return n.observe(Activity{NativeID: id, Name: name, Detail: detail, Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
+			return n.observe(Activity{NativeID: id, Role: n.toolRoles[str("tool_use_id")], Name: name, Detail: detail, Status: status, Summary: str("summary"), ParentToolUseID: str("tool_use_id")})
 		}
 		if typ == "assistant" {
 			var message struct {
 				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type  string `json:"type"`
+					Text  string `json:"text"`
+					Name  string `json:"name"`
+					ID    string `json:"id"`
+					Input struct {
+						SubagentType string `json:"subagent_type"`
+					} `json:"input"`
 				} `json:"content"`
 			}
 			_ = json.Unmarshal(e["message"], &message)
 			for _, part := range message.Content {
+				if part.Type == "tool_use" && (part.Name == "Agent" || part.Name == "Task") && part.Input.SubagentType != "" {
+					if n.toolRoles == nil {
+						n.toolRoles = map[string]string{}
+					}
+					n.toolRoles[part.ID] = part.Input.SubagentType
+				}
 				if part.Type == "text" {
 					parent := str("parent_tool_use_id")
 					id := str("agent_id")
@@ -252,6 +271,24 @@ func (n *nativeStream) line(line []byte) error {
 		} `json:"params"`
 	}
 	if err := json.Unmarshal(line, &response); err != nil {
+		return nil
+	}
+	if id, ok := n.roleRequests[response.ID]; ok {
+		delete(n.roleRequests, response.ID)
+		if len(response.Error) > 0 && string(response.Error) != "null" {
+			return n.log.append("native.diagnostic", "", "Child role metadata unavailable")
+		}
+		var metadata struct {
+			Thread struct {
+				AgentRole string `json:"agentRole"`
+			} `json:"thread"`
+		}
+		if json.Unmarshal(response.Result, &metadata) == nil && metadata.Thread.AgentRole != "" {
+			if a, known := n.active[id]; known {
+				a.Role = metadata.Thread.AgentRole
+				return n.observe(a)
+			}
+		}
 		return nil
 	}
 	if len(response.Error) > 0 && string(response.Error) != "null" {
@@ -356,7 +393,22 @@ func (n *nativeStream) line(line []byte) error {
 		}
 		// item/completed is the end of a notification, not the child lifecycle.
 		if response.Method == "item/started" {
-			return n.observe(Activity{NativeID: p.Item.AgentThreadID, Name: p.Item.AgentPath, Status: status})
+			_, known := n.active[p.Item.AgentThreadID]
+			if err := n.observe(Activity{NativeID: p.Item.AgentThreadID, Name: p.Item.AgentPath, Status: status}); err != nil {
+				return err
+			}
+			if !known && status == "running" {
+				if n.roleRequests == nil {
+					n.roleRequests = map[int]string{}
+				}
+				if n.nextRoleRequest < 100 {
+					n.nextRoleRequest = 100
+				}
+				n.nextRoleRequest++
+				n.roleRequests[n.nextRoleRequest] = p.Item.AgentThreadID
+				return n.send(n.nextRoleRequest, "thread/read", map[string]any{"threadId": p.Item.AgentThreadID, "includeTurns": false})
+			}
+			return nil
 		}
 	}
 	if response.Method == "item/completed" && p.Item.Type == "agentMessage" {

@@ -17,6 +17,12 @@ Each run stores `native-input.json` locally, with the rendered primary prompt, a
 
 Workers send bounded, lease-authenticated event batches to `POST /api/v1/runs/{id}/events`. Sequence IDs are contiguous; identical replay is acknowledged, and conflicting payloads or stale leases are rejected. An acknowledged cursor is saved beside the worker spool. SQLite stores activity separately from the lifecycle journal. `GET /api/v1/runs/{id}/events?after=N` returns up to 128 events and the next cursor. The UI polls this API and displays connection loss with the last observations. Completion waits for pending event delivery. Timeout, cancellation, or a stale lease stops the owned process group and enumerated descendants, including tools in separate process groups. A failed descendant scan or kill is reported as cleanup failure rather than confirmed shutdown. Interrupted runs mark unfinished child observations interrupted; successful primary completion without a child completion signal leaves that child's status unknown.
 
+## Reading agent activity
+
+The run overview shows only the agents that were used, their reported roles, current status and a short excerpt from each agent's own report. Select an agent to open its full report in the separate **Agent reports** tab. The overview no longer repeats those reports in a feed. Repeated instances of the same role receive numbers, such as Reviewer 1 and Reviewer 2; these are observed agents, not required pipeline stages.
+
+Claude roles come from the selected `subagent_type` on native Agent/Task calls. Codex roles come from the child's `thread/read` metadata (`agentRole`), separately from its task name. If the harness did not record a role, the UI says so. Existing Claude roles can be recovered from retained raw calls; older Codex histories may retain only a name. The outcome preview is an excerpt, not a generated approval or success verdict. A completed reviewer may still have requested changes; its report remains the authority.
+
 The primary returns one JSON object:
 
 ```json

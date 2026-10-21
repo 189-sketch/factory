@@ -4,6 +4,7 @@ export function reduceActivity(events, runState) {
   const native = nativeIdentities(events);
   const children = new Map();
   const logs = [];
+ const reports=new Map();
   for (const event of events) {
     if (event.type === "agent.activity") {
       try {
@@ -12,30 +13,39 @@ export function reduceActivity(events, runState) {
         if (native.classified && !native.agents.has(activity.native_id)) continue;
         const definition = native.agents.get(activity.native_id);
         if (definition?.name) activity.name = definition.name;
+ if (definition?.role) activity.role=definition.role;
         const prior = children.get(activity.native_id);
         if (activity.status === "unknown" && prior) activity.status = prior.status;
         if (prior?.name) activity.name = prior.name;
+ if (!activity.role && prior?.role) activity.role=prior.role;
         children.set(activity.native_id, { ...prior, ...activity, started_at: prior?.started_at || event.time, updated_at: event.time });
       } catch { /* Raw event remains available in diagnostics. */ }
     }
     if (event.type === "agent.message") {
-      try { const message = JSON.parse(event.message); if (message.primary) logs.push(message.text); } catch { /* Ignore malformed display data. */ }
+      try { const message = JSON.parse(event.message); if (message.primary) logs.push(message.text); else if(message.native_id && message.text) reports.set(message.native_id,message.text); } catch { /* Ignore malformed display data. */ }
     }
   }
   const stopped = ["interrupted", "cancelled", "timed_out"].includes(runState);
-  return { children: [...children.values()].map(child => stopped && child.status === "running" ? { ...child, status: "interrupted" } : child), logs };
+  return { children: [...children.values()].map(child => { const report=native.reports.get(child.native_id) || child.summary || reports.get(child.native_id) || ""; return {...child,summary:report,status: stopped && child.status === "running" ? "interrupted" : child.status}; }), logs };
 }
 
 function nativeIdentities(events) {
-  const agents = new Map(), roots = new Set(), streams = new Map();
+  const agents = new Map(), roots = new Set(), streams = new Map(), toolRoles=new Map(), reports=new Map(), roles=new Map();
   let classified = false;
   const observe = value => {
+    for (const part of value.message?.content || []) {
+      if(part.type==="tool_use" && ["Agent","Task"].includes(part.name) && part.input?.subagent_type) toolRoles.set(part.id,part.input.subagent_type);
+    }
+    const metadata=value.result?.thread;
+    if(metadata?.agentRole) roles.set(metadata.id,metadata.agentRole);
     if (value.type === "system" && value.subtype === "task_started") {
       if (value.task_type) classified = true;
-      if (value.task_type === "local_agent") agents.set(value.task_id || value.agent_id, {name: value.description});
+      if (value.task_type === "local_agent") agents.set(value.task_id || value.agent_id, {name: value.description,tool:value.tool_use_id});
     }
+    if(value.type==="system" && value.subtype==="task_notification" && value.summary) reports.set(value.task_id || value.agent_id,value.summary);
     if (value.id === 4 && value.result?.thread?.id) roots.add(value.result.thread.id);
     const item = value.params?.item;
+    if(value.method==="item/completed" && item?.type==="agentMessage" && value.params?.threadId) reports.set(value.params.threadId,item.text);
     if (item?.type === "subAgentActivity") {
       classified = true;
       if (["started", "completed", "failed", "interrupted"].includes(item.kind)) {
@@ -61,7 +71,8 @@ function nativeIdentities(events) {
     } catch { /* Malformed raw output does not hide normalized activity. */ }
   }
   for (const state of streams.values()) { try { observe(JSON.parse(state.pending)); } catch { /* Partial live line. */ } }
-  return {agents, roots, classified};
+  for(const [id,agent] of agents) agent.role=roles.get(id) || toolRoles.get(agent.tool);
+ return {agents, roots, classified,reports};
 }
 
 export function pollRunActivity(run) {
@@ -69,4 +80,26 @@ export function pollRunActivity(run) {
   // A cancelled run may still be uploading its terminal events. Bound polling
   // for old histories that predate stop acknowledgments.
   return run?.state === "cancelled" && run?.phase === "stopping";
+}
+
+export function agentLabel(child) {
+  const reported = child.role || (child.name?.startsWith("/root/") ? child.name.split("/").at(-1) : "");
+  return reported ? reported.replace(/[_-]+/g," ").replace(/^./,char=>char.toUpperCase()) : "Subagent";
+}
+
+// This is a bounded excerpt of the agent's own report, not a generated verdict.
+export function agentOutcome(child) {
+  let text=child.summary || "";
+  try { const result=JSON.parse(text); if(typeof result.summary==="string") text=result.summary; } catch { /* Ordinary prose. */ }
+  text=text.replace(/<[^>]*>/g,"").replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/^[#>]+\s*/gm,"").replace(/[*`]/g,"").split(/\n\s*\n/).map(line=>line.trim()).find(Boolean) || "";
+  text=text.replace(/^[-•]\s*/,"").replace(/\s+/g," ").trim();
+  if(!text) return child.status==="running" ? "Working. No outcome yet." : "No outcome was reported.";
+  if(text.length<=150) return text;
+  const excerpt=text.slice(0,147);const boundary=excerpt.lastIndexOf(" ");return excerpt.slice(0,boundary>100?boundary:147)+"…";
+}
+
+export function agentInstanceLabels(activities) {
+  const totals=new Map(), seen=new Map();
+  for(const child of activities) {const label=agentLabel(child);totals.set(label,(totals.get(label)||0)+1);}
+  return new Map(activities.map(child=>{const label=agentLabel(child),number=(seen.get(label)||0)+1;seen.set(label,number);return [child.native_id,totals.get(label)>1 ? `${label} ${number}` : label];}));
 }

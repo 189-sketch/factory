@@ -1,8 +1,7 @@
 import React, { useEffect, useState, useId } from "react";
 import Markdown from "react-markdown";
 import { Check, Circle, CircleAlert, LoaderCircle } from "lucide-react";
-import { reduceActivity, pollRunActivity } from "./native-activity.js";
-import { formatDurationMillis } from "./run-metrics.js";
+import { reduceActivity, pollRunActivity, agentLabel, agentOutcome, agentInstanceLabels } from "./native-activity.js";
 
 export function useRunEvents(run) {
   const [snapshot, setSnapshot] = useState({ id: run?.id, events: [], error: "", loaded: false });
@@ -44,56 +43,50 @@ export function RunMarkdown({ children }) {
 }
 
 const statusLabels = { running: "Running", completed: "Completed", failed: "Failed", interrupted: "Interrupted", cancelled: "Cancelled", unknown: "Status unknown" };
-function activityDuration(child) {
-  const start = Date.parse(child.started_at);
-  const end = Date.parse(child.updated_at);
-  return Number.isFinite(start) && Number.isFinite(end) && end > start && child.status !== "running" ? formatDurationMillis(end - start) : null;
-}
-
-export function ExecutionGraph({ activities, runState, idPrefix }) {
+export function ExecutionGraph({ activities, runState, onSelect, loaded = true }) {
   const titleID = useId();
-  if (!activities.length) return null;
-  const width = Math.max(560, activities.length * 220);
-  const center = width / 2;
-  const primaryStatus = runState === "succeeded" ? "Completed" : runState === "running" ? "Running" : runState === "failed" ? "Failed" : "Stopped";
+ const labels=agentInstanceLabels(activities);
+  const primaryStatus = ["succeeded","awaiting_merge"].includes(runState) ? "Complete" : runState === "running" ? "Working" : runState === "failed" ? "Failed" : "Stopped";
   return <section className="execution-map" aria-labelledby={titleID}>
-    <div className="run-section-heading"><h2 id={titleID}>Execution map</h2><span>{activities.length} native subagents</span></div>
-    <p className="run-section-description">The primary agent delegated these tasks. Select an agent to read its report.</p>
-    <div className="execution-map-scroll" tabIndex={0} aria-label="Delegation graph, scroll horizontally to see all agents">
-      <div className="execution-map-canvas" style={{ width }}>
-        <svg viewBox={`0 0 ${width} 200`} className="execution-map-lines" aria-hidden="true">
-          <path d={`M ${center} 66 V 100`} />
-          {activities.map((child, i) => <path key={child.native_id} d={`M ${center} 100 H ${i * 220 + (width - activities.length * 220) / 2 + 110} V 132`} />)}
-        </svg>
-        <div className="execution-node execution-primary" style={{ left: center - 100 }}><strong>Primary agent</strong><span>{primaryStatus}</span></div>
-        {activities.map((child, i) => <a className={`execution-node execution-child run-status-${child.status}`} style={{ left: i * 220 + (width - activities.length * 220) / 2 + 10 }} key={child.native_id} href={`#${encodeURIComponent(`${idPrefix}-agent-${child.native_id}`)}`} onClick={event => { event.preventDefault(); const report = document.getElementById(`${idPrefix}-agent-${child.native_id}`); report?.scrollIntoView({ block: "center", behavior: "instant" }); report?.focus({ preventScroll: true }); }}><strong>{child.name || "Unnamed subagent"}</strong><span>{statusLabels[child.status] || "Status unknown"}{activityDuration(child) && ` · ${activityDuration(child)}`}</span></a>)}
-      </div>
-    </div>
-    <p className="execution-map-note">Connections show delegation, not a required order between tasks.</p>
+    <div className="run-section-heading"><h2 id={titleID}>Agents</h2><span>{activities.length} {activities.length === 1 ? "agent" : "agents"} used</span></div>
+    {!activities.length ? <p className="run-empty" role="status">{!loaded ? "Loading agent activity…" : runState === "running" ? "The primary agent is working. Delegated agents will appear here." : "No subagent activity was reported for this attempt."}</p> : <>
+      <div className="agent-map-primary"><strong>Primary agent</strong><span>{primaryStatus}</span></div>
+      <ul className="agent-map-children" aria-label="Delegated agents">{activities.map(child => <li key={child.native_id}>
+        <button type="button" className="agent-map-item" onClick={() => onSelect?.(child.native_id)} aria-label={`Read ${labels.get(child.native_id)} report`}>
+          <span className="agent-map-heading"><strong>{labels.get(child.native_id)}</strong><AgentStatus child={child} /></span>
+          <span className="agent-map-outcome">{agentOutcome(child)}</span>
+          {!child.role && <span className="agent-role-missing">{child.name?.startsWith("/root/") ? "Agent name recorded; role unavailable" : "Role not reported"}</span>}
+          <span className="agent-map-read">Read report</span>
+        </button>
+      </li>)}</ul>
+    </>}
   </section>;
 }
 
-export function ActivityTimeline({ children: activities, loaded = true, runState, idPrefix }) {
-  const generatedID = useId();
-  const scope = idPrefix || generatedID;
-  const completed = activities.filter(child => child.status === "completed").length;
-  const running = activities.filter(child => child.status === "running").length;
-  return <section className="run-agents" aria-label="Agent activity">
-    <div className="run-section-heading"><h2>Agent activity</h2>{activities.length > 0 && <span>{running ? `${running} running` : `${completed} of ${activities.length} completed`}</span>}</div>
-    <p className="run-section-description">Work delegated by the primary agent. Each entry is a separate native subagent.</p>
-    {!activities.length && <p className="run-empty" role="status">{!loaded ? "Loading agent activity…" : runState === "running" ? "The primary agent is working. Delegated tasks will appear here." : "No subagent activity was reported for this attempt."}</p>}
-    <ol className="run-timeline">{activities.map(child => {
-      const duration = activityDuration(child);
-      const Icon = child.status === "completed" ? Check : child.status === "running" ? LoaderCircle : ["failed", "interrupted"].includes(child.status) ? CircleAlert : Circle;
-      return <li key={child.native_id} id={`${scope}-agent-${child.native_id}`} tabIndex={-1} className="run-timeline-item">
-        <span className={`run-timeline-marker run-status-${child.status}`}><Icon size={15} aria-hidden="true" className={child.status === "running" ? "run-spinner" : ""} /></span>
-        <div className="run-agent-body"><div className="run-agent-heading"><h3>{child.name || "Unnamed subagent"}</h3><span className={`run-agent-status run-status-${child.status}`}>{statusLabels[child.status] || "Status unknown"}{duration && <span className="run-agent-duration"> · {duration}</span>}</span></div>
-          {child.summary ? <RunMarkdown>{child.summary}</RunMarkdown> : <p className="run-agent-pending">{child.status === "running" ? "Working. Its report will appear here." : "No report was returned."}</p>}
-        </div>
-      </li>;
-    })}</ol>
+function AgentStatus({ child }) {
+  const Icon=child.status==="completed" ? Check : child.status==="running" ? LoaderCircle : ["failed","interrupted"].includes(child.status) ? CircleAlert : Circle;
+  const labels={...statusLabels,running:"Working",completed:"Complete"};
+  return <span className={`agent-map-status run-status-${child.status}`}><Icon size={14} aria-hidden="true" className={child.status==="running" ? "run-spinner" : ""} />{labels[child.status] || "Status unknown"}</span>;
+}
+
+export function AgentReports({ activities, selectedID, onSelect }) {
+  const [localID,setLocalID]=useState(null);
+  const labels=agentInstanceLabels(activities);
+ const selected=activities.find(child=>child.native_id===(selectedID || localID)) || activities[0];
+  if(!selected) return <p className="run-empty">No agent reports are available for this attempt.</p>;
+  return <section aria-label="Agent reports" className="agent-reports">
+    <nav aria-label="Choose an agent report" className="agent-report-nav">{activities.map(child=><button type="button" key={child.native_id} aria-pressed={selected.native_id===child.native_id} onClick={()=>{setLocalID(child.native_id);onSelect?.(child.native_id);}}><span>{labels.get(child.native_id)}</span><AgentStatus child={child} /></button>)}</nav>
+    <article className="agent-report-panel" aria-label={`${labels.get(selected.native_id)} report`}>
+      <header className="run-section-heading"><h2>{labels.get(selected.native_id)}</h2><AgentStatus child={selected} /></header>
+      <p className="run-section-description">{selected.name && !selected.name.startsWith("/root/") ? selected.name : "Full agent report"}</p>
+      {!selected.role && <p className="agent-role-missing">The harness did not record this agent’s configured role.</p>}
+      {selected.summary ? <RunMarkdown>{selected.summary}</RunMarkdown> : <p className="run-empty">{selected.status==="running" ? "Working. Its report will appear here." : "No report was returned."}</p>}
+    </article>
   </section>;
 }
+
+// Historical attempts use the same single-report reader, without a report feed.
+export function ActivityTimeline({ children: activities }) { return <AgentReports activities={activities} />; }
 
 export function PrimaryLog({ logs }) {
   return <section className="run-log" aria-label="Primary agent messages"><h2>Primary log</h2><p className="run-section-description">Messages from the agent coordinating this attempt.</p>{logs.length ? <ol>{logs.map((text, index) => <li key={index}><RunMarkdown>{readableMessage(text)}</RunMarkdown></li>)}</ol> : <p className="run-empty">No primary messages were reported.</p>}</section>;

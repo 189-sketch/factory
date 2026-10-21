@@ -184,3 +184,28 @@ func TestCodexInteractionDoesNotCreateRootOrResetLifecycle(t *testing.T) {
 		t.Fatalf("bad interaction: %+v", n.active)
 	}
 }
+
+func TestNativeClaudeReportsConfiguredRole(t *testing.T) {
+	n, _, _ := testNative(t, "claude-stream")
+	feedNative(t, n, `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool","name":"Agent","input":{"subagent_type":"reviewer","description":"An arbitrary task name"}}]}}`+"\n")
+	feedNative(t, n, `{"type":"system","subtype":"task_started","task_id":"child","tool_use_id":"tool","task_type":"local_agent","description":"An arbitrary task name"}`+"\n")
+	if n.active["child"].Role != "reviewer" {
+		t.Fatalf("lost configured role: %+v", n.active)
+	}
+}
+func TestNativeCodexReadsRoleWithoutChangingLifecycle(t *testing.T) {
+	n, input, _ := testNative(t, "codex-app-server")
+	feedNative(t, n, `{"method":"item/started","params":{"item":{"type":"subAgentActivity","kind":"started","agentThreadId":"child","agentPath":"/root/arbitrary"}}}`+"\n")
+	if !strings.Contains(input.String(), `"method":"thread/read"`) {
+		t.Fatal("did not request role metadata")
+	}
+	feedNative(t, n, `{"id":101,"result":{"thread":{"id":"child","agentRole":"reviewer"}}}`+"\n")
+	if n.active["child"].Role != "reviewer" || n.active["child"].Status != "running" {
+		t.Fatalf("bad role update: %+v", n.active)
+	}
+	feedNative(t, n, `{"method":"item/started","params":{"item":{"type":"subAgentActivity","kind":"started","agentThreadId":"other","agentPath":"/root/other"}}}`+"\n")
+	feedNative(t, n, `{"id":102,"error":{"code":-1,"message":"metadata unavailable"}}`+"\n")
+	if n.active["other"].Role != "" {
+		t.Fatal("invented missing role")
+	}
+}
