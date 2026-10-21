@@ -1,0 +1,117 @@
+name: Deploy GKE
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+concurrency:
+  group: machinist-gke-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'owainlewis/machinist' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+    env:
+      PROJECT: machinist-prod
+      REGION: europe-west2
+      CLUSTER: machinist-runners
+      REGISTRY: europe-west2-docker.pkg.dev/machinist-prod/machinist
+      REVISION: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Require the current, successfully tested main commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$REVISION" =~ ^[a-f0-9]{40}$ ]]
+          current=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$REVISION" != "$current" ]; then
+            echo 'Skipping superseded main revision.'
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          passed=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$REVISION&event=push&status=success&per_page=100" --jq '.workflow_runs | length')
+          test "$passed" -gt 0
+          echo 'deploy=true' >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.gate.outputs.deploy == 'true'
+        with:
+          ref: ${{ env.REVISION }}
+          persist-credentials: false
+      - name: Build both release images before requesting credentials
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in control-plane runner; do
+            docker build --build-arg VERSION="$REVISION" --file "deploy/kubernetes/$image.Dockerfile" --tag "$REGISTRY/$image:$REVISION" .
+            test "$(docker run --rm --entrypoint machinist "$REGISTRY/$image:$REVISION" version)" = "$REVISION"
+          done
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        if: steps.gate.outputs.deploy == 'true'
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        if: steps.gate.outputs.deploy == 'true'
+      - name: Push and resolve immutable release images
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+          for image in control-plane runner; do
+            docker push "$REGISTRY/$image:$REVISION"
+            digest=$(gcloud artifacts docker images describe "$REGISTRY/$image:$REVISION" --project "$PROJECT" --format='value(image_summary.digest)')
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            if [ "$image" = control-plane ]; then
+              echo "CONTROL_PLANE_IMAGE=$REGISTRY/$image@$digest" >> "$GITHUB_ENV"
+            else
+              echo "RUNNER_IMAGE=$REGISTRY/$image@$digest" >> "$GITHUB_ENV"
+            fi
+          done
+      - uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3
+        if: steps.gate.outputs.deploy == 'true'
+        with:
+          cluster_name: ${{ env.CLUSTER }}
+          location: ${{ env.REGION }}
+          project_id: ${{ env.PROJECT }}
+      - name: Back up, deploy and verify
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$REVISION" != "$current" ]; then
+            echo 'Skipping superseded revision before changing production.'
+            exit 0
+          fi
+          python3 deploy/kubernetes/deploy.py \
+            --context "gke_${PROJECT}_${REGION}_${CLUSTER}" \
+            --control-plane "$CONTROL_PLANE_IMAGE" --runner "$RUNNER_IMAGE" \
+            --revision "$REVISION" --output /tmp/machinist-release.json
+          {
+            echo '### GKE deployment verified'
+            echo '```json'
+            cat /tmp/machinist-release.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

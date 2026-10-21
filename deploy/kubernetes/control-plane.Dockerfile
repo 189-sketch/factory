@@ -10,7 +10,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-
 FROM debian:bookworm-slim
 ARG TARGETARCH
 ARG KUBECTL_VERSION=v1.36.4
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git python3 procps \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
     && curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl.sha256" \
@@ -25,6 +25,7 @@ RUN cd /tmp \
     && install -m 0755 "gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh" /usr/local/bin/gh \
     && gh api --help | grep -q -- --slurp \
     && rm -rf gh_*
+RUN command -v ps >/dev/null && ps axeww -o pid=,command= >/dev/null
 COPY --from=build /machinist /usr/local/bin/machinist
 ENV HOME=/var/lib/machinist/home GIT_TERMINAL_PROMPT=0
 USER 1000:1000
